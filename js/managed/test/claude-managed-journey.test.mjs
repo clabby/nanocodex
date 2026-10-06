@@ -75,7 +75,7 @@ function sse(block, stop, id) {
 }
 test('Managed native Claude and mixed-family public delegation, account gates, cancellation and recovery', {timeout:240_000}, async () => {
   await mkdir(evidence,{recursive:true});
-  const trace = [], upstream = [], providerErrors = []; let calls=0, summaries=0, writes=0, taskWrites=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, catalogRequests=0, catalogHold, retainedTaskId, mf;
+  const trace = [], upstream = [], providerErrors = [], mediaRequests = []; let calls=0, summaries=0, writes=0, taskWrites=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, catalogRequests=0, catalogHold, retainedTaskId, mf;
   const mcpTrace = [], mcpOrigins = new Set(['https://developers.openai.com','https://mcp.tempo.xyz','https://mercator.sh','https://docs.mcp.cloudflare.com','https://viem.sh','https://vocs.dev']);
   let holdMcp = false, releaseMcp;
   let mcpHold = Promise.resolve();
@@ -293,6 +293,20 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
         assert.equal(decoded.agents[0].status.output,codexRoot?'CODEX_DURABLE_CHILD_PROOF':'CANONICAL_DURABLE_CHILD_PROOF');
         return sse({type:'text',text:'CLAUDE_TOOL_DONE_CANONICAL_CHILD'},'end_turn',`message-${calls}`);
       }
+      if (encodedHistory.includes('MULTIMODAL_PROOF')) {
+        mediaRequests.push({model:body.model,latest:body.messages.at(-1)});
+        // Stream real text deltas so the transcript identity check is not vacuous.
+        const id=`message-${calls}`, events=[
+          {type:'message_start',message:{id,role:'assistant',model:body.model,content:[],usage:{input_tokens:10,output_tokens:0}}},
+          {type:'content_block_start',index:0,content_block:{type:'text',text:''}},
+          {type:'content_block_delta',index:0,delta:{type:'text_delta',text:'CLAUDE_TOOL_DONE_'}},
+          {type:'content_block_delta',index:0,delta:{type:'text_delta',text:`MEDIA_${calls}`}},
+          {type:'content_block_stop',index:0},
+          {type:'message_delta',delta:{stop_reason:'end_turn',stop_sequence:null},usage:{output_tokens:2}},
+          {type:'message_stop'},
+        ];
+        return new Response(events.map(e=>`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});
+      }
       if(result) {
         assert.equal(result.is_error??false, result.tool_use_id.startsWith('denied-'), 'only adversarial unregistered calls fail');
         return sse({type:'text',text:`CLAUDE_TOOL_DONE_${calls}`},'end_turn',`message-${calls}`);
@@ -418,6 +432,53 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     await turn(agent,'Read durable proof','journey-read');
     await mf.dispose(); mf=new Miniflare(options);
     await turn(agent,'Run Bash durable proof','journey-bash');
+    {
+      // Attachments: images and inline PDFs reach Claude as native blocks.
+      const media=(await call('/v1/agents','POST',{settings:{model:'claude-opus-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201)).agent_id;
+      const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const pdf='data:application/pdf;base64,'+Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n').toString('base64');
+      await call(`/v1/agents/${media}/turns`,'POST',{input:[{type:'file',file_data:'data:application/zip;base64,UEsDBA==',filename:'x.zip'}],id:'journey-media-invalid'},400);
+      await turn(media,[{type:'text',text:'MULTIMODAL_PROOF describe both'},{type:'image',image_url:png},{type:'file',file_data:pdf,filename:'proof.pdf'}],'journey-media');
+      const sent=mediaRequests.at(-1).latest.content;
+      assert.equal(mediaRequests.at(-1).model,'claude-opus-4-6');
+      assert.ok(sent.some(block=>block.type==='text'&&block.text.includes('MULTIMODAL_PROOF')),JSON.stringify(sent).slice(0,2000));
+      const image=sent.find(block=>block.type==='image');
+      assert.deepEqual(image?.source,{type:'base64',media_type:'image/png',data:png.split(',')[1]});
+      const document=sent.find(block=>block.type==='document');
+      assert.deepEqual(document?.source,{type:'base64',media_type:'application/pdf',data:pdf.split(',')[1]});
+      assert.equal(document.title,'proof.pdf');
+      // Streamed deltas and the final message share one response identity, so
+      // transcript clients fold them into one row instead of rendering twice.
+      const mediaHistory=await call(`/v1/agents/${media}/events/history?after=0&limit=256`);
+      const assistantEvents=(mediaHistory.data??[]).map(row=>row.event).filter(event=>event?.type==='assistant.delta'||event?.type==='assistant.message');
+      const finals=assistantEvents.filter(event=>event.type==='assistant.message');
+      const deltas=assistantEvents.filter(event=>event.type==='assistant.delta');
+      assert.ok(finals.length>=1&&deltas.length>=2,JSON.stringify(assistantEvents).slice(0,2000));
+      assert.equal(deltas.map(event=>event.payload.text).join(''),finals.at(-1).payload.text,'streamed text equals the final message');
+      for(const event of assistantEvents.filter(event=>event.type==='assistant.delta')) {
+        assert.equal(typeof event.payload.item_id,'string','Claude deltas identify their provider message');
+        assert.ok(finals.some(final=>final.payload.item_id===event.payload.item_id&&final.payload.model_call_index===event.payload.model_call_index),'each delta folds into its final message');
+      }
+      // GPT Realtime voice fronts the Claude Opus thread: lifecycle and
+      // delegated transcripts reach Claude inline; stop retains the transcript.
+      const voice=crypto.randomUUID();
+      const started=await call(`/v1/agents/${media}/realtime/start`,'POST',{voice_session_id:voice,operation_id:'voice-start'});
+      assert.match(JSON.stringify(started.context.history),/MULTIMODAL_PROOF describe both/);
+      assert.match(JSON.stringify(started.context.history),/CLAUDE_TOOL_DONE_MEDIA_/);
+      const delegated=await call(`/v1/agents/${media}/realtime/delegate`,'POST',{voice_session_id:voice,operation_id:'voice-delegate',
+        input:'<realtime_delegation>\n  <input>MULTIMODAL_PROOF voice asks what the PDF was</input>\n</realtime_delegation>'},202);
+      assert.equal(delegated.route,'started',JSON.stringify(delegated));
+      for(let n=0;n<600;n++){const state=(await call(`/v1/agents/${media}/turns/${delegated.turn_id}`)).state;if(state==='completed')break;assert.ok(!['failed','cancelled'].includes(state),state);await new Promise(r=>setTimeout(r,40));}
+      const voiceTurn=JSON.stringify(mediaRequests.at(-1).latest.content);
+      assert.match(voiceTurn,/Realtime conversation started/);assert.match(voiceTurn,/voice asks what the PDF was/);
+      const stopped=await call(`/v1/agents/${media}/realtime/stop`,'POST',{voice_session_id:voice,operation_id:'voice-stop',transcript:[{role:'user',text:'VOICE_TRANSCRIPT_PROOF spoken only'}]});
+      assert.equal(stopped.stopped,true);
+      await turn(media,'MULTIMODAL_PROOF typed after voice','journey-media-after-voice');
+      const afterVoice=JSON.stringify(mediaRequests.at(-1).latest.content);
+      assert.match(afterVoice,/VOICE_TRANSCRIPT_PROOF spoken only/);assert.match(afterVoice,/Realtime conversation ended/);
+      assert.doesNotMatch(afterVoice,/Realtime conversation started/,'queued context is consumed exactly once');
+      trace.push({claude_media_voice:{blocks:sent.map(block=>block.type),voice_route:delegated.route,stopped:stopped.stopped}});
+    }
     const history=await call(`/v1/agents/${agent}/events/history?after=0&limit=256`);assert.match(JSON.stringify(history),/Write|Read|Bash/);
     await call(`/v1/agents/${agent}/durability`,'POST',undefined,409);
     await call(`/v1/agents/${agent}/forks`,'POST',undefined,409,{'idempotency-key':'claude-fork-denial'});
