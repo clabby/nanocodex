@@ -162,6 +162,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn claude_native_create_route_prompt_and_retained_reopen_journey() {
+    use nanocodex_agent::input::{Prompt, UserInput};
     use nanocodex_managed::{ManagedModel, RouteProvider};
     tokio::time::timeout(TEST_TIMEOUT, async {
         let api_key = format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
@@ -183,6 +184,7 @@ async fn claude_native_create_route_prompt_and_retained_reopen_journey() {
             .route("/v1/agents/{agent_id}/settings", patch(update_settings))
             .route("/v1/agents/{agent_id}/events", get(events))
             .route("/v1/agents/{agent_id}/turns", post(submit_turn))
+            .route("/v1/agents/{agent_id}/turns/{turn_id}/steer", post(steer_turn))
             .with_state(fixture.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -216,10 +218,35 @@ async fn claude_native_create_route_prompt_and_retained_reopen_journey() {
         assert_eq!(route.model, ManagedModel::ClaudeSonnet46);
         // Preserve the existing native Responses setter API; generic HTTP setter
         // can subsequently select a Claude model without coercing the identity.
+        let document = || Prompt::content([
+            UserInput::Text { text: "Read the attached document".into() },
+            UserInput::File { file_data: "data:application/pdf;base64,JVBERi0xLjQ=".into(), filename: Some("fixture.pdf".into()) },
+            UserInput::File { file_data: "data:text/plain;base64,aGVsbG8=".into(), filename: None },
+        ]);
+        let document_wire = json!([
+            {"type":"text","text":"Read the attached document"},
+            {"type":"file","file_data":"data:application/pdf;base64,JVBERi0xLjQ=","filename":"fixture.pdf"},
+            {"type":"file","file_data":"data:text/plain;base64,aGVsbG8="},
+        ]);
+        // Both native File fields survive the managed serde contract; no URL/path translation.
+        let decoded: PromptInput = serde_json::from_value(document_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), document_wire);
         agent.set_model(Model::Luna).await.unwrap();
+        let rejected = agent.prompt(document()).await;
+        assert!(matches!(rejected, Err(NanocodexError::UnsupportedCapability { capability: "document_input" })));
+        assert!(lock(&fixture.inner.submissions).is_empty(), "GPT document rejection must happen before transport");
         assert_eq!(client.set_model(AGENT_ID, ManagedModel::ClaudeSonnet46).await.unwrap().model, ManagedModel::ClaudeSonnet46);
         agent.set_thinking(Thinking::High).await.unwrap();
-        let turn = agent.prompt(PromptRequest::new("live prompt").request_id(ACTIVE_REQUEST_ID)).await.unwrap();
+        let turn = agent.prompt(PromptRequest::new(document()).request_id(ACTIVE_REQUEST_ID)).await.unwrap();
+        assert_eq!(lock(&fixture.inner.submissions).last().unwrap().body["input"], document_wire);
+        turn.steer(document()).await.unwrap();
+        turn.steer_with_id("document-correction".into(), document()).await.unwrap();
+        {
+            let actions = lock(&fixture.inner.actions);
+            assert_eq!(actions.len(), 2);
+            assert_eq!(actions[0].body, Some(json!({"input":document_wire})));
+            assert_eq!(actions[1].body, Some(json!({"input":document_wire,"message_id":"document-correction"})));
+        }
         fixture.send_event(accepted_event(45, ACTIVE_REQUEST_ID, "live prompt")).await;
         fixture.send_event(nested_event(46, ROOT_SOURCE_REQUEST_ID, None, "assistant.message", json!({"text":"Native Claude completed"}))).await;
         fixture.send_event(nested_event(47, ROOT_SOURCE_REQUEST_ID, None, "run.completed", json!({"status":"completed"}))).await;
@@ -231,8 +258,12 @@ async fn claude_native_create_route_prompt_and_retained_reopen_journey() {
         agent.disconnect().await.unwrap();
         let (reopened, _events) = Nanocodex::builder(Managed::open(client.clone(), AGENT_ID)).build().await.unwrap();
         assert_eq!(client.state(AGENT_ID).await.unwrap().settings.model, ManagedModel::ClaudeSonnet46);
+        let retained = reopened.prompt(PromptRequest::new(document()).request_id(RETAINED_REQUEST_ID)).await.unwrap();
+        assert_eq!(retained.result().await.unwrap().final_message(), "retained answer");
+        assert_eq!(lock(&fixture.inner.submissions).last().unwrap().body["input"], document_wire,
+            "opening retained Claude state must hydrate the document capability without a local settings write");
         reopened.disconnect().await.unwrap();
-        println!("JOURNEY Native Rust zero-config generic builder selects authoritative Claude-only default; 4 explicit Claude identities create/read; unsupported max/pro/fast blocked pretransport; Claude route hydrated; legacy OAI setter preserved; Claude selected via generic setter; prompt completed over HTTP+SSE; compact completed through common native handle with empty authenticated POST; retained agent reopened without an OAI fallback.");
+        println!("JOURNEY Native Rust zero-config generic builder selects authoritative Claude-only default; 4 explicit Claude identities create/read; unsupported max/pro/fast blocked pretransport; Claude route hydrated; legacy OAI setter preserved; Claude selected via generic setter; GPT File rejected pretransport after model change; inline PDF/named and plain-text/unnamed File round-trip and submit/steer/steer_with_id bodies verified; prompt completed over HTTP+SSE; compact completed through common native handle with empty authenticated POST; retained agent reopened without an OAI fallback.");
         server.abort();
     }).await.expect("native Claude lifecycle should remain bounded");
 }
@@ -520,11 +551,23 @@ async fn public_managed_lifecycle_threads_attachment_metadata() {
         let runtime_uuid =
             uuid::Uuid::parse_str(runtime_id).expect("runtime identity must be a UUID");
         assert_eq!(runtime_uuid.hyphenated().to_string(), runtime_id);
+        let connection_id = catalog["connection_id"]
+            .as_str()
+            .expect("catalog must identify this attachment connection");
+        let connection_uuid = uuid::Uuid::parse_str(connection_id)
+            .expect("attachment connection identity must be a UUID");
+        assert_eq!(connection_uuid.hyphenated().to_string(), connection_id);
+        assert_eq!(connection_uuid.get_version_num(), 4);
+        assert_eq!(connection_uuid.get_variant(), uuid::Variant::RFC4122);
+        assert_ne!(connection_id, runtime_id);
         assert_eq!(
             catalog,
             json!({
                 "type": "catalog",
                 "runtime_id": runtime_id,
+                "connection_id": connection_id,
+                "command_recovery": true,
+                "diagnostics": true,
                 "tools": [],
                 "attachment_id": "machine-public-1",
                 "capabilities": ["turn_metadata"],
@@ -636,6 +679,32 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             .expect("live prompt should be accepted");
         assert_eq!(turn.request_id(), Some(ACTIVE_REQUEST_ID));
         let control: TurnControl = turn.control();
+        let gpt_document = || {
+            nanocodex_agent::input::Prompt::content([nanocodex_agent::input::UserInput::File {
+                file_data: "data:application/pdf;base64,JVBERi0xLjQ=".into(),
+                filename: Some("fixture.pdf".into()),
+            }])
+        };
+        assert!(matches!(
+            control.steer(gpt_document()).await,
+            Err(NanocodexError::UnsupportedCapability {
+                capability: "document_input"
+            })
+        ));
+        assert!(matches!(
+            control
+                .steer_with_id("gpt-document-denied".into(), gpt_document())
+                .await,
+            Err(NanocodexError::UnsupportedCapability {
+                capability: "document_input"
+            })
+        ));
+        assert!(
+            lock(&fixture.inner.actions)
+                .iter()
+                .all(|action| action.kind != "steer"),
+            "GPT File steering must be rejected before transport"
+        );
         let steer_release = Arc::new(Notify::new());
         *lock(&fixture.inner.steer_release) = Some(steer_release.clone());
         let steering_control = control.clone();

@@ -20,8 +20,8 @@ use tokio::sync::{mpsc, watch};
 use tower::{Service, ServiceExt};
 
 use crate::{
-    EventCursor, ManagedError, ManagedEvent, ManagedEventData, ManagedEvents, PromptContent,
-    PromptInput, TurnState,
+    EventCursor, ManagedError, ManagedEvent, ManagedEventData, ManagedEvents, ManagedModel,
+    PromptContent, PromptInput, TurnState,
     builder::{ManagedRequest, ManagedResponse, backend_error, unexpected_response},
 };
 
@@ -341,6 +341,7 @@ struct PendingTurn {
 pub(crate) struct ManagedDriver<S> {
     service: S,
     agent_id: String,
+    model: ManagedModel,
     stream: ManagedEvents,
     commands: mpsc::Receiver<Command>,
     events: AgentEventPublisher,
@@ -371,6 +372,7 @@ where
     pub(crate) fn new(
         service: S,
         agent_id: String,
+        model: ManagedModel,
         stream: ManagedEvents,
         commands: mpsc::Receiver<Command>,
         events: AgentEventPublisher,
@@ -381,6 +383,7 @@ where
         Self {
             service,
             agent_id,
+            model,
             stream,
             commands,
             events,
@@ -432,7 +435,7 @@ where
                                 Ok(ManagedRequest::Steer {
                                     agent_id: self.agent_id.clone(),
                                     turn_id,
-                                    input: managed_prompt(prompt)?,
+                                    input: managed_prompt(prompt, self.model)?,
                                 })
                             });
                         self.dispatch_control(request, result).await;
@@ -448,7 +451,7 @@ where
                                     agent_id: self.agent_id.clone(),
                                     turn_id,
                                     message_id,
-                                    input: managed_prompt(prompt)?,
+                                    input: managed_prompt(prompt, self.model)?,
                                 })
                             });
                         self.dispatch_control(request, result).await;
@@ -615,7 +618,7 @@ where
         completion: tokio::sync::oneshot::Sender<nanocodex_agent::Result<TurnResult>>,
     ) -> nanocodex_agent::Result<String> {
         let cancel_on_admission = prompt.cancel_on_admission;
-        let input = managed_prompt(prompt.prompt)?;
+        let input = managed_prompt(prompt.prompt, self.model)?;
         let request_id = prompt
             .request_id
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
@@ -755,7 +758,10 @@ where
                     detail: "managed thinking update acknowledged incompatible settings",
                 })
             }
-            ManagedResponse::Settings(settings) if settings.thinking == thinking => Ok(()),
+            ManagedResponse::Settings(settings) if settings.thinking == thinking => {
+                self.model = settings.model;
+                Ok(())
+            }
             ManagedResponse::Settings(_) => Err(NanocodexError::BackendContract {
                 detail: "managed thinking update acknowledged a different setting",
             }),
@@ -776,7 +782,10 @@ where
                     detail: "managed model update acknowledged incompatible settings",
                 })
             }
-            ManagedResponse::Settings(settings) if settings.model == model => Ok(()),
+            ManagedResponse::Settings(settings) if settings.model == model => {
+                self.model = settings.model;
+                Ok(())
+            }
             ManagedResponse::Settings(_) => Err(NanocodexError::BackendContract {
                 detail: "managed model update acknowledged a different setting",
             }),
@@ -797,7 +806,10 @@ where
                     detail: "managed fast-mode update acknowledged incompatible settings",
                 })
             }
-            ManagedResponse::Settings(settings) if settings.fast_mode == enabled => Ok(()),
+            ManagedResponse::Settings(settings) if settings.fast_mode == enabled => {
+                self.model = settings.model;
+                Ok(())
+            }
             ManagedResponse::Settings(_) => Err(NanocodexError::BackendContract {
                 detail: "managed fast-mode update acknowledged a different setting",
             }),
@@ -970,7 +982,7 @@ fn unsupported<T>(capability: &'static str) -> BackendFuture<nanocodex_agent::Re
     Box::pin(async move { Err(NanocodexError::UnsupportedCapability { capability }) })
 }
 
-fn managed_prompt(prompt: Prompt) -> nanocodex_agent::Result<PromptInput> {
+fn managed_prompt(prompt: Prompt, model: ManagedModel) -> nanocodex_agent::Result<PromptInput> {
     if !prompt.transcript().is_empty() {
         return Err(NanocodexError::UnsupportedCapability {
             capability: "prompt_transcript",
@@ -996,6 +1008,13 @@ fn managed_prompt(prompt: Prompt) -> nanocodex_agent::Result<PromptInput> {
                         capability: "local_media",
                     })
                 }
+                UserInput::File {
+                    file_data,
+                    filename,
+                } if model.oai().is_none() => Ok(PromptContent::File {
+                    file_data,
+                    filename,
+                }),
                 UserInput::File { .. } => Err(NanocodexError::UnsupportedCapability {
                     capability: "document_input",
                 }),
@@ -1087,7 +1106,7 @@ mod image_file_driver_tests {
             file_id: "file-driver_123".into(),
             detail: Some(nanocodex_oai_api::ImageDetail::Original),
         }]);
-        let output = managed_prompt(prompt).unwrap();
+        let output = managed_prompt(prompt, Model::Luna.into()).unwrap();
         assert_eq!(
             serde_json::to_value(output).unwrap(),
             serde_json::json!([{"type":"image","file_id":"file-driver_123","detail":"original"}])

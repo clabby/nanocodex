@@ -739,6 +739,7 @@ impl<S> ManagedBuilder<S> {
         let driver = ManagedDriver::new(
             self.managed.service,
             agent_id,
+            state.settings.model,
             stream,
             commands,
             runtime.events(),

@@ -61,7 +61,7 @@ async function bundle(source, cwd, name) {
   await writeFile(path,prelude+code);
   return [{type:'ESModule',path},...Array.from(wasm,path=>({type:'CompiledWasm',path}))];
 }
-function sse(block, stop, id) {
+function sse(block, stop, id, newline = "\n", terminal = true) {
   const tool = block.type === 'tool_use';
   const events = [
     {type:'message_start',message:{id,role:'assistant',model:'claude-sonnet-4-6',content:[],usage:{input_tokens:10,output_tokens:0}}},
@@ -71,11 +71,13 @@ function sse(block, stop, id) {
     {type:'message_delta',delta:{stop_reason:stop,stop_sequence:null},usage:{output_tokens:2}},
     {type:'message_stop'},
   ];
-  return new Response(events.map(e=>`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});
+  return new Response(events.filter(e=>terminal || e.type!=='message_stop').map(e=>`event: ${e.type}${newline}data: ${JSON.stringify(e)}${newline}${newline}`).join(''),{headers:{'content-type':'text/event-stream'}});
 }
 test('Managed native Claude and mixed-family public delegation, account gates, cancellation and recovery', {timeout:240_000}, async () => {
   await mkdir(evidence,{recursive:true});
   const trace = [], upstream = [], providerErrors = [], mediaRequests = []; let calls=0, summaries=0, writes=0, taskWrites=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, catalogRequests=0, catalogHold, retainedTaskId, mf;
+  const framingRequests = {crOnly:0,truncated:0}, activeSteerRequests = [];
+  let releaseActiveSteer;
   const mcpTrace = [], mcpOrigins = new Set(['https://developers.openai.com','https://mcp.tempo.xyz','https://mercator.sh','https://docs.mcp.cloudflare.com','https://viem.sh','https://vocs.dev']);
   let holdMcp = false, releaseMcp;
   let mcpHold = Promise.resolve();
@@ -232,6 +234,26 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
         prior_proof_present:JSON.stringify(body.messages).includes('NATIVE_CLAUDE_DURABLE_PROOF'),summary_present:JSON.stringify(body.messages).includes('NATIVE_SUMMARY'),effort:body.output_config.effort});
       const latest=body.messages.at(-1), result=Array.isArray(latest.content)&&latest.content.find(b=>b.type==='tool_result');
       const encodedHistory = JSON.stringify(body.messages);
+      if (encodedHistory.includes('MANAGED_FRAME_CR_ONLY')) {
+        framingRequests.crOnly++;
+        return sse({type:'text',text:'CLAUDE_TOOL_DONE_CR_ONLY'},'end_turn',`message-${calls}`,'\r');
+      }
+      if (encodedHistory.includes('MANAGED_FRAME_TRUNCATED')) {
+        framingRequests.truncated++;
+        return sse({type:'text',text:'MUST_NOT_COMPLETE_TRUNCATED'},'end_turn',`message-${calls}`,'\r',false);
+      }
+      if (encodedHistory.includes('MANAGED_ACTIVE_STEER')) {
+        activeSteerRequests.push(body.messages);
+        if (activeSteerRequests.length === 1) {
+          await new Promise(resolve=>{releaseActiveSteer=resolve;});
+          return sse({type:'text',text:'Initial answer before queued steer'},'end_turn',`message-${calls}`);
+        }
+        assert.equal(activeSteerRequests.length,2,'steering must not replay the initial model request');
+        const text=JSON.stringify(body.messages);
+        assert.ok(text.includes('first managed steering correction') && text.includes('second managed é correction'),text);
+        assert.ok(text.indexOf('first managed steering correction') < text.indexOf('second managed é correction'),'queued steering preserves order');
+        return sse({type:'text',text:'CLAUDE_TOOL_DONE_ACTIVE_STEER'},'end_turn',`message-${calls}`);
+      }
       const canonicalTask = encodedHistory.includes('CANONICAL_CHILD_PROOF');
       const codexRoot = encodedHistory.includes('Delegate canonical Codex child');
       const canonicalRoot = encodedHistory.includes('Delegate canonical Claude child') || codexRoot;
@@ -366,7 +388,7 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       : path.includes('/events/history') ? {event_count:value?.data?.length,has_more:value?.has_more,latest_cursor:value?.latest_cursor,
           tools:[...new Set((value?.data??[]).map(row=>row.event?.payload?.tool).filter(Boolean))],child_event_count:(value?.data??[]).filter(row=>row.agent_id!==undefined&&row.event).length}
       : path.includes('/turns') ? {state:value?.state,turn_id:value?.turn_id,receipt_present:true} : value;
-    trace.push({method,path,status:response.status,value:artifactValue});assert.equal(response.status,status,JSON.stringify(artifactValue));return value;
+    trace.push({method,path,status:response.status,value:artifactValue});assert.equal(response.status,status,JSON.stringify({...artifactValue,error:value?.error,message:value?.message}));return value;
   };
   const turn=async(agent,input,id,expected='completed')=>{
     const receipt=await call(`/v1/agents/${agent}/turns`,'POST',{input,id},202);
@@ -551,6 +573,70 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     await turn(childAgent,'Read retained task receipt','journey-task-receipt');assert.equal(taskWrites,1,'completed child not replayed after restart');
     await turn(agent,'Run Bash durable proof after cancellation','journey-after-cancel');assert.equal(holds,1,'cancelled request not replayed');
 
+    {
+      // HTTP + GPT Realtime delegation both steer one active Rust/WASM Claude turn.
+      const steered=(await call('/v1/agents','POST',{settings:{model:'claude-sonnet-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201)).agent_id;
+      const activeVoice=crypto.randomUUID();
+      await call(`/v1/agents/${steered}/realtime/start`,'POST',{voice_session_id:activeVoice,operation_id:'active-voice-start'});
+      await call(`/v1/agents/${steered}/turns`,'POST',{input:'MANAGED_ACTIVE_STEER wait for both corrections',id:'journey-active-steer'},202);
+      for(let n=0;n<150&&!releaseActiveSteer;n++)await new Promise(r=>setTimeout(r,40));
+      assert.equal(typeof releaseActiveSteer,'function','model request started and is held at the terminal boundary');
+      const first='first managed steering correction', second='<realtime_delegation>\n<input>second managed é correction</input>\n</realtime_delegation>';
+      const unsupportedId=await call(`/v1/agents/${steered}/turns/journey-active-steer/steer`,'POST',{input:'identified correction must not be admitted',message_id:'unsupported-steer-id'},400);
+      assert.equal(unsupportedId.error,'invalid_request');
+      assert.match(unsupportedId.message,/identified steering is not supported by this backend/);
+      const unsupportedWithdrawal=await call(`/v1/agents/${steered}/turns/journey-active-steer/withdraw-steer`,'POST',{message_id:'unsupported-steer-id'},400);
+      assert.equal(unsupportedWithdrawal.error,'invalid_request');
+      assert.match(unsupportedWithdrawal.message,/steer withdrawal is not supported by this backend/);
+      await call(`/v1/agents/${steered}/turns/journey-active-steer/steer`,'POST',{input:first},202);
+      const delegated=await call(`/v1/agents/${steered}/realtime/delegate`,'POST',{
+        voice_session_id:activeVoice,operation_id:'active-voice-delegate',input:second},202);
+      assert.equal(delegated.route,'steered',JSON.stringify(delegated));
+      assert.equal(delegated.turn_id,'journey-active-steer','voice attribution stays on the existing active turn');
+      const queued=await call(`/v1/agents/${steered}/events/history?after=0&limit=256`);
+      assert.equal(queued.data.filter(row=>row.event?.type==='run.steered').length,0,'admission is not consumption');
+      assert.equal(activeSteerRequests.length,1,'queued steering cannot start concurrent model inference');
+      releaseActiveSteer();
+      let result;for(let n=0;n<600;n++) {
+        result=await call(`/v1/agents/${steered}/turns/journey-active-steer`);
+        if(['completed','failed','cancelled'].includes(result.state))break;
+        await new Promise(r=>setTimeout(r,40));
+      }
+      assert.equal(result.state,'completed',JSON.stringify(result));
+      assert.match(JSON.stringify(result),/CLAUDE_TOOL_DONE_ACTIVE_STEER/);
+      const consumed=await call(`/v1/agents/${steered}/events/history?after=0&limit=256`);
+      const acknowledgements=consumed.data.filter(row=>row.event?.type==='run.steered');
+      assert.deepEqual(acknowledgements.map(row=>row.event.payload.steer_index),[1,2]);
+      assert.deepEqual(acknowledgements.map(row=>row.event.payload.instruction_bytes),[Buffer.byteLength(first),Buffer.byteLength(second)]);
+      assert.equal(activeSteerRequests.length,2,'one initial request and one ordered continuation');
+      const terminalIndex=consumed.data.findIndex(row=>row.event?.type==='run.completed');
+      assert.ok(terminalIndex>=0 && acknowledgements.every(row=>consumed.data.indexOf(row)<terminalIndex),'consumption precedes terminal completion');
+      const stopped=await call(`/v1/agents/${steered}/realtime/stop`,'POST',{
+        voice_session_id:activeVoice,operation_id:'active-voice-stop',transcript:[{role:'user',text:'ACTIVE_VOICE_TRANSCRIPT_PROOF'}]});
+      assert.equal(stopped.stopped,true);
+      assert.match(JSON.stringify(activeSteerRequests[0]),/Realtime conversation started/);
+      trace.push({scenario:'active Claude steering',requests:activeSteerRequests.length,steer_indices:[1,2],ordered:true,voice_route:delegated.route,voice_stopped:stopped.stopped,identified_steering_denied:400,withdrawal_denied:400});
+
+      // CR-only SSE frames are valid; EOF without message_stop is not completion.
+      const frames=[];
+      for(const [marker,id,expected] of [['MANAGED_FRAME_CR_ONLY','journey-frame-cr','completed'],['MANAGED_FRAME_TRUNCATED','journey-frame-truncated','failed']]) {
+        const framed=(await call('/v1/agents','POST',{settings:{model:'claude-sonnet-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201)).agent_id;
+        const result=await turn(framed,marker,id,expected);
+        if(expected==='failed')assert.match(JSON.stringify(result),/Messages stream ended before message_stop/);
+        const events=await call(`/v1/agents/${framed}/events/history?after=0&limit=256`);
+        assert.equal(events.data.filter(row=>row.event?.type==='run.completed').length,expected==='completed'?1:0,'truncated stream cannot publish successful terminal');
+        frames.push({agent:framed,id,expected,input:marker});
+      }
+      assert.deepEqual(framingRequests,{crOnly:1,truncated:1},'neither stream framing path auto-retries inference');
+      await mf.dispose();mf=new Miniflare(options);
+      for(const {agent,id,expected,input} of frames) {
+        assert.equal((await call(`/v1/agents/${agent}/turns/${id}`)).state,expected);
+        await call(`/v1/agents/${agent}/turns`,'POST',{input,id},200);
+      }
+      assert.deepEqual(framingRequests,{crOnly:1,truncated:1},'retained failure and completion survive restart without replay');
+      trace.push({scenario:'managed WASM SSE framing',...framingRequests,crOnly:'completed',missingMessageStop:'failed',automaticRetries:0,restartReplay:false});
+    }
+
     const beforeDeniedMcp=mcpStarts(), ownerMcpToken=token;
     token=(await call('/__fixture','POST',{user:identity,capabilities:['agents:read','agents:write']})).token;
     await call(`/v1/agents/${agent}/turns`,'POST',{input:'MCP_LAZY_SEARCH denied',id:'journey-mcp-denied'},403);
@@ -661,13 +747,15 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     assert.ok((await call('/v1/models')).data.some(row=>row.id==='claude-sonnet-4-6'));
     const validationTrace=await (await claudeProvider(new Request('https://claude-fixture.invalid/trace?scenario=profile-uncertain'))).json();assert.equal(validationTrace.exchange,1);assert.equal(validationTrace.profile,2);
     assert.deepEqual(providerErrors,[],"all provider fixtures matched the real public journeys");
-    console.info('CLAUDE_MANAGED_JOURNEY',{calls,summaries,writes,taskWrites,canonicalWrites,codexWrites,nestedWrites,sidebarCalls,holds,responsesAttempts,DOReopens:4,nativeTools:['Write','Read','Bash'],actualModels:catalog.data.map(m=>m.id),staleSelectionDenied:true,gatewayOnlyDefault:gatewayOnly.default_model,unsupportedOnlyAvailable:unsupportedOnly.availability.claude.available,exactToolAllowlist:true,uninstalledCapabilityDeniedBeforeInference:true});
+    console.info('CLAUDE_MANAGED_JOURNEY',{calls,summaries,writes,taskWrites,canonicalWrites,codexWrites,nestedWrites,sidebarCalls,holds,responsesAttempts,DOReopens:5,framingRequests,activeSteerRequests:activeSteerRequests.length,nativeTools:['Write','Read','Bash'],actualModels:catalog.data.map(m=>m.id),staleSelectionDenied:true,gatewayOnlyDefault:gatewayOnly.default_model,unsupportedOnlyAvailable:unsupportedOnly.availability.claude.available,exactToolAllowlist:true,uninstalledCapabilityDeniedBeforeInference:true});
   } finally {
+    releaseActiveSteer?.();
     await mf?.dispose();
     await writeFile(resolve(evidence,'public-api-trace.json'),JSON.stringify(trace,null,2));
     await writeFile(resolve(evidence,'provider-trace.json'),JSON.stringify(upstream,null,2));
     await writeFile(resolve(evidence,'provider-errors.json'),JSON.stringify(providerErrors,null,2));
     await writeFile(resolve(evidence,'mcp-trace.json'),JSON.stringify(mcpTrace,null,2));
+    await writeFile(resolve(evidence,'steer-framing-trace.json'),JSON.stringify({activeSteerRequests,framingRequests},null,2));
     await rm(persistence,{recursive:true,force:true});
   }
 });

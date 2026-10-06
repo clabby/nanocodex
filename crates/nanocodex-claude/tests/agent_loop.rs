@@ -2027,3 +2027,124 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
     agent.shutdown().await.unwrap();
     server.abort();
 }
+
+#[tokio::test]
+async fn truncated_complete_tool_block_is_never_dispatched_or_finalized() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let received = requests.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let received = received.clone();
+            async move {
+                let call = {
+                    let mut log = received.lock().unwrap();
+                    log.push(body);
+                    log.len()
+                };
+                let response = if call == 1 {
+                    let complete = stream(
+                        vec![
+                            json!({"type":"text","text":"partial progress"}),
+                            json!({"type":"tool_use","id":"unsafe","name":"mutate","input":{}}),
+                        ],
+                        "tool_use",
+                    );
+                    complete[..complete.rfind("data: {\"type\":\"message_stop\"}").unwrap()]
+                        .to_owned()
+                } else {
+                    stream(
+                        vec![json!({"type":"text","text":"explicit recovery"})],
+                        "end_turn",
+                    )
+                };
+                ([("content-type", "text/event-stream")], response)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let tools = Arc::new(AtomicUsize::new(0));
+    let counter = tools.clone();
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+        .tool(
+            ToolDefinition {
+                name: "mutate".into(),
+                description: "Synthetic mutation".into(),
+                input_schema: json!({"type":"object"}),
+                strict: None,
+                defer_loading: false,
+            },
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("must not execute".to_owned()) }
+            },
+        )
+        .build()
+        .unwrap();
+    let failed = agent
+        .prompt("perform one mutation")
+        .await
+        .unwrap()
+        .result()
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(
+        tools.load(Ordering::SeqCst),
+        0,
+        "missing terminal cannot authorize dispatch"
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "accepted incomplete request must not be retried"
+    );
+    loop {
+        let event = events.next().await.unwrap();
+        assert_ne!(
+            event.kind,
+            AgentEventKind::AssistantMessage,
+            "no canonical success from partial stream"
+        );
+        assert_ne!(
+            event.kind,
+            AgentEventKind::ToolCall,
+            "no tools from partial stream"
+        );
+        if event.kind == AgentEventKind::RunFailed {
+            break;
+        }
+    }
+    assert_eq!(
+        agent
+            .prompt("continue explicitly")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "explicit recovery"
+    );
+    {
+        let log = requests.lock().unwrap();
+        assert_eq!(log.len(), 2);
+        assert!(
+            !log[1]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "assistant"),
+            "partial text and complete-looking tool block cannot enter replay history"
+        );
+    }
+    agent.shutdown().await.unwrap();
+    server.abort();
+}

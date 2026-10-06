@@ -46,6 +46,14 @@ pub enum PromptContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    /// Inline document content for native Claude turns and steering.
+    File {
+        /// `data:<media type>;base64,<bytes>` document payload.
+        file_data: String,
+        /// Optional user-visible file name, never a filesystem path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
     /// Audio content addressed by URL or data URL.
     Audio {
         /// Audio URL or data URL.
@@ -1372,6 +1380,14 @@ enum PromptContentFields {
         /// Optional provider image-detail hint.
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
+    },
+    /// Inline document content for native Claude turns and steering.
+    File {
+        /// `data:<media type>;base64,<bytes>` document payload.
+        file_data: String,
+        /// Optional user-visible file name, never a filesystem path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
     },
     /// Audio content addressed by URL or data URL.
     Audio {

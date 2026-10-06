@@ -84,7 +84,7 @@ The instructions here are independently authored for Nanocodex's actual tools;
 no captured vendor prompt, product identity or environment is bundled. Captured
 prompt differences are research context, not evidence of improved model performance.
 
-## Prompt images
+## Prompt images and documents
 
 The shared `Prompt` API preserves ordered text and image inputs as native Messages
 blocks. HTTPS image URLs and base64 PNG/JPEG/GIF/WebP data URLs are supported;
@@ -94,7 +94,12 @@ not reread a changed or deleted file after commit. Opaque OpenAI file IDs and
 audio prompts fail explicitly before HTTP. WASM callers use URLs or data URLs;
 local filesystem images require a native host. Image detail hints are not sent
 as a Claude field. Limits are 100 content items, 20 images, 5 MiB per inline/local
-image, and 20 MiB of image data per prompt.
+image, and 20 MiB of combined media per prompt. Inline `UserInput::File`
+documents become native `document` blocks: base64 `application/pdf` (requiring
+`%PDF-` magic bytes) or UTF-8 `text/plain`. Each document is bounded to 10 MiB,
+with at most five documents; optional filenames are validated and used as titles.
+The managed Rust HTTP client preserves these inline files for Claude prompts and
+steering, while retaining the explicit GPT document-input rejection.
 
 Reproduce the public API and SQLite media journeys with
 `cargo test -p nanocodex-durability --features claude,sqlite --test claude_prompt_media -- --nocapture`.
@@ -589,3 +594,25 @@ operations in the [managed guide](CLAUDE_MANAGED.md). See [the tool matrix](CLAU
 and [interactive compaction measurements](research/nanoclaude-auto-compaction-measured.md).
 This is implemented capability coverage, not full proprietary behavior or new
 live authentication/provider admission evidence. No full Claude Code parity is claimed.
+
+## Strict Messages stream completion
+
+The shared native/WASM SSE decoder accepts LF, CRLF and bare CR line endings,
+including CRLF and UTF-8 codepoints split across HTTP chunks, and one leading
+UTF-8 BOM. Bounds apply to individual SSE frames, not whole coalesced transport
+chunks. Successful HTTP responses must have `text/event-stream` media type;
+a non-SSE body is a body-free protocol error, not a misleading missing-terminal
+error. Framing follows the [SSE standard](https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation).
+
+A complete, blank-line-terminated `message_stop`, final stop reason and closed
+content blocks are required. EOF does not dispatch an unfinished event, promote
+`message_delta` to completion or authorize partial tool calls. A terminal event
+with an open block is reported separately as a protocol error. Accepted streams
+are never automatically replayed after truncation. These rules retain
+[Claude's Messages lifecycle](https://platform.claude.com/docs/en/build-with-claude/streaming).
+
+`cargo test -p nanocodex-claude --all-features` covers byte-split framing, proper
+terminals, unterminated/missing terminals and no dispatch/history/final success
+from a complete-looking tool block on a truncated stream. These are synthetic
+transport regressions, not proof of the historical production error's exact
+cause or a live-provider deployment.
