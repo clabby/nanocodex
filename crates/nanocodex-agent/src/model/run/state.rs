@@ -28,7 +28,7 @@ impl ModelSessionState {
 pub(super) struct ContinuationPolicy {
     pub(super) model: Model,
     pub(super) thinking: Thinking,
-    pub(super) fast_mode: bool,
+    pub(super) service_tier: ServiceTier,
 }
 
 #[derive(Clone)]

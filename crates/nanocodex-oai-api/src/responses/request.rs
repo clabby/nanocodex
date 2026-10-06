@@ -1,5 +1,7 @@
 //! Byte-stable request profiles, persistent history, and wire serialization.
 
+use crate::pricing::ServiceTier;
+
 use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 use serde::{Serialize, Serializer, ser::SerializeSeq};
@@ -623,7 +625,7 @@ impl<'a> ResponseCreate<'a> {
         config: &'a ModelConfig,
         model: crate::Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         profile: &'a RequestProfile,
         turn_state: Option<&'a str>,
     ) -> Self {
@@ -633,7 +635,7 @@ impl<'a> ResponseCreate<'a> {
                 transport: config.responses_transport,
                 model,
                 thinking,
-                fast_mode,
+                service_tier,
             },
             ResponsesInput::new(profile.prefix(), &[], None),
             None,
@@ -731,13 +733,7 @@ impl<'a> ResponseCreate<'a> {
             // `priority` as the compatibility request value for Fast mode.
             // GPT-6 standard mode is explicit so a project-level Fast default
             // cannot silently change processing or the local cost estimate.
-            service_tier: match (policy.model, policy.fast_mode) {
-                (crate::Model::Glm53 | crate::Model::Kimi | crate::Model::Mimo, _) => None,
-                (_, true) => Some("priority"),
-                (crate::Model::Sol | crate::Model::Luna | crate::Model::Astra, false) => {
-                    Some("default")
-                }
-            },
+            service_tier: policy.service_tier.request_value(policy.model),
             generate,
             client_metadata: ClientMetadata {
                 session_id: profile.session_id(),
@@ -762,7 +758,7 @@ pub(crate) struct CreatePolicy {
     transport: crate::ResponsesTransport,
     model: crate::Model,
     thinking: Thinking,
-    fast_mode: bool,
+    service_tier: ServiceTier,
 }
 
 impl CreatePolicy {
@@ -770,13 +766,13 @@ impl CreatePolicy {
         transport: crate::ResponsesTransport,
         model: crate::Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
     ) -> Self {
         Self {
             transport,
             model,
             thinking,
-            fast_mode,
+            service_tier,
         }
     }
 }
@@ -954,7 +950,7 @@ mod tests {
             &config,
             Model::Sol,
             Thinking::Low,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))
@@ -985,8 +981,14 @@ mod tests {
         )]);
         let profile =
             RequestProfile::new("session-a", "lineage-a", prefix).with_thread_id("branch-a");
-        let request =
-            ResponseCreate::warmup(&config, Model::Sol, Thinking::Low, false, &profile, None);
+        let request = ResponseCreate::warmup(
+            &config,
+            Model::Sol,
+            Thinking::Low,
+            ServiceTier::Standard,
+            &profile,
+            None,
+        );
         let request = serde_json::to_value(request).expect("request should serialize");
 
         assert_eq!(request["prompt_cache_key"], json!("lineage-a"));
@@ -1022,7 +1024,7 @@ mod tests {
             &config,
             Model::Sol,
             Thinking::Low,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))
@@ -1084,7 +1086,7 @@ mod tests {
                 stored_config.responses_transport,
                 Model::Sol,
                 Thinking::Medium,
-                false,
+                ServiceTier::Standard,
             ),
             ResponsesInput::history(&[], &history, None),
             None,
@@ -1106,7 +1108,7 @@ mod tests {
                 ephemeral_config.responses_transport,
                 Model::Sol,
                 Thinking::Medium,
-                false,
+                ServiceTier::Standard,
             ),
             ResponsesInput::history(&[], &history, None),
             None,
@@ -1145,7 +1147,7 @@ mod tests {
                     config.responses_transport,
                     model,
                     model.default_thinking(),
-                    false,
+                    ServiceTier::Standard,
                 ),
                 ResponsesInput::history(&[], &history, None),
                 None,
@@ -1162,7 +1164,7 @@ mod tests {
                 config.responses_transport,
                 Model::Glm53,
                 Thinking::Medium,
-                false,
+                ServiceTier::Standard,
             ),
             ResponsesInput::history(&[], &history, None),
             None,
@@ -1193,7 +1195,7 @@ mod tests {
                 &config,
                 model,
                 Thinking::Medium,
-                false,
+                ServiceTier::Standard,
                 &profile,
                 None,
             ))
@@ -1214,7 +1216,7 @@ mod tests {
             &config,
             Model::Sol,
             Thinking::Medium,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))
@@ -1242,7 +1244,7 @@ mod tests {
             &config,
             Model::Sol,
             Thinking::Max,
-            true,
+            ServiceTier::Fast,
             &profile,
             None,
         ))
@@ -1287,7 +1289,7 @@ mod tests {
                 &config,
                 Model::Sol,
                 thinking,
-                false,
+                ServiceTier::Standard,
                 &profile,
                 None,
             ))
@@ -1310,7 +1312,7 @@ mod tests {
             &config,
             Model::Astra,
             Thinking::Max,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))
@@ -1322,14 +1324,14 @@ mod tests {
     }
 
     #[test]
-    fn fast_mode_selects_the_codex_compatible_service_tier() {
+    fn service_tier_selects_the_codex_compatible_service_tier() {
         let config = ModelConfig::default();
         let profile = RequestProfile::new("fast-agent", "fast-lineage", Arc::from([]));
         let standard = serde_json::to_value(ResponseCreate::warmup(
             &config,
             Model::Sol,
             Thinking::Medium,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))
@@ -1338,7 +1340,7 @@ mod tests {
             &config,
             Model::Sol,
             Thinking::Medium,
-            true,
+            ServiceTier::Fast,
             &profile,
             None,
         ))
@@ -1350,7 +1352,7 @@ mod tests {
             &config,
             Model::Astra,
             Thinking::Medium,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))

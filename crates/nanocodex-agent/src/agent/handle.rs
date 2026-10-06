@@ -598,7 +598,20 @@ impl Nanocodex {
     ///
     /// Returns an error if the agent driver has stopped.
     pub async fn set_fast_mode(&self, enabled: bool) -> Result<()> {
-        self.backend.set_fast_mode(enabled).await
+        self.set_service_tier(ServiceTier::from_fast_mode(enabled))
+            .await
+    }
+
+    /// Selects the processing tier for subsequently accepted turns.
+    ///
+    /// Active and already accepted queued turns retain their captured tier.
+    /// Native OpenAI requests clamp to the fastest tier supported by the model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend has stopped or does not support the tier.
+    pub async fn set_service_tier(&self, service_tier: ServiceTier) -> Result<()> {
+        self.backend.set_service_tier(service_tier).await
     }
 
     /// Immediately compacts this agent's retained conversation.

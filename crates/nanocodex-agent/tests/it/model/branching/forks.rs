@@ -11,12 +11,14 @@ async fn latest_completed_ephemeral_fork_replays_parent_history() -> Result<()> 
         send_warmup(&mut root, "resp-warmup").await?;
         let root_turn = next_json(&mut root).await?;
         assert_eq!(root_turn["previous_response_id"], "resp-warmup");
+        assert_eq!(root_turn["service_tier"], "ultrafast");
         send_final(&mut root, "resp-root").await?;
 
         let (stream, _) = listener.accept().await?;
         let mut branch = accept_async(stream).await?;
         let fork = next_json(&mut branch).await?;
         assert!(fork.get("previous_response_id").is_none());
+        assert_eq!(fork["service_tier"], "ultrafast");
         let fork_text = fork.to_string();
         assert!(fork_text.contains("completed root prompt"));
         assert!(fork_text.contains("BTW question"));
@@ -25,6 +27,8 @@ async fn latest_completed_ephemeral_fork_replays_parent_history() -> Result<()> 
 
     let workspace = temporary_workspace("latest-ephemeral-fork")?;
     let openai = OpenAi::builder("test-key")
+        .model(Model::Astra)
+        .service_tier(ServiceTier::Ultrafast)
         .websocket_url(endpoint)
         .build()?;
     let (agent, root_events) = Nanocodex::builder(openai)
@@ -69,6 +73,7 @@ async fn latest_fork_during_streaming_inherits_the_active_prompt_delta() -> Resu
         let active = next_json(&mut root).await?;
         assert_eq!(active["previous_response_id"], "resp-warmup");
         assert_eq!(active["reasoning"]["effort"], "low");
+        assert_eq!(active["service_tier"], "default");
         assert!(active.to_string().contains("active root prompt"));
         root_started
             .send(())
@@ -79,6 +84,7 @@ async fn latest_fork_during_streaming_inherits_the_active_prompt_delta() -> Resu
         let fork = next_json(&mut branch).await?;
         assert!(fork.get("previous_response_id").is_none());
         assert_eq!(fork["reasoning"]["effort"], "high");
+        assert_eq!(fork["service_tier"], "ultrafast");
         let fork_text = fork.to_string();
         assert!(fork_text.contains("active root prompt"));
         assert!(fork_text.contains("BTW question"));
@@ -92,6 +98,7 @@ async fn latest_fork_during_streaming_inherits_the_active_prompt_delta() -> Resu
 
     let workspace = temporary_workspace("active-prompt-fork")?;
     let openai = OpenAi::builder("test-key")
+        .model(Model::Astra)
         .websocket_url(endpoint)
         .build()?;
     let (agent, root_events) = Nanocodex::builder(openai)
@@ -104,13 +111,34 @@ async fn latest_fork_during_streaming_inherits_the_active_prompt_delta() -> Resu
         .await
         .map_err(|_| eyre!("root request was not observed"))?;
     agent.set_thinking(Thinking::High).await?;
+    agent.set_service_tier(ServiceTier::Ultrafast).await?;
     let (fork, fork_events) = agent.fork().await?;
     let branch = fork.prompt("BTW question").await?;
-    assert_eq!(branch.result().await?.final_message(), "done");
+    let branch_result = branch.result().await?;
+    assert_eq!(branch_result.final_message(), "done");
+    assert_eq!(
+        branch_result
+            .usage()
+            .unwrap()
+            .estimated_cost()
+            .unwrap()
+            .service_tier(),
+        ServiceTier::Ultrafast
+    );
     release_root
         .send(())
         .map_err(|()| eyre!("root release receiver dropped"))?;
-    assert_eq!(root.result().await?.final_message(), "done");
+    let root_result = root.result().await?;
+    assert_eq!(root_result.final_message(), "done");
+    assert_eq!(
+        root_result
+            .usage()
+            .unwrap()
+            .estimated_cost()
+            .unwrap()
+            .service_tier(),
+        ServiceTier::Standard
+    );
 
     drop((agent, fork, root_events, fork_events));
     timeout(std::time::Duration::from_secs(5), server)

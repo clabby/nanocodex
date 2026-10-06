@@ -124,3 +124,22 @@ that optional layer. An attached execution policy is owned by exactly one
 agent. A clean `spawn` deliberately creates an ordinary in-memory child without
 that policy; `fork` returns an explicit error because inherited committed context
 requires an independently owned policy.
+
+## Processing tiers
+
+`NanocodexBuilder::service_tier(ServiceTier)` overrides the OpenAI recipe's default.
+`Nanocodex::set_service_tier` changes subsequently accepted turns; active and
+already queued turns keep their captured tier through tool calls and compaction.
+Astra supports Ultrafast, Sol and Luna clamp it to Fast, and gateway models use
+Standard. Child snapshots retain the requested tier, so a child with a different
+model applies its own capability limit.
+
+The boolean `fast_mode` builder and `set_fast_mode` setter remain available:
+`true` selects Fast and `false` selects Standard, replacing any prior Ultrafast
+selection. Backends without a native tier implementation retain the boolean
+interface and reject an Ultrafast setter request.
+
+`ChildRuntimeSnapshot::service_tier` replaces its public `fast_mode` field;
+struct literals must use the new field. Serialized child snapshots and execution
+continuations accept either the current tier string or the legacy boolean field,
+and reject invalid or conflicting representations.

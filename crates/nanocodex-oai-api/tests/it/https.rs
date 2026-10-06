@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use eyre::{Result, eyre};
 use nanocodex_oai_api::{
-    OpenAi,
+    Model, OpenAi,
+    pricing::ServiceTier,
     session::ResponseInput,
     transport::{ResponsesError, ResponsesTransport},
 };
@@ -30,6 +31,109 @@ impl HttpsRetryFailure {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn service_tier_builder_routes_supported_models_and_omits_gateway_tiers() -> Result<()> {
+    let cases = [
+        (Model::Astra, ServiceTier::Standard, Some("default"), 10),
+        (Model::Astra, ServiceTier::Fast, Some("priority"), 10),
+        (
+            Model::Astra,
+            ServiceTier::Ultrafast,
+            Some("ultrafast"),
+            272_000,
+        ),
+        (
+            Model::Astra,
+            ServiceTier::Ultrafast,
+            Some("ultrafast"),
+            272_001,
+        ),
+        (Model::Sol, ServiceTier::Ultrafast, Some("priority"), 10),
+        (Model::Luna, ServiceTier::Ultrafast, Some("priority"), 10),
+        (Model::Glm53, ServiceTier::Ultrafast, None, 10),
+        (Model::Kimi, ServiceTier::Ultrafast, None, 10),
+        (Model::Mimo, ServiceTier::Ultrafast, None, 10),
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let api_base_url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (model, _, wire_tier, input_tokens) in cases {
+            let request = read_http_json(&listener).await?;
+            assert_eq!(request.body["model"], model.as_str());
+            match wire_tier {
+                Some(tier) => assert_eq!(request.body["service_tier"], tier),
+                None => assert!(request.body.get("service_tier").is_none()),
+            }
+            let mut response = completed_response("resp-tier", "tier accepted");
+            response["response"]["usage"] = json!({
+                "input_tokens": input_tokens, "output_tokens": 2, "total_tokens": input_tokens + 2,
+                "input_tokens_details": { "cached_tokens": 2, "cache_write_tokens": 3 }
+            });
+            send_http_events(request.stream, None, [response]).await?;
+            requests.push(request.body);
+        }
+        Ok::<_, eyre::Report>(requests)
+    });
+    let mut estimates = Vec::new();
+    for (model, requested, wire_tier, input_tokens) in cases {
+        let builder = OpenAi::builder("test-key").model(model);
+        let builder = match requested {
+            ServiceTier::Standard => builder
+                .service_tier(ServiceTier::Ultrafast)
+                .fast_mode(false),
+            ServiceTier::Fast => builder.service_tier(ServiceTier::Ultrafast).fast_mode(true),
+            _ => builder.fast_mode(false).service_tier(requested),
+        };
+        let openai = builder
+            .transport(ResponsesTransport::Https)
+            .api_base_url(api_base_url.clone())
+            .build()?;
+        let mut session = openai.instructions("Answer briefly.").build()?;
+        let response = session.turn().create("Check the requested tier.").await?;
+        assert_eq!(response.output_text(), "tier accepted");
+        let effective = match wire_tier {
+            Some("ultrafast") => ServiceTier::Ultrafast,
+            Some("priority") => ServiceTier::Fast,
+            _ => ServiceTier::Standard,
+        };
+        let cost = response.estimated_cost().unwrap();
+        assert_eq!(cost.service_tier(), effective);
+        estimates.push(serde_json::to_value(cost)?);
+        if effective == ServiceTier::Ultrafast {
+            let expected = if input_tokens == 272_000 {
+                ["16.3197", "0.000012", "0.000225", "0.0006", "16.320537"]
+            } else {
+                ["32.63952", "0.000024", "0.00045", "0.0009", "32.640894"]
+            };
+            assert_eq!(
+                [
+                    cost.input().decimal(),
+                    cost.cached_input().decimal(),
+                    cost.cache_write_input().decimal(),
+                    cost.output().decimal(),
+                    cost.amount().decimal(),
+                ],
+                expected
+            );
+        } else if requested == ServiceTier::Ultrafast {
+            match model {
+                Model::Sol => assert_eq!(cost.amount().decimal(), "0.0000754"),
+                Model::Luna => assert_eq!(cost.amount().decimal(), "0.00000379"),
+                _ => {}
+            }
+        }
+    }
+    let requests = timeout(Duration::from_secs(5), server).await???;
+    if let Some(path) = std::env::var_os("NANOCODEX_E2E_TRANSCRIPT") {
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&json!({"requests": requests, "estimates": estimates}))?,
+        )?;
+    }
+    Ok(())
 }
 
 #[tokio::test]

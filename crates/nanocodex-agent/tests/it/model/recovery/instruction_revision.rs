@@ -1,10 +1,6 @@
-use std::{
-    future::{Ready, ready},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
-    },
-    task::{Context, Poll},
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use nanocodex_agent::{
@@ -15,106 +11,11 @@ use nanocodex_agent::{
     },
     session::SessionSnapshot,
 };
-use nanocodex_oai_api::{
-    responses::{ContentItem, MessageRole, ResponseItem, WarmupResponse},
-    tower::{
-        CodeCall, CodeCallKind, GenerationOutput, ResponsePipelineStats, ResponsesAttempt,
-        ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
-    },
-};
 use nanocodex_oai_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, contract::async_trait,
 };
-use tower::Service;
 
 use super::*;
-
-#[derive(Clone)]
-struct RevisionProvider {
-    generations: Arc<AtomicU32>,
-}
-
-impl Service<ResponsesAttempt> for RevisionProvider {
-    type Response = ResponsesServiceResponse;
-    type Error = ResponseError;
-    type Future = Ready<std::result::Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(
-        &mut self,
-        _context: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: ResponsesAttempt) -> Self::Future {
-        let output = match request.kind() {
-            ResponsesAttemptKind::Warmup => ResponsesOutput::Warmup(WarmupResponse {
-                id: "resp-revision-warmup".to_owned(),
-                usage: None,
-            }),
-            ResponsesAttemptKind::Generation
-                if self.generations.fetch_add(1, Ordering::Relaxed) < 2 =>
-            {
-                revision_tool_generation(self.generations.load(Ordering::Relaxed))
-            }
-            ResponsesAttemptKind::Generation => {
-                assert!(request.input_items().any(|item| {
-                    serde_json::to_value(item).is_ok_and(|item| {
-                        item["type"] == "function_call_output"
-                            && item["call_id"] == "call-revision-2"
-                    })
-                }));
-                ResponsesOutput::Generation(GenerationOutput {
-                    id: "resp-revision-complete".to_owned(),
-                    reported_model: None,
-                    status: "completed".to_owned(),
-                    end_turn: Some(true),
-                    final_message: Some("revision observed".to_owned()),
-                    output_items: vec![ResponseItem::message(
-                        MessageRole::Assistant,
-                        [ContentItem::output_text("revision observed")],
-                    )],
-                    code_calls: Vec::new(),
-                    usage: None,
-                    time_to_first_event_ns: 0,
-                    time_to_first_output_ns: None,
-                    pipeline_stats: ResponsePipelineStats::default(),
-                })
-            }
-            _ => panic!("revision probe received an unsupported attempt kind"),
-        };
-        ready(Ok(ResponsesServiceResponse::new(output)))
-    }
-}
-
-fn revision_tool_generation(index: u32) -> ResponsesOutput {
-    let item = serde_json::from_value(json!({
-        "type": "function_call",
-        "call_id": format!("call-revision-{index}"),
-        "name": "revision_probe",
-        "arguments": "{}"
-    }))
-    .expect("function call item decodes");
-    ResponsesOutput::Generation(GenerationOutput {
-        id: "resp-revision-tool".to_owned(),
-        reported_model: None,
-        status: "completed".to_owned(),
-        end_turn: Some(false),
-        final_message: None,
-        output_items: vec![item],
-        code_calls: vec![CodeCall {
-            call_id: format!("call-revision-{index}"),
-            name: "revision_probe".to_owned(),
-            namespace: None,
-            input: "{}".to_owned(),
-            kind: CodeCallKind::Function,
-        }],
-        usage: None,
-        time_to_first_event_ns: 0,
-        time_to_first_output_ns: None,
-        pipeline_stats: ResponsePipelineStats::default(),
-    })
-}
 
 struct RevisionProbe {
     seen: tokio::sync::mpsc::UnboundedSender<Option<u64>>,
@@ -145,6 +46,7 @@ impl Tool for RevisionProbe {
 struct ProviderSteps {
     saved: Mutex<Option<nanocodex_agent::execution::ExecutionContinuation>>,
     interrupt: AtomicBool,
+    completed: Mutex<Option<(SessionSnapshot, ExecutionOutput)>>,
 }
 
 impl ProviderSteps {
@@ -152,6 +54,7 @@ impl ProviderSteps {
         Self {
             saved: Mutex::new(None),
             interrupt: AtomicBool::new(true),
+            completed: Mutex::new(None),
         }
     }
 }
@@ -182,7 +85,15 @@ impl ExecutionPolicy for ProviderSteps {
         _operation_id: String,
         _input_json: String,
     ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionAdmission>> {
-        Box::pin(async { Ok(ExecutionAdmission::Execute) })
+        Box::pin(async {
+            if let Some((snapshot, output)) = self.completed.lock().unwrap().clone() {
+                return Ok(ExecutionAdmission::Completed { snapshot, output });
+            }
+            if self.saved.lock().unwrap().is_some() {
+                return Ok(ExecutionAdmission::Resume);
+            }
+            Ok(ExecutionAdmission::Execute)
+        })
     }
 
     fn admit_automatic<'a>(
@@ -246,10 +157,13 @@ impl ExecutionPolicy for ProviderSteps {
     fn complete<'a>(
         &'a self,
         _operation_id: String,
-        _snapshot: SessionSnapshot,
-        _output: ExecutionOutput,
+        snapshot: SessionSnapshot,
+        output: ExecutionOutput,
     ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            *self.completed.lock().unwrap() = Some((snapshot, output));
+            Ok(())
+        })
     }
 
     fn fail_attempt<'a>(
@@ -287,20 +201,65 @@ impl ExecutionPolicy for ProviderSteps {
 }
 
 #[tokio::test]
-async fn consumed_instruction_revision_survives_execution_recovery() -> Result<()> {
+async fn captured_tier_and_consumed_instruction_revision_survive_recovery_and_completed_replay()
+-> Result<()> {
     timeout(std::time::Duration::from_secs(15), async {
         let policy = Arc::new(ProviderSteps::new());
         let generations = Arc::new(AtomicU32::new(0));
         let (seen, mut observed) = tokio::sync::mpsc::unbounded_channel();
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         let workspace = tempfile::tempdir()?;
-        let build = || -> Result<_> {
-            let generations = generations.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let provider_calls = generations.clone();
+        let (replay_finished, replay_finished_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for index in 1..=3 {
+                let request = next_http_json(&listener).await?;
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(request.body["model"], Model::Astra.as_str());
+                assert_eq!(request.body["service_tier"], "ultrafast");
+                if index > 1 {
+                    assert!(request.body.to_string().contains("consumed steering"));
+                }
+                if index < 3 {
+                    let event = completed_response(
+                        &format!("resp-revision-tool-{index}"),
+                        &[json!({
+                            "type": "function_call", "call_id": format!("call-revision-{index}"),
+                            "name": "revision_probe", "arguments": "{}"
+                        })],
+                    );
+                    send_http_events(request.stream, [event]).await?;
+                } else {
+                    assert!(
+                        request.body["input"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|item| {
+                                item["type"] == "function_call_output"
+                                    && item["call_id"] == "call-revision-2"
+                            })
+                    );
+                    send_http_final(request.stream, "resp-revision-complete").await?;
+                }
+                requests.push(request.body);
+            }
+            replay_finished_rx
+                .await
+                .map_err(|_| eyre!("completed replay signal dropped"))?;
+            let extra = timeout(std::time::Duration::from_millis(200), listener.accept()).await;
+            assert!(extra.is_err(), "completed replay contacted the provider");
+            Ok::<_, eyre::Report>(requests)
+        });
+        let build = |tier| -> Result<_> {
             let openai = OpenAi::builder("test-key")
+                .model(Model::Astra)
+                .service_tier(tier)
                 .transport(ResponsesTransport::Https)
-                .service(move || RevisionProvider {
-                    generations: generations.clone(),
-                })
+                .api_base_url(endpoint.clone())
                 .build()?;
             Nanocodex::builder(openai)
                 .workspace(workspace.path())
@@ -321,7 +280,7 @@ async fn consumed_instruction_revision_survives_execution_recovery() -> Result<(
             PromptRequest::new(Prompt::new("original revision").with_instruction_revision(1))
                 .request_id("revision-recovery")
         };
-        let (agent, events) = build()?;
+        let (agent, events) = build(ServiceTier::Ultrafast)?;
         drop(events);
         let turn = agent.prompt(original()).await?;
         assert_eq!(observed.recv().await, Some(Some(1)));
@@ -337,11 +296,12 @@ async fn consumed_instruction_revision_survives_execution_recovery() -> Result<(
             let saved = saved.as_ref().unwrap();
             let state: Value = serde_json::from_str(&saved.state_json)?;
             assert_eq!(state["instruction_revision"], 2);
+            assert_eq!(state["service_tier"], "ultrafast");
             assert!(serde_json::to_string(&saved.history)?.contains("consumed steering"));
         }
         assert_eq!(generations.load(Ordering::SeqCst), 1);
         drop(agent);
-        let (recovered, events) = build()?;
+        let (recovered, events) = build(ServiceTier::Standard)?;
         drop(events);
         let resumed = recovered.prompt(original()).await?;
         assert_eq!(
@@ -350,8 +310,41 @@ async fn consumed_instruction_revision_survives_execution_recovery() -> Result<(
             "saved consumed revision must override replayed prompt revision 1"
         );
         release.add_permits(1);
-        resumed.await?;
+        let completed = resumed.await?;
+        assert_eq!(completed.final_message(), "done");
+        assert_eq!(
+            completed
+                .usage()
+                .unwrap()
+                .estimated_cost()
+                .unwrap()
+                .service_tier(),
+            ServiceTier::Ultrafast
+        );
+        assert_eq!(generations.load(Ordering::SeqCst), 3);
         recovered.shutdown().await?;
+        drop(recovered);
+        let (replayed, events) = build(ServiceTier::Standard)?;
+        drop(events);
+        let replayed_result = replayed.prompt(original()).await?.result().await?;
+        assert_eq!(replayed_result.final_message(), completed.final_message());
+        assert_eq!(
+            serde_json::to_value(replayed_result.usage())?,
+            serde_json::to_value(completed.usage())?
+        );
+        assert_eq!(generations.load(Ordering::SeqCst), 3);
+        assert!(matches!(
+            observed.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        replayed.shutdown().await?;
+        replay_finished
+            .send(())
+            .map_err(|()| eyre!("completed replay signal receiver dropped"))?;
+        let requests = server.await??;
+        if let Some(path) = std::env::var_os("NANOCODEX_E2E_TRANSCRIPT") {
+            std::fs::write(path, serde_json::to_string_pretty(&requests)?)?;
+        }
         Ok::<_, eyre::Report>(())
     })
     .await?

@@ -1510,6 +1510,7 @@ async fn response_usage_arrives_before_tool_completion_and_excludes_summary() {
 
 #[tokio::test]
 async fn fast_mode_applies_per_accepted_turn_on_supported_models() {
+    use nanocodex_agent::ServiceTier;
     use tokio::sync::Semaphore;
     let _ = rustls::crypto::ring::default_provider().install_default();
     // Records each request's speed field and whether the fast-mode beta was sent.
@@ -1563,6 +1564,7 @@ async fn fast_mode_applies_per_accepted_turn_on_supported_models() {
     };
 
     let opus = agent("claude-opus-5-5");
+    assert!(opus.set_service_tier(ServiceTier::Ultrafast).await.is_err());
     let active = opus.prompt("first").await.unwrap();
     while received.lock().unwrap().is_empty() {
         tokio::task::yield_now().await;

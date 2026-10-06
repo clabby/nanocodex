@@ -1,3 +1,4 @@
+use crate::pricing::ServiceTier;
 use std::{num::NonZeroU32, sync::Arc};
 
 use ::tower::Layer;
@@ -284,8 +285,16 @@ impl<F> OpenAiBuilder<F> {
     /// A higher-level session or agent builder may override this reusable
     /// client default without mutating the `OpenAi` recipe.
     #[must_use]
-    pub const fn fast_mode(mut self, enabled: bool) -> Self {
-        self.config.fast_mode = enabled;
+    pub const fn fast_mode(self, enabled: bool) -> Self {
+        self.service_tier(ServiceTier::from_fast_mode(enabled))
+    }
+
+    /// Selects the processing tier for subsequently accepted turns.
+    ///
+    /// Unsupported tiers use the fastest tier supported by the selected model.
+    #[must_use]
+    pub const fn service_tier(mut self, service_tier: ServiceTier) -> Self {
+        self.config.service_tier = service_tier;
         self
     }
 
@@ -673,6 +682,7 @@ fn validate(config: &ModelConfig) -> Result<(), OpenAiError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::pricing::ServiceTier;
     use std::{
         convert::Infallible,
         error::Error as _,
@@ -741,7 +751,7 @@ mod tests {
             client.config(),
             Model::Astra,
             Thinking::Low,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))

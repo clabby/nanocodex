@@ -78,7 +78,7 @@ pub(crate) struct ModelRun<S> {
     config: Arc<ModelConfig>,
     model: Model,
     thinking: Thinking,
-    fast_mode: bool,
+    service_tier: ServiceTier,
     client: ResponsesClient<S>,
     transport_stats: Arc<TransportStats>,
     started_at: Instant,
@@ -269,7 +269,7 @@ impl<S> ModelRun<S> {
     ) -> Self {
         let model = config.model;
         let thinking = config.thinking;
-        let fast_mode = config.fast_mode;
+        let service_tier = config.service_tier;
         let global_instructions = context_source.global_instructions();
         Self {
             events,
@@ -277,7 +277,7 @@ impl<S> ModelRun<S> {
             config,
             model,
             thinking,
-            fast_mode,
+            service_tier,
             client,
             transport_stats,
             started_at: Instant::now(),
@@ -341,7 +341,7 @@ impl<S> ModelRun<S> {
         );
         let model = config.model;
         let thinking = config.thinking;
-        let fast_mode = config.fast_mode;
+        let service_tier = config.service_tier;
         let context_source =
             context_source.with_fallback_global(checkpoint.global_instructions.clone());
         let global_instructions = context_source.global_instructions();
@@ -351,7 +351,7 @@ impl<S> ModelRun<S> {
             config,
             model,
             thinking,
-            fast_mode,
+            service_tier,
             client,
             transport_stats,
             started_at: Instant::now(),
