@@ -200,12 +200,13 @@ it("bounds hung discovery below the CLI timeout and limits concurrent session re
   }
   let original: unknown;
   let active = 0, peak = 0;
+  const finish: (() => void)[] = [];
   await runInDurableObject(f.account, async instance => {
     const internal = instance as unknown as { env: { NANOCODEX_SESSIONS: unknown } };
     original = internal.env.NANOCODEX_SESSIONS;
     internal.env.NANOCODEX_SESSIONS = { getByName: () => ({ listWorkspaceHands: () => {
       peak = Math.max(peak, ++active);
-      return new Promise(() => {});
+      return new Promise(resolve => finish.push(() => resolve({ data: [], complete: false })));
     } }) };
   });
   try {
@@ -217,6 +218,7 @@ it("bounds hung discovery below the CLI timeout and limits concurrent session re
     expect(result.data).toHaveLength(12);
     expect(result.data.every((entry: any) => entry.online === null && entry.health === "unknown")).toBe(true);
   } finally {
+    for (const resolve of finish) resolve();
     await runInDurableObject(f.account, async instance => {
       (instance as unknown as { env: { NANOCODEX_SESSIONS: unknown } }).env.NANOCODEX_SESSIONS = original;
     });
