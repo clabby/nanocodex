@@ -119,6 +119,34 @@ curl -fsSL https://nanocodex.paradigm.xyz | bash
 nanocodex
 ```
 
+Nix users can run or install the package directly on x86-64 Linux and Apple
+Silicon macOS:
+
+```sh
+nix run github:gakonst/nanocodex
+nix profile install github:gakonst/nanocodex
+```
+
+The flake also provides optional NixOS and nix-darwin modules. Add the input and
+the module matching your system:
+
+```nix
+{
+  inputs.nanocodex.url = "github:gakonst/nanocodex";
+
+  imports = [
+    inputs.nanocodex.nixosModules.default
+    # For nix-darwin, use inputs.nanocodex.darwinModules.default instead.
+  ];
+
+  programs.nanocodex.enable = true;
+}
+```
+
+The NixOS module also enables the dynamic loader required by verified Linux
+runtime components that Nanocodex downloads itself. Intel macOS is not included
+because the upstream release does not currently publish an x86-64 macOS binary.
+
 On x86-64 Windows 10 or 11, the equivalent checksum-verified bootstrap is:
 
 ```powershell
