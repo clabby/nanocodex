@@ -12,14 +12,13 @@ not establish account or server connectivity. Account verification, expired
 sign-in, network errors, and denied access each have distinct states. A failed
 or pending refresh never displays an old inventory as currently available.
 
-The root menu stays compact: Computers, Workspaces, Virtual machines, Screens,
-Other connections, and Offline are collapsed submenus with counts; empty groups
-are omitted. Connected entries sort first within each group. Disconnected entries
-are kept under Offline, and groups larger than twenty entries have numbered
-pages. Every known connection remains available without expanding the root menu.
-The summary counts connected **connections**, since workspace sessions and screen
-publications are not additional physical computers. Copy Status includes all
-categories and entries.
+The menu shows one plain Hands list, with connected entries first and names
+sorted within each connection state. Up to twenty entries appear directly in
+the root menu; larger inventories use sibling pages named Hands 1–20, Hands
+21–40, and so on, with at most twenty entries per page. Every returned record
+remains accessible, including distinct Hands with identical names. There are no
+computer, workspace, VM, screen, or offline category submenus. Copy Status
+includes the full list.
 
 Connected describes the server connection, not an execution health probe.
 Screen-only entries say that a screen is advertised without claiming playback or
@@ -62,3 +61,18 @@ The production installer supplies the absolute path to the installed CLI with
 `--cli`. The helper requires schema version 1 of `hand menu-status`. An older CLI
 or malformed response produces an unavailable status and disables service actions
 until a valid observation succeeds.
+
+Run the native accessibility journey against an existing CLI and the compiled
+helper (both paths must be absolute):
+
+```sh
+python3 scripts/tests/hand-menu-bar-account-macos.py \
+  --cli /absolute/path/to/nanocodex \
+  --helper /absolute/path/to/nanocodex-hand-menu-bar \
+  --evidence /absolute/path/to/native-menu-evidence
+```
+
+This exercises the real AppKit menu with a synthetic account, including flat
+lists, identical names, the twenty-entry paging boundary, all pages of a larger
+inventory, and refresh retaining accessibility item identities while open.
+It does not install or stop the live service.

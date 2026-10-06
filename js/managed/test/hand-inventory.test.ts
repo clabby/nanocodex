@@ -422,6 +422,17 @@ it("retires an exact offline regional publication without removing a concurrent 
     socket.close(1000);
     await expect.poll(async () => (await status())[0].retirable).toBe(true);
     const exact = identity((await status())[0]);
+    // Historical directory records can exceed the 1 KB control payload limit.
+    // Seed only that persisted metadata; inspect and retirement still traverse
+    // the real owner API and regional Durable Object transport.
+    await runInDurableObject(f.account, async (_, state) => {
+      const row = state.storage.sql.exec<{ publication_json: string }>(
+        "SELECT publication_json FROM regional_hand_directory WHERE machine_id='regional-device'").toArray()[0]!;
+      const publication = JSON.parse(row.publication_json);
+      publication.machine.workspace = "/fixture/" + "nested/".repeat(200);
+      state.storage.sql.exec("UPDATE regional_hand_directory SET publication_json=? WHERE machine_id='regional-device'", JSON.stringify(publication));
+    });
+    expect((await status())[0]).toMatchObject({ status: "confirmed", online: false, retirable: true });
     expect(await (await api(exact)).json()).toEqual({ retired: true, ...exact });
     expect(await (await api(exact)).json()).toEqual({ retired: true, ...exact });
     expect(await status()).toEqual([]);

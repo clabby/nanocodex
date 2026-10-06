@@ -7,6 +7,8 @@ import { HandHosts, boundedJSON } from "./hand-hosts";
 import { remoteICE, type RemoteICEEnv } from "./hand-remote-ice";
 import {
   parseHostedToolsManagedFrame,
+  hostedToolsAmbiguous,
+  hostedToolsUnavailable,
   HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE,
   HOSTED_MACHINE_TOOL_NAMES,
   type HostedMachine,
@@ -30,6 +32,8 @@ import { RegionalHandDirectory, HAND_RELAY_REGION_HEADER, handRelayName, isHandR
   relayRouteToken, parseRelayRouteToken, publisherIdentity, validPublisherId,
   type HandPublication, type HandRelayRegion, type RegionalHandEnv } from "./regional-hand-routing";
 import type { RegionalHandRelay } from "./regional-hand-relay";
+
+type RetirementPublication = Pick<HandPublication, "route_id" | "publication_id" | "runtime_id" | "region"> & { machine: Pick<HostedMachine, "id"> };
 
 const OWNER_ASSERTION = "x-nanocodex-owner-id";
 const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
@@ -669,7 +673,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     return result;
   }
 
-  #fencePublication(publication: HandPublication): void {
+  #fencePublication(publication: RetirementPublication): void {
     const local = this.ctx.storage.sql.exec<{ candidate_id: string | null; publication_json: string | null }>(
       "SELECT candidate_id,publication_json FROM regional_local_publications WHERE route_id=?", publication.route_id).toArray()[0];
     if (local?.candidate_id === publication.publication_id) {
@@ -685,7 +689,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
 
   // No awaits between this check and the exact local fence. Unknown or changing
   // publications must never be mistaken for disconnected hardware.
-  #regionalRetirementStatus(publication: HandPublication) {
+  #regionalRetirementStatus(publication: RetirementPublication) {
     const local = this.ctx.storage.sql.exec<{ candidate_id: string | null; publication_json: string | null }>(
       "SELECT candidate_id,publication_json FROM regional_local_publications WHERE route_id=?", publication.route_id).toArray()[0];
     const active = local?.publication_json ? JSON.parse(local.publication_json) as HandPublication : undefined;
@@ -693,15 +697,32 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       || (local?.candidate_id != null && local.candidate_id !== publication.publication_id);
     const online = this.#broker.machineOnline(publication.machine.id);
     const pending = this.ctx.storage.sql.exec<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM hosted_tool_calls WHERE hand_id=? AND state IN ('admitted','dispatched')", publication.machine.id).toArray()[0]!.count;
+      "SELECT COUNT(*) AS count FROM hosted_tool_calls WHERE hand_id=? AND host_runtime_id IS ? AND state IN ('admitted','dispatched')", publication.machine.id, publication.runtime_id ?? null).toArray()[0]!.count;
     return { online, pending_calls: pending, publication_changed: changed, retirable: !changed && !online && pending === 0 };
   }
 
-  async #regionalRetirementRPC(publication: HandPublication, operation: "inspect" | "retire-inactive") {
+  #settleAbandonedCalls(machineId: string, runtimeId: string | null): void {
+    // Explicit owner abandonment preserves the durable result. It never asserts
+    // completion, erases receipts, or permits replay onto a replacement runtime.
+    for (const state of ["admitted", "dispatched"] as const) {
+      const message = "Owner retired the disconnected Hand before its command outcome could be confirmed";
+      const outcome = state === "dispatched" ? hostedToolsAmbiguous(message) : hostedToolsUnavailable(message);
+      this.ctx.storage.sql.exec(`UPDATE hosted_tool_calls SET state=?,result_json=?,updated_at=?
+        WHERE hand_id=? AND host_runtime_id IS ? AND state=?`,
+        state === "dispatched" ? "ambiguous" : "unavailable", JSON.stringify(outcome), Date.now(), machineId, runtimeId, state);
+    }
+  }
+
+  async #regionalRetirementRPC(publication: HandPublication, operation: "inspect" | "retire-inactive", abandonPending = false) {
     if (publication.region === "legacy" || !this.env.NANOCODEX_HAND_RELAYS) throw new Error("regional relay unavailable");
     return fetchResponseWithDeadline(this.env.NANOCODEX_HAND_RELAYS.getByName(handRelayName(this.#ownerId!, publication.region)),
       `https://account-tools.internal/regional/${operation}`, {
-        method: "POST", headers: { [OWNER_ASSERTION]: this.#ownerId!, "content-type": "application/json" }, body: JSON.stringify(publication),
+        method: "POST", headers: { [OWNER_ASSERTION]: this.#ownerId!, "content-type": "application/json" },
+        // Device metadata and catalog names are not retirement authority and may
+        // exceed the bounded control endpoint even for ordinary native Hands.
+        body: JSON.stringify({ machine_id: publication.machine.id, runtime_id: publication.runtime_id,
+          route_id: publication.route_id, publication_id: publication.publication_id, region: publication.region,
+          ...(abandonPending ? { abandon_pending: true } : {}) }),
       }, 5_000, "regional Hand retirement", async response => {
         if (!response.ok) throw new Error("regional publication is not inactive");
         return response.json<{ online: boolean; pending_calls: number; retirable: boolean; retired?: boolean }>();
@@ -709,7 +730,8 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   }
 
   async #retireRegional(body: Record<string, unknown>): Promise<Response> {
-    if (Object.keys(body).length !== 4 || !validPublisherId(body.machine_id) || !validPublisherId(body.runtime_id)
+    if ((body.abandon_pending !== undefined && body.abandon_pending !== true)
+      || Object.keys(body).length !== (body.abandon_pending === true ? 5 : 4) || !validPublisherId(body.machine_id) || !validPublisherId(body.runtime_id)
       || !validPublisherId(body.publication_id) || !isHandRelayRegion(body.region)) return Response.json({ error: "invalid_request" }, { status: 400 });
     const result = this.#publicationQueue.then(async () => {
       const receiptKey = `regional_retirement:${body.machine_id}`;
@@ -723,7 +745,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         return Response.json({ error: "regional_publication_changed" }, { status: 409 });
       }
       try {
-        const status = await this.#regionalRetirementRPC(current, "retire-inactive");
+        const status = await this.#regionalRetirementRPC(current, "retire-inactive", body.abandon_pending === true);
         if (!status.retired) throw new Error("retirement not confirmed");
       } catch { return Response.json({ error: "regional_retirement_unconfirmed" }, { status: 409 }); }
       this.ctx.storage.transactionSync(() => {
@@ -780,9 +802,10 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     if (url.pathname === "/regional/retire" && !this.#regional) {
       if (body.publication_id !== undefined || body.region !== undefined) return this.#retireRegional(body);
       const unversioned = body.runtime_id === null;
-      if (!validPublisherId(body.machine_id) || (unversioned
-        ? !Number.isSafeInteger(body.generation) || (body.generation as number) <= 0 || Object.keys(body).length !== 3
-        : !validPublisherId(body.runtime_id) || Object.keys(body).length !== 2)) {
+      const abandonPending = body.abandon_pending === true;
+      if ((body.abandon_pending !== undefined && !abandonPending) || !validPublisherId(body.machine_id) || (unversioned
+        ? !Number.isSafeInteger(body.generation) || (body.generation as number) <= 0 || Object.keys(body).length !== (abandonPending ? 4 : 3)
+        : !validPublisherId(body.runtime_id) || Object.keys(body).length !== (abandonPending ? 3 : 2))) {
         return Response.json({ error: "invalid_request" }, { status: 400 });
       }
       if (!unversioned && this.#directory.retired(body.machine_id, body.runtime_id as string)
@@ -808,14 +831,33 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       if (this.#broker.machineOnline(body.machine_id)) return Response.json({ error: "legacy_runtime_still_connected" }, { status: 409 });
       const pending = this.ctx.storage.sql.exec<{ count: number }>(
         "SELECT COUNT(*) AS count FROM hosted_tool_calls WHERE hand_id=? AND host_runtime_id IS ? AND state IN ('admitted','dispatched')", body.machine_id, body.runtime_id).toArray()[0]!.count;
-      if (pending) return Response.json({ error: "legacy_runtime_has_pending_calls" }, { status: 409 });
+      if (pending && !abandonPending) return Response.json({ error: "legacy_runtime_has_pending_calls" }, { status: 409 });
       this.ctx.storage.transactionSync(() => {
         this.#broker.retireRoute(route.route_id, "Owner explicitly retired disconnected legacy runtime", 1012);
+        if (abandonPending) this.#settleAbandonedCalls(body.machine_id as string, body.runtime_id as string | null);
         if (unversioned) this.ctx.storage.kv.put(receiptKey, { route_id: route.route_id, generation: route.generation });
         else this.#directory.retire(body.machine_id as string, body.runtime_id as string);
       });
       return Response.json({ retired: true, machine_id: body.machine_id, runtime_id: body.runtime_id,
         ...(unversioned ? { generation: body.generation } : {}) });
+    }
+    if (this.#regional && (url.pathname === "/regional/inspect" || url.pathname === "/regional/retire-inactive")) {
+      const abandonPending = body.abandon_pending === true;
+      if (!validPublisherId(body.machine_id) || !validPublisherId(body.runtime_id) || !validPublisherId(body.publication_id)
+        || body.region !== this.#region || typeof body.route_id !== "string" || body.route_id.length > 512
+        || (body.abandon_pending !== undefined && !abandonPending)
+        || Object.keys(body).length !== (abandonPending ? 6 : 5)) return Response.json({ error: "invalid_request" }, { status: 400 });
+      const publication: RetirementPublication = { machine: { id: body.machine_id }, runtime_id: body.runtime_id,
+        publication_id: body.publication_id, route_id: body.route_id, region: this.#region! };
+      const status = this.#regionalRetirementStatus(publication);
+      if (url.pathname === "/regional/inspect") return Response.json(status);
+      if (status.online || status.publication_changed || (status.pending_calls > 0 && !abandonPending))
+        return Response.json({ error: "regional_publication_not_inactive" }, { status: 409 });
+      this.ctx.storage.transactionSync(() => {
+        this.#fencePublication(publication);
+        if (abandonPending) this.#settleAbandonedCalls(body.machine_id as string, body.runtime_id as string);
+      });
+      return Response.json({ ...status, retired: true });
     }
     const publication = body as unknown as HandPublication;
     if (!validPublisherId(publication.machine?.id) || !validPublisherId(publication.publication_id)
@@ -825,14 +867,6 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       || !Array.isArray(publication.tool_names) || publication.tool_names.length > 256
       || publication.tool_names.some(name => typeof name !== "string" || name.length > 256)
       || (publication.runtime_id !== undefined && !validPublisherId(publication.runtime_id))) return Response.json({ error: "invalid_request" }, { status: 400 });
-    if (this.#regional && (url.pathname === "/regional/inspect" || url.pathname === "/regional/retire-inactive")) {
-      if (publication.region !== this.#region || !publication.runtime_id) return Response.json({ error: "invalid_request" }, { status: 400 });
-      const status = this.#regionalRetirementStatus(publication);
-      if (url.pathname === "/regional/inspect") return Response.json(status);
-      if (!status.retirable) return Response.json({ error: "regional_publication_not_inactive" }, { status: 409 });
-      this.#fencePublication(publication);
-      return Response.json({ ...status, retired: true });
-    }
     if (url.pathname === "/regional/fence") {
       this.#fencePublication(publication);
       return Response.json({ fenced: true });

@@ -179,3 +179,5 @@ metadata. Keep per-run wire logs and other evidence in ignored `output/`.
 Local service-binding tests establish metadata propagation and routing behavior.
 They cannot establish Cloudflare's production placement or latency; deployment
 receipts and observed execution traces are required for those claims.
+
+Owners can retire a permanently stopped runtime with `abandon_pending: true` in the exact observed retirement request. This remains forbidden for a connected runtime or a changed generation/publication. Admitted calls become unavailable and dispatched calls retain an ambiguous result; receipts and replay fences remain stored. Omit the flag to reject retirement while any call is pending. Regional retirement RPCs transmit identifiers only, so large saved device descriptions do not prevent cleanup.
