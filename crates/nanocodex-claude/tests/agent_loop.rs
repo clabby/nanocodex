@@ -1695,7 +1695,13 @@ async fn streamed_text_and_final_message_share_one_response_identity() {
         )
         .build()
         .unwrap();
-    let result = agent.prompt("look up x").await.unwrap().result().await.unwrap();
+    let result = agent
+        .prompt("look up x")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
     assert_eq!(result.final_message(), "Found the value.");
 
     // Project the event stream exactly like a transcript client: deltas with
@@ -1703,7 +1709,11 @@ async fn streamed_text_and_final_message_share_one_response_identity() {
     // the row with a matching identity, or appends a new row otherwise.
     type Identity = (Value, Value, Value);
     let identity = |payload: &Value| -> Identity {
-        (payload["model_call_index"].clone(), payload["item_id"].clone(), payload["phase"].clone())
+        (
+            payload["model_call_index"].clone(),
+            payload["item_id"].clone(),
+            payload["phase"].clone(),
+        )
     };
     let mut rows: Vec<(Identity, String, bool)> = Vec::new();
     loop {
@@ -1729,7 +1739,11 @@ async fn streamed_text_and_final_message_share_one_response_identity() {
             AgentEventKind::AssistantMessage => {
                 let key = identity(&payload);
                 let text = payload["text"].as_str().unwrap().to_owned();
-                match rows.iter_mut().rev().find(|(row, _, done)| *row == key && !done) {
+                match rows
+                    .iter_mut()
+                    .rev()
+                    .find(|(row, _, done)| *row == key && !done)
+                {
                     Some(row) => {
                         assert_eq!(row.1, text, "final text must equal its streamed text");
                         row.2 = true;
@@ -1743,14 +1757,23 @@ async fn streamed_text_and_final_message_share_one_response_identity() {
     }
     agent.shutdown().await.unwrap();
     server.abort();
-    let texts = rows.iter().map(|(_, text, _)| text.as_str()).collect::<Vec<_>>();
+    let texts = rows
+        .iter()
+        .map(|(_, text, _)| text.as_str())
+        .collect::<Vec<_>>();
     assert_eq!(
         texts,
         ["Checking the lookup.", "Found the value."],
         "each Claude response must render exactly once"
     );
-    assert!(rows.iter().all(|(_, _, done)| *done), "every streamed row is finalized");
-    assert_ne!(rows[0].0, rows[1].0, "separate model calls keep separate identities");
+    assert!(
+        rows.iter().all(|(_, _, done)| *done),
+        "every streamed row is finalized"
+    );
+    assert_ne!(
+        rows[0].0, rows[1].0,
+        "separate model calls keep separate identities"
+    );
 }
 
 /// A realtime voice frontend delegates through live routing: idle input
@@ -1783,10 +1806,19 @@ async fn live_route_starts_idle_turn_and_steers_active_turn() {
                             vec![json!({"type":"tool_use","id":"held","name":"hold","input":{}})],
                             "tool_use",
                         ),
-                        2 => (vec![json!({"type":"text","text":"Booked and noted the window seat."})], "end_turn"),
-                        _ => (vec![json!({"type":"text","text":"Second turn."})], "end_turn"),
+                        2 => (
+                            vec![json!({"type":"text","text":"Booked and noted the window seat."})],
+                            "end_turn",
+                        ),
+                        _ => (
+                            vec![json!({"type":"text","text":"Second turn."})],
+                            "end_turn",
+                        ),
                     };
-                    ([("content-type", "text/event-stream")], stream(blocks, stop))
+                    (
+                        [("content-type", "text/event-stream")],
+                        stream(blocks, stop),
+                    )
                 }
             }
         }),
@@ -1833,7 +1865,10 @@ async fn live_route_starts_idle_turn_and_steers_active_turn() {
         .unwrap();
     assert!(
         matches!(
-            agent.route_prompt("and ask for a window seat").await.unwrap(),
+            agent
+                .route_prompt("and ask for a window seat")
+                .await
+                .unwrap(),
             PromptRoute::Steered
         ),
         "live input during an active turn must steer it"
@@ -1846,7 +1881,11 @@ async fn live_route_starts_idle_turn_and_steers_active_turn() {
     assert_eq!(result.final_message(), "Booked and noted the window seat.");
     {
         let log = requests.lock().unwrap();
-        assert_eq!(log.len(), 2, "steering must not admit a concurrent model call");
+        assert_eq!(
+            log.len(),
+            2,
+            "steering must not admit a concurrent model call"
+        );
         let continuation = log[1]["messages"].to_string();
         assert!(
             continuation.contains("and ask for a window seat"),
@@ -1901,13 +1940,21 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
     let pdf = STANDARD.encode(b"%PDF-1.7\nsynthetic invoice\n%%EOF");
     let notes = STANDARD.encode("Quarterly notes: revenue up.".as_bytes());
     let prompt = Prompt::content([
-        UserInput::Text { text: "Compare the chart with the invoice.".into() },
-        UserInput::Image { image_url: format!("data:image/png;base64,{png}"), detail: None },
+        UserInput::Text {
+            text: "Compare the chart with the invoice.".into(),
+        },
+        UserInput::Image {
+            image_url: format!("data:image/png;base64,{png}"),
+            detail: None,
+        },
         UserInput::File {
             file_data: format!("data:application/pdf;base64,{pdf}"),
             filename: Some("invoice.pdf".into()),
         },
-        UserInput::File { file_data: format!("data:text/plain;base64,{notes}"), filename: None },
+        UserInput::File {
+            file_data: format!("data:text/plain;base64,{notes}"),
+            filename: None,
+        },
     ]);
     let result = agent.prompt(prompt).await.unwrap().result().await.unwrap();
     assert_eq!(result.final_message(), "Read both.");
@@ -1926,13 +1973,31 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
     }
 
     let rejected = |file_data: String, filename: Option<&str>| {
-        Prompt::content([UserInput::File { file_data, filename: filename.map(str::to_owned) }])
+        Prompt::content([UserInput::File {
+            file_data,
+            filename: filename.map(str::to_owned),
+        }])
     };
     for (prompt, expected) in [
-        (rejected(format!("data:application/zip;base64,{pdf}"), None), "application/pdf and text/plain"),
-        (rejected(format!("data:application/pdf;base64,{png}"), None), "does not match"),
-        (rejected("https://example.com/invoice.pdf".into(), None), "base64 data URL"),
-        (rejected(format!("data:application/pdf;base64,{pdf}"), Some("../etc/passwd")), "filename"),
+        (
+            rejected(format!("data:application/zip;base64,{pdf}"), None),
+            "application/pdf and text/plain",
+        ),
+        (
+            rejected(format!("data:application/pdf;base64,{png}"), None),
+            "does not match",
+        ),
+        (
+            rejected("https://example.com/invoice.pdf".into(), None),
+            "base64 data URL",
+        ),
+        (
+            rejected(
+                format!("data:application/pdf;base64,{pdf}"),
+                Some("../etc/passwd"),
+            ),
+            "filename",
+        ),
         (
             Prompt::content((0..6).map(|_| UserInput::File {
                 file_data: format!("data:application/pdf;base64,{pdf}"),
@@ -1943,11 +2008,22 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
     ] {
         let error = match agent.prompt(prompt).await {
             Err(error) => error.to_string(),
-            Ok(turn) => turn.result().await.expect_err("invalid media must fail").to_string(),
+            Ok(turn) => turn
+                .result()
+                .await
+                .expect_err("invalid media must fail")
+                .to_string(),
         };
-        assert!(error.contains(expected), "{error} should mention {expected}");
+        assert!(
+            error.contains(expected),
+            "{error} should mention {expected}"
+        );
     }
-    assert_eq!(requests.lock().unwrap().len(), 1, "invalid media never reaches the provider");
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "invalid media never reaches the provider"
+    );
     agent.shutdown().await.unwrap();
     server.abort();
 }

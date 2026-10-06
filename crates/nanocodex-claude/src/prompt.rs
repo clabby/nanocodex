@@ -110,12 +110,16 @@ fn document_block(file_data: &str, filename: Option<&str>) -> Result<(ContentBlo
         .decode(data)
         .map_err(|_| invalid("invalid Claude document base64"))?;
     if bytes.is_empty() || bytes.len() > MAX_DOCUMENT_BYTES {
-        return Err(invalid("Claude document must contain 1 byte through 10 MiB"));
+        return Err(invalid(
+            "Claude document must contain 1 byte through 10 MiB",
+        ));
     }
     let source = match media_type {
         "application/pdf" => {
             if !bytes.starts_with(b"%PDF-") {
-                return Err(invalid("Claude document media type does not match its bytes"));
+                return Err(invalid(
+                    "Claude document media type does not match its bytes",
+                ));
             }
             json!({"type":"base64","media_type":"application/pdf","data":data})
         }
@@ -134,7 +138,9 @@ fn document_block(file_data: &str, filename: Option<&str>) -> Result<(ContentBlo
     if let Some(name) = filename {
         if name.trim().is_empty()
             || name.len() > MAX_FILENAME_BYTES
-            || name.chars().any(|c| c.is_control() || c == '/' || c == '\\')
+            || name
+                .chars()
+                .any(|c| c.is_control() || c == '/' || c == '\\')
         {
             return Err(invalid(
                 "Claude document filename must be 1-255 bytes without paths or control characters",
