@@ -362,7 +362,10 @@ it("retires only the observed disconnected pre-runtime generation through the pu
     socket.close(1000);
     await expect.poll(async () => (await status())[0].retirable).toBe(true);
     expect((await api(exact)).status).toBe(409);
-  } finally { socket.close(1000); }
+  } finally {
+    socket.close(1000);
+    await expect.poll(async () => (await (await f.call()).json() as any).data.some((entry: any) => entry.online === true)).toBe(false);
+  }
 }, 15_000);
 
 it("retires an exact offline regional publication without removing a concurrent successor", async () => {
@@ -427,5 +430,8 @@ it("retires an exact offline regional publication without removing a concurrent 
     socket = await connect(crypto.randomUUID());
     await api(exact);
     expect((await status())[0]).toMatchObject({ online: true, retirable: false });
-  } finally { socket.close(1000); }
+  } finally {
+    socket.close(1000);
+    await expect.poll(async () => (await (await f.call()).json() as any).data.some((entry: any) => entry.online === true)).toBe(false);
+  }
 }, 15_000);

@@ -714,7 +714,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     const result = this.#publicationQueue.then(async () => {
       const receiptKey = `regional_retirement:${body.machine_id}`;
       const receipt = this.ctx.storage.kv.get<{ publication_id: string; runtime_id: string; region: string }>(receiptKey);
-      if (receipt?.publication_id === body.publication_id && receipt.runtime_id === body.runtime_id && receipt.region === body.region) {
+      if (receipt && receipt.publication_id === body.publication_id && receipt.runtime_id === body.runtime_id && receipt.region === body.region) {
         return Response.json({ retired: true, ...body });
       }
       const current = this.#directory.entries().find(entry => entry.machine.id === body.machine_id);
@@ -732,7 +732,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       });
       return Response.json({ retired: true, ...body });
     });
-    this.#publicationQueue = result.catch(() => {});
+    this.#publicationQueue = result.then(() => {}, () => {});
     return result;
   }
 
