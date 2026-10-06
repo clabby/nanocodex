@@ -100,7 +100,7 @@ it.each([
   ["legacy UUIDv4", "11111111-1111-4111-8111-111111111111"],
   ["current UUIDv7", "019b0000-0000-7000-8000-111111111111"],
   ["idempotent UUIDv8", "11111111-1111-8111-8111-111111111111"],
-])("reads %s workspace publication through the public route and retains it offline", async (_, id) => {
+])("reads %s workspace publication through disconnect and reconnect at the public route", async (_, id) => {
   const f = fixture(), session = await seedSession(f, id);
   const socket = await publish(session.stub, f.owner, "workspace-device", f.principal);
   try {
@@ -109,9 +109,16 @@ it.each([
     ]);
     expect(await session.stub.listWorkspaceHands(crypto.randomUUID())).toEqual({ data: [], complete: false });
   } finally { socket.close(1000); }
-  await expect.poll(async () => (await (await f.call()).json() as any).data).toEqual([
-    { id: "workspace-device", name: "workspace-device", kind: "workspace", online: false, health: "offline" },
-  ]);
+  await expect.poll(async () => (await (await f.call()).json() as any).data).toEqual([]);
+  await runInDurableObject(f.account, async (_, state) => {
+    expect(new WorkspaceHandRegistry(state.storage).entries()).toHaveLength(0);
+  });
+  const reconnected = await publish(session.stub, f.owner, "workspace-device", f.principal);
+  try {
+    await expect.poll(async () => (await (await f.call()).json() as any).data).toEqual([
+      { id: "workspace-device", name: "workspace-device", kind: "workspace", online: true, health: "connected" },
+    ]);
+  } finally { reconnected.close(1000); }
 });
 
 it("recovers a workspace publication interrupted by an account broker reset without reconnecting", async () => {
@@ -215,3 +222,77 @@ it("bounds hung discovery below the CLI timeout and limits concurrent session re
     });
   }
 }, 15_000);
+
+// Delay only delivery of a real Session RPC result; the broker and public HTTP
+// inventory still execute in Workers, including the intervening WebSocket reconnect.
+it("a stale empty inventory response cannot erase a concurrent reconnect", async () => {
+  const f = fixture(), session = await seedSession(f);
+  const socket = await publish(session.stub, f.owner, "racing-device", f.principal);
+  await expect.poll(async () => (await (await f.call()).json() as any).data.length).toBe(1);
+  socket.close(1000);
+  await expect.poll(async () => (await (await f.call()).json() as any).data.length).toBe(0);
+  // Retained legacy index simulates a disconnect notification lost during restart.
+  await f.account.registerWorkspaceHands(f.owner, session.id, [inventoryEntry(machine("racing-device"), true, true)]);
+  const revision = await runInDurableObject(f.account, async (_, state) =>
+    new WorkspaceHandRegistry(state.storage).entries()[0]!.revision);
+  let release!: () => void, observed!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const reached = new Promise<void>(resolve => { observed = resolve; });
+  let original: unknown;
+  await runInDurableObject(f.account, async instance => {
+    const internal = instance as unknown as { env: { NANOCODEX_SESSIONS: unknown } };
+    original = internal.env.NANOCODEX_SESSIONS;
+    internal.env.NANOCODEX_SESSIONS = { getByName: () => ({ listWorkspaceHands: async (owner: string) => {
+      const result = await session.stub.listWorkspaceHands(owner);
+      observed(); await held; return result;
+    } }) };
+  });
+  const pending = f.call();
+  await reached;
+  const reconnected = await publish(session.stub, f.owner, "racing-device", f.principal);
+  await expect.poll(async () => runInDurableObject(f.account, async (_, state) =>
+    new WorkspaceHandRegistry(state.storage).entries()[0]?.revision)).not.toBe(revision);
+  release();
+  await pending;
+  await runInDurableObject(f.account, async instance => {
+    (instance as unknown as { env: { NANOCODEX_SESSIONS: unknown } }).env.NANOCODEX_SESSIONS = original;
+  });
+  try {
+    expect((await (await f.call()).json() as any).data).toEqual([
+      { id: "racing-device", name: "racing-device", kind: "workspace", online: true, health: "connected" },
+    ]);
+  } finally { reconnected.close(1000); }
+});
+
+it("reclaims owner-verified deleted sessions without disclosing them to other owners", async () => {
+  const f = fixture(), session = await seedSession(f);
+  await f.account.registerWorkspaceHands(f.owner, session.id, [inventoryEntry(machine("ended"), true, true)]);
+  await runInDurableObject(session.stub, async (_, state) => {
+    state.storage.sql.exec(`INSERT INTO session_initialization_ownership(singleton,session_id,owner_id,runtime_profile,state)
+      VALUES(1,?,?,'managed','deleted')`, session.id, f.owner);
+  });
+  expect(await session.stub.listWorkspaceHands(crypto.randomUUID())).toEqual({ data: [], complete: false });
+  expect(await (await f.call()).json()).toEqual({ data: [], coverage: "known_account_and_workspace", complete: true });
+  await runInDurableObject(f.account, async (_, state) => {
+    expect(new WorkspaceHandRegistry(state.storage).entries()).toHaveLength(0);
+  });
+});
+
+it("reuses a full registry slot after a definitively disconnected session is polled", async () => {
+  const f = fixture(), ended = await seedSession(f);
+  await runInDurableObject(f.account, async (_, state) => {
+    const registry = new WorkspaceHandRegistry(state.storage);
+    registry.register(ended.id, [inventoryEntry(machine("ended"), true, true)]);
+    for (let i = 1; i < WORKSPACE_INVENTORY_SESSION_LIMIT; i++)
+      registry.register(crypto.randomUUID(), [inventoryEntry(machine(`unknown-${i}`), true, true)]);
+  });
+  const result = await (await f.call()).json() as any;
+  expect(result.data).toHaveLength(WORKSPACE_INVENTORY_SESSION_LIMIT - 1);
+  expect(result.complete).toBe(false);
+  const fresh = await seedSession(f);
+  const socket = await publish(fresh.stub, f.owner, "new-publisher", f.principal);
+  try {
+    await expect.poll(async () => (await (await f.call()).json() as any).data
+      .some((entry: any) => entry.id === "new-publisher" && entry.online === true)).toBe(true);
+  } finally { socket.close(1000); }
+});

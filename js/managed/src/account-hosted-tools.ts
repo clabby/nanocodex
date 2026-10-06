@@ -215,6 +215,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
             complete = false;
             sources.push(retained.entries.map(entry => ({ ...entry, online: null, health: "unknown" })));
           }
+          if (result.complete && result.data.length === 0) registry.prune(retained.sessionId, retained.revision);
           sources.push(result.data);
         } catch {
           complete = false;
