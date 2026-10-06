@@ -42,7 +42,13 @@ struct CommandResult {
 // Unknown observations never reuse a healthy inventory.
 struct MenuPresentation {
     let summary: [String]
-    let resources: [String]
+    struct ConnectionGroup {
+        let title: String
+        let entries: [String]
+        var label: String { "\(title) (\(entries.count))" }
+    }
+    let groups: [ConnectionGroup]
+    var resources: [String] { groups.flatMap { [$0.label] + $0.entries } }
     let canToggle: Bool
     let canRestart: Bool
     let canSignIn: Bool
@@ -55,7 +61,7 @@ struct MenuPresentation {
 
     static func make(status: HandStatus?, busy: Bool, operation: String, failure: String?, signingIn: Bool) -> MenuPresentation {
         var lines = ["Menu companion: Running"]
-        var resources: [String] = []
+        var groups: [ConnectionGroup] = []
         let checking = busy && operation == "menu-status"
         let local = status?.local
         let running = local?.loaded == true && local?.pid != nil
@@ -97,7 +103,7 @@ struct MenuPresentation {
             switch inventory.state {
             case "ready":
                 let connected = inventory.hands.filter { $0.health == "connected" }.count
-                lines.append("Hands: \(inventory.hands.count) listed · \(connected) connected")
+                lines.append("Connections: \(connected) connected")
             case "signed_out": lines.append("Hands: Sign in to view")
             case "expired": lines.append("Hands: Sign in again to view")
             case "partial": lines.append("Hands: Some connections unavailable")
@@ -106,33 +112,44 @@ struct MenuPresentation {
             default: lines.append("Hands: Status unavailable")
             }
             if inventory.state == "ready" || !inventory.hands.isEmpty {
-                let groups: [(String, [String])] = [
-                    ("Computers & workspaces", ["computer", "workspace", "hand"]),
-                    ("Virtual machines", ["vm"]),
-                    ("Screens", ["screen", "screen_only"])
-                ]
-                var known: Set<String> = []
-                for (heading, kinds) in groups {
-                    let hands = inventory.hands.filter { kinds.contains($0.kind) }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-                    if !hands.isEmpty {
-                        resources.append(heading)
-                        for hand in hands {
-                            known.insert(hand.id)
-                            resources.append(resource(hand, complete: true))
+                // These are connections, not necessarily separate computers.
+                // Keep each category collapsed even for a small inventory so a
+                // reconnect or a new workspace never expands the root menu.
+                let categories = ["Computers", "Workspaces", "Virtual machines", "Screens", "Other connections", "Offline"]
+                var categorized: [String: [HandStatus.Inventory.Hand]] = [:]
+                for hand in inventory.hands {
+                    let category: String
+                    if ["offline", "disconnected", "unavailable"].contains(hand.health) {
+                        category = "Offline"
+                    } else {
+                        switch hand.kind {
+                        case "computer", "hand": category = "Computers"
+                        case "workspace": category = "Workspaces"
+                        case "vm": category = "Virtual machines"
+                        case "screen", "screen_only": category = "Screens"
+                        default: category = "Other connections"
                         }
                     }
+                    categorized[category, default: []].append(hand)
                 }
-                let others = inventory.hands.filter { !known.contains($0.id) }
-                if !others.isEmpty {
-                    resources.append("Other connections")
-                    resources.append(contentsOf: others.map { resource($0, complete: true) })
+                for category in categories {
+                    let hands = (categorized[category] ?? []).sorted {
+                        let leftConnected = $0.health == "connected"
+                        let rightConnected = $1.health == "connected"
+                        if leftConnected != rightConnected { return leftConnected }
+                        let comparison = $0.name.localizedStandardCompare($1.name)
+                        return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+                    }
+                    if !hands.isEmpty {
+                        groups.append(ConnectionGroup(title: category, entries: hands.map { resource($0, complete: true) }))
+                    }
                 }
-                if resources.isEmpty { resources.append("No Hands registered") }
-                if inventory.state != "ready" { resources.insert("Partial inventory · some connections unavailable", at: 0) }
+                if groups.isEmpty { lines.append("No Hands registered") }
+
             }
         } else { lines.append("Hands: Status unavailable") }
         if let failure { lines.append(failure) }
-        return MenuPresentation(summary: lines, resources: resources,
+        return MenuPresentation(summary: lines, groups: groups,
             canToggle: !busy && failure == nil && localKnown && local?.installed == true && !waiting,
             canRestart: !busy && failure == nil && localKnown && running,
             canSignIn: !busy && !signingIn && ["signed_out", "expired"].contains(accountState),
@@ -229,21 +246,31 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Nanocodex Hand · \(MenuPresentation.text(Host.current().localizedName ?? "This Mac"))")
         for line in view.summary { add(line) }
         if let quitFailure { add(quitFailure) }
-        if !view.resources.isEmpty {
+        if !view.groups.isEmpty {
             menu.addItem(.separator())
-            // Every connection remains accessible in the native menu.
-            for line in view.resources.prefix(35) { add(line) }
-            if view.resources.count > 35 {
-                let overflow = NSMenuItem(title: "More connections…", action: nil, keyEquivalent: "")
+            for group in view.groups {
+                let row = NSMenuItem(title: group.label, action: nil, keyEquivalent: "")
+                row.isEnabled = true
                 let submenu = NSMenu()
                 submenu.autoenablesItems = false
-                for line in view.resources.dropFirst(35) {
-                    let row = NSMenuItem(title: line, action: nil, keyEquivalent: "")
-                    row.isEnabled = false
-                    submenu.addItem(row)
+                if group.entries.count <= 20 {
+                    addConnections(group.entries, to: submenu)
+                } else {
+                    // A large retained/offline category stays bounded too.
+                    // Pages are siblings, avoiding an ever-deeper More chain.
+                    for start in stride(from: 0, to: group.entries.count, by: 20) {
+                        let end = min(start + 20, group.entries.count)
+                        let page = NSMenuItem(title: "Connections \(start + 1)–\(end)", action: nil, keyEquivalent: "")
+                        page.isEnabled = true
+                        let pageMenu = NSMenu()
+                        pageMenu.autoenablesItems = false
+                        addConnections(Array(group.entries[start..<end]), to: pageMenu)
+                        page.submenu = pageMenu
+                        submenu.addItem(page)
+                    }
                 }
-                overflow.submenu = submenu
-                menu.addItem(overflow)
+                row.submenu = submenu
+                menu.addItem(row)
             }
         }
         menu.addItem(.separator())
@@ -261,6 +288,14 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item?.button?.setAccessibilityLabel("Nanocodex Hand · " + view.summary.dropFirst().joined(separator: ". "))
         item?.button?.image = NSImage(systemSymbolName: view.warning ? "exclamationmark.triangle" : "hand.raised.fill", accessibilityDescription: "Nanocodex Hand")
         item?.button?.image?.isTemplate = true
+    }
+
+    private func addConnections(_ entries: [String], to target: NSMenu) {
+        for title in entries {
+            let row = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            target.addItem(row)
+        }
     }
 
     // Serialized child processes keep every network read off the AppKit thread.
