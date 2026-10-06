@@ -1,3 +1,4 @@
+import { accountNavigationLinks } from "nanocodex-connect-protocol";
 import { parseSshCredentialImport, sshCredentialImportDigest, sshImportFromResources, sshTargetResource } from "./sshCredentialImport.mts";
 import type { SshCredentialImport } from "./sshCredentialImport.mts";
 import { machOnramp, type MachOnrampEnv } from "./machOnramp";
@@ -513,6 +514,12 @@ export default {
     };
     try {
       const url = new URL(request.url);
+      if (url.pathname === "/v1/account/links") {
+        const headers = { "cache-control": "no-store" };
+        if (request.method !== "GET") return cors(Response.json({ error: "method_not_allowed" }, { status: 405, headers: { ...headers, allow: "GET" } }), request);
+        const links = accountNavigationLinks(connectDialogOrigin(url), url.searchParams);
+        return cors(Response.json(links ?? { error: "invalid_request" }, { status: links ? 200 : 400, headers }), request);
+      }
       const store = Kv.durableObject(env.CONNECT_STATE);
 
       const oauthHooks = mcpOAuthHooks(env, store, context);
