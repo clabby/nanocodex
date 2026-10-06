@@ -649,7 +649,9 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       const consumed=await call(`/v1/agents/${steered}/events/history?after=0&limit=256`);
       const acknowledgements=consumed.data.filter(row=>row.event?.type==='run.steered');
       assert.deepEqual(acknowledgements.map(row=>row.event.payload.steer_index),[1,2]);
-      assert.deepEqual(acknowledgements.map(row=>row.event.payload.instruction_bytes),[Buffer.byteLength(first),Buffer.byteLength(second)]);
+      assert.equal(acknowledgements[0].event.payload.instruction_bytes,Buffer.byteLength(first));
+      assert.ok(acknowledgements[1].event.payload.instruction_bytes>=Buffer.byteLength(second),'voice delegation retains its origin context');
+      assert.ok(JSON.stringify(activeSteerRequests[1]).includes(second),'voice steering preserves the complete instruction');
       assert.equal(activeSteerRequests.length,2,'one initial request and one ordered continuation');
       const terminalIndex=consumed.data.findIndex(row=>row.event?.type==='run.completed');
       assert.ok(terminalIndex>=0 && acknowledgements.every(row=>consumed.data.indexOf(row)<terminalIndex),'consumption precedes terminal completion');
@@ -754,7 +756,7 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     const mimo=(await call('/v1/agents','POST',{},201)).agent_id;
     await call(`/v1/agents/${mimo}/routing`,'POST',{model:'mimo-v2.6-pro',thinking:'low'});
     assert.equal((await call(`/v1/agents/${mimo}`)).settings.model,'mimo-v2.6-pro');
-    await turn(mimo,'MODEL_IDENTITY_PROBE: hich model r u','journey-mimo-identity');
+    await turn(mimo,'MODEL_IDENTITY_PROBE: which model r u','journey-mimo-identity');
     await mf.dispose();mf=new Miniflare(options);
     await turn(mimo,'MODEL_IDENTITY_PROBE: arent u mimo','journey-mimo-identity-reopen');
     const identityHistory=await call(`/v1/agents/${mimo}/events/history?after=0&limit=256`);
