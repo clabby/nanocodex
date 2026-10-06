@@ -17,9 +17,9 @@
 
 use super::{
     AgentEvents, Cell, DurableAgentExt, HashMap, JavaScriptDurabilityStore, JavaScriptSpawnRouter,
-    JsFuture, JsValue, Mutex, Prompt, Rc, RefCell, RustNanocodex, TurnState, WasmHarnessFactory,
-    WasmSubagents, WasmSubagentsConfig, WasmTurn, forward_events, host_cancel_code_turn, js_error,
-    validate_operation_id,
+    JsFuture, JsValue, Mutex, Prompt, PromptRoute, Rc, RefCell, RustNanocodex, TurnState,
+    WasmHarnessFactory, WasmSubagents, WasmSubagentsConfig, WasmTurn, forward_events,
+    host_cancel_code_turn, js_error, validate_operation_id,
 };
 use nanocodex_claude::{
     Claude, ClaudeAuthFuture, ClaudeAuthProvider, ClaudeAuthUnavailable, ClaudeClient,
@@ -469,13 +469,59 @@ impl WasmNanoclaude {
             request_id,
             cancel_on_admission.unwrap_or(false),
         );
+        self.track(&turn);
+        Ok(turn)
+    }
+
+    /// Accepts ordered multimodal JSON content: text, image URLs or data URLs,
+    /// and inline `file` documents (PDF or plain text). Local paths are rejected.
+    #[wasm_bindgen(js_name = promptContent)]
+    pub fn prompt_content(
+        &self,
+        content_json: &str,
+        request_id: Option<String>,
+        cancel_on_admission: Option<bool>,
+    ) -> Result<WasmTurn, JsValue> {
+        validate_operation_id(request_id.as_deref())?;
+        let turn = WasmTurn::accept(
+            self.inner.clone(),
+            super::parse_browser_prompt(content_json)?,
+            request_id,
+            cancel_on_admission.unwrap_or(false),
+        );
+        self.track(&turn);
+        Ok(turn)
+    }
+
+    /// Atomically steers the active Claude turn or starts a new one, for live
+    /// frontends such as realtime voice. Returns `undefined` when steered.
+    #[wasm_bindgen(js_name = routePrompt)]
+    pub async fn route_prompt(&self, instruction: &str) -> Result<Option<WasmTurn>, JsValue> {
+        if instruction.trim().is_empty() {
+            return Err(js_error("prompt instruction must not be empty"));
+        }
+        match self
+            .inner
+            .route_prompt(Prompt::new(instruction))
+            .await
+            .map_err(js_error)?
+        {
+            PromptRoute::Steered => Ok(None),
+            PromptRoute::Started(turn) => {
+                let turn = WasmTurn::started(turn);
+                self.track(&turn);
+                Ok(Some(turn))
+            }
+        }
+    }
+
+    fn track(&self, turn: &WasmTurn) {
         let mut turns = self.turns.borrow_mut();
         turns.retain(|turn| {
             turn.upgrade()
                 .is_some_and(|state| state.borrow().completed.is_none())
         });
         turns.push(Rc::downgrade(&turn.state));
-        Ok(turn)
     }
 
     pub async fn compact(&self) -> Result<(), JsValue> {

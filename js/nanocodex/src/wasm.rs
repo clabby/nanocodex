@@ -2966,7 +2966,7 @@ impl WasmTurn {
             Some(id) => control.steer_with_id(id, Prompt::new(instruction)).await,
             None => control.steer(Prompt::new(instruction)).await,
         }
-        .map_err(js_error)
+        .map_err(|error| js_turn_error(turn_failure(&error)))
     }
 
     /// Injects browser-safe multimodal input at the active turn's next boundary.
@@ -2986,7 +2986,7 @@ impl WasmTurn {
             Some(id) => control.steer_with_id(id, prompt).await,
             None => control.steer(prompt).await,
         }
-        .map_err(js_error)
+        .map_err(|error| js_turn_error(turn_failure(&error)))
     }
 
     /// Removes the latest identified steer while it is still pending.
@@ -2998,7 +2998,10 @@ impl WasmTurn {
     #[wasm_bindgen(js_name = withdrawSteer)]
     pub async fn withdraw_steer(&self, message_id: String) -> Result<bool, JsValue> {
         match self.control().await {
-            Ok(control) => control.withdraw_steer(message_id).await.map_err(js_error),
+            Ok(control) => control
+                .withdraw_steer(message_id)
+                .await
+                .map_err(|error| js_turn_error(turn_failure(&error))),
             Err(_)
                 if self
                     .state

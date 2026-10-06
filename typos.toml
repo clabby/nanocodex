@@ -69,6 +69,9 @@ zink = "zink"
 Zink = "Zink"
 # The Rust and Swift voice transcript parsers recognize this legacy XML tag.
 soruce = "soruce"
+# Provider brand name, not a spelling error.
+LASO = "LASO"
+
 ratatui = "ratatui"
 serde = "serde"
 wasm = "wasm"
