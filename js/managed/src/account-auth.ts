@@ -1,3 +1,5 @@
+import { requireSameOriginMutation } from "./same-origin-mutation";
+export { requireSameOriginMutation };
 import { readTodoSourceHealth } from "./todo-source-health";
 import { readTodoCalendarBriefings } from "./todo-calendar-briefings";
 import { backfillTodoPreparation, nextTodoPreparationAlarm, runTodoPreparation, scheduleTodoPreparation } from "./todo-preparation";
@@ -1129,16 +1131,6 @@ export async function authenticatePersistentPasskeyAccount(
   }
 }
 
-export function requireSameOriginMutation(
-  request: Request,
-  url: URL,
-  principal: Principal,
-): Response | undefined {
-  if (principal.kind !== "account_session") return undefined;
-  return request.headers.get("origin") === url.origin
-    ? undefined
-    : json({ error: "forbidden_origin" }, { status: 403 });
-}
 
 export async function listAgents(env: AccountAuthEnv, userId: string): Promise<AgentSummary[]> {
   const response = await env.NANOCODEX_USERS.getByName(userId, durablePlacementOptions(env.trustedClientIngressColo)).fetch("https://user.internal/agents");

@@ -1384,11 +1384,6 @@ private struct AgentComposerView: View {
                 Text(error).font(.caption).foregroundStyle(Ink.muted).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16).padding(.vertical, 8).accessibilityIdentifier("attachment-error")
             }
-            if card?.model.hasPrefix("claude-") == true {
-                Text("Claude supports text messages only. Attachments and voice are not available.")
-                    .font(.caption).foregroundStyle(Ink.muted).padding(.horizontal, 16).padding(.vertical, 8)
-                    .accessibilityIdentifier("claude-text-only")
-            }
             if !attachments.isEmpty {
                 composerText.frame(minHeight: 52, alignment: .topLeading).padding(.horizontal, 12)
             }
