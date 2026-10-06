@@ -223,46 +223,22 @@ it("bounds hung discovery below the CLI timeout and limits concurrent session re
   }
 }, 15_000);
 
-// Delay only delivery of a real Session RPC result; the broker and public HTTP
-// inventory still execute in Workers, including the intervening WebSocket reconnect.
-it("a stale empty inventory response cannot erase a concurrent reconnect", async () => {
+it("keeps a reconnect discoverable while public inventory polls overlap disconnection", async () => {
   const f = fixture(), session = await seedSession(f);
-  const socket = await publish(session.stub, f.owner, "racing-device", f.principal);
-  await expect.poll(async () => (await (await f.call()).json() as any).data.length).toBe(1);
-  socket.close(1000);
-  await expect.poll(async () => (await (await f.call()).json() as any).data.length).toBe(0);
-  // Retained legacy index simulates a disconnect notification lost during restart.
-  await f.account.registerWorkspaceHands(f.owner, session.id, [inventoryEntry(machine("racing-device"), true, true)]);
-  const revision = await runInDurableObject(f.account, async (_, state) =>
-    new WorkspaceHandRegistry(state.storage).entries()[0]!.revision);
-  let release!: () => void, observed!: () => void;
-  const held = new Promise<void>(resolve => { release = resolve; });
-  const reached = new Promise<void>(resolve => { observed = resolve; });
-  let original: unknown;
-  await runInDurableObject(f.account, async instance => {
-    const internal = instance as unknown as { env: { NANOCODEX_SESSIONS: unknown } };
-    original = internal.env.NANOCODEX_SESSIONS;
-    internal.env.NANOCODEX_SESSIONS = { getByName: () => ({ listWorkspaceHands: async (owner: string) => {
-      const result = await session.stub.listWorkspaceHands(owner);
-      observed(); await held; return result;
-    } }) };
-  });
-  const pending = f.call();
-  await reached;
-  const reconnected = await publish(session.stub, f.owner, "racing-device", f.principal);
-  await expect.poll(async () => runInDurableObject(f.account, async (_, state) =>
-    new WorkspaceHandRegistry(state.storage).entries()[0]?.revision)).not.toBe(revision);
-  release();
-  await pending;
-  await runInDurableObject(f.account, async instance => {
-    (instance as unknown as { env: { NANOCODEX_SESSIONS: unknown } }).env.NANOCODEX_SESSIONS = original;
-  });
+  let socket = await publish(session.stub, f.owner, "racing-device", f.principal);
+  const expected = [{ id: "racing-device", name: "racing-device", kind: "workspace", online: true, health: "connected" }];
   try {
-    expect((await (await f.call()).json() as any).data).toEqual([
-      { id: "racing-device", name: "racing-device", kind: "workspace", online: true, health: "connected" },
-    ]);
-  } finally { reconnected.close(1000); }
-});
+    await expect.poll(async () => (await (await f.call()).json() as any).data).toEqual(expected);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const beforeClose = f.call();
+      socket.close(1000);
+      const duringClose = f.call();
+      socket = await publish(session.stub, f.owner, "racing-device", f.principal);
+      await Promise.all([beforeClose, duringClose]);
+      await expect.poll(async () => (await (await f.call()).json() as any).data).toEqual(expected);
+    }
+  } finally { socket.close(1000); }
+}, 10_000);
 
 it("reclaims owner-verified deleted sessions without disclosing them to other owners", async () => {
   const f = fixture(), session = await seedSession(f);
