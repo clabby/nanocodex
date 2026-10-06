@@ -2,7 +2,7 @@
 //! Failure cases defined before implementation: terminal receipt replay after
 //! restart; completed tool receipts after a failed provider continuation; live
 //! cancellation after an effect starts (unknown outcome, never dispatched again);
-//! signed/opaque compaction suffixes and container/discovery state across reopen.
+//! opaque compaction suffixes and container/discovery state across reopen.
 //! Pending effects after a process crash follow the store's at-least-once policy.
 #![cfg(all(feature = "claude", feature = "sqlite"))]
 
@@ -178,7 +178,7 @@ fn signed_round() -> Vec<Value> {
 }
 
 #[tokio::test]
-async fn completed_effect_and_signed_compaction_suffix_survive_reopen() {
+async fn completed_effect_and_opaque_compaction_suffix_survive_reopen() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -191,7 +191,7 @@ async fn completed_effect_and_signed_compaction_suffix_survive_reopen() {
     let effects = Arc::new(AtomicUsize::new(0));
     let receipt = vec![
         json!({"type":"text","text":"effect committed"}),
-        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}),
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}}),
     ];
     for recovery in [false, true] {
         let counter = effects.clone();
@@ -236,7 +236,10 @@ async fn completed_effect_and_signed_compaction_suffix_survive_reopen() {
         1,
         "completed effects must not repeat after reopen"
     );
-    assert_eq!(log[2]["messages"][1]["content"], json!(signed_round()));
+    assert_eq!(
+        log[2]["messages"][1]["content"],
+        json!(&signed_round()[2..])
+    );
     assert_eq!(
         log[2]["messages"][2]["content"][0]["content"],
         json!(receipt)
@@ -312,7 +315,10 @@ async fn live_interrupted_effect_is_unknown_after_compaction_and_reopen() {
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     let log = requests.lock().unwrap().clone();
     assert_eq!(log.len(), 3);
-    assert_eq!(log[2]["messages"][1]["content"], json!(signed_round()));
+    assert_eq!(
+        log[2]["messages"][1]["content"],
+        json!(&signed_round()[2..])
+    );
     let unknown = &log[2]["messages"][2]["content"][0];
     assert_eq!(unknown["tool_use_id"], "effect-once");
     assert_eq!(unknown["is_error"], true);
@@ -540,6 +546,311 @@ enum CompactionJourney {
     ExhaustionAfterRecovery,
 }
 
+#[tokio::test]
+async fn transient_retry_model_receipt_survives_commit_acknowledgement_loss() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    for after_commit in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let armed = Arc::new(AtomicBool::new(false));
+        let (client, requests, server) = server({
+            let armed = armed.clone();
+            move |index, request| {
+                if index == 1 {
+                    return "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".into();
+                }
+                if index == 2 {
+                    // Interrupt the model receipt write on either side of commit.
+                    armed.store(true, Ordering::SeqCst);
+                }
+                if request["messages"].to_string().contains("tool_result") {
+                    sse(text("completed after retry"), "end_turn", 10)
+                } else {
+                    sse(signed_round(), "tool_use", 10)
+                }
+            }
+        }).await;
+        let state = DurableSession::open(
+            FaultStore {
+                inner: SqliteStore::open(&path).unwrap(),
+                writes: Arc::new(AtomicUsize::new(0)),
+                fail_at: None,
+                after_commit,
+                fail_when_armed: Some(armed),
+            },
+            "claude-synthetic",
+        )
+        .await
+        .unwrap();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "original-model"))
+            .tool(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("committed once".into()) }
+            })
+            .durability(state)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let request = || PromptRequest::new("perform effect once").request_id("retry-receipt");
+        let error = agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap_err();
+        assert!(
+            error.execution_policy_disposition().is_some(),
+            "receipt write must cause the interruption: {error}"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "transient failure must reach the receipt cut"
+        );
+        assert_eq!(
+            effects.load(Ordering::SeqCst),
+            0,
+            "receipt must precede client effects"
+        );
+        let _ = agent.shutdown().await;
+        drop((agent, events));
+
+        for completed_replay in [false, true] {
+            let counter = effects.clone();
+            let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "changed-model"))
+                .system("changed after reopen")
+                .max_tokens(128)
+                .tool(tool(), move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async { Ok("committed once".into()) }
+                })
+                .durability(reopen(&path).await)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            let before = requests.lock().unwrap().len();
+            let result = agent
+                .prompt(request())
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap();
+            assert_eq!(result.final_message(), "completed after retry");
+            assert_eq!(result.usage().unwrap().total_tokens(), 30);
+            assert_eq!(effects.load(Ordering::SeqCst), 1);
+            let log = requests.lock().unwrap().clone();
+            if completed_replay {
+                assert_eq!(
+                    log.len(),
+                    before,
+                    "terminal replay must skip all model attempts"
+                );
+            } else {
+                assert_eq!(log.len(), if after_commit { 3 } else { 4 });
+                assert_eq!(log[0], log[1], "live retry preserves the frozen request");
+                if !after_commit {
+                    assert_eq!(
+                        log[0], log[2],
+                        "unsettled model replay preserves the frozen request"
+                    );
+                }
+                assert!(
+                    log.iter()
+                        .all(|request| request["model"] == "original-model"
+                            && request.get("system").is_none())
+                );
+            }
+            eprintln!(
+                "retry receipt after_commit={after_commit} terminal_replay={completed_replay}: requests={}, client_effects=1, usage=30",
+                log.len()
+            );
+            agent.shutdown().await.unwrap();
+            drop((agent, events));
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn cancelled_and_exhausted_retries_remain_terminal_after_reopen() {
+    use futures_util::StreamExt;
+    use nanocodex_agent::events::AgentEventKind;
+    for cancel in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let (client, requests, server) = server(|_, _| "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".into()).await;
+        let request = || PromptRequest::new("bounded retry").request_id("terminal-retry");
+        for replay in [false, true] {
+            let (agent, mut events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+                .durability(reopen(&path).await)
+                .await
+                .unwrap()
+                .build()
+                .unwrap();
+            let result = match agent.prompt(request()).await {
+                Ok(turn) => {
+                    if cancel && !replay {
+                        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                            loop {
+                                if events.next().await.unwrap().kind
+                                    == AgentEventKind::ModelAttemptRetrying
+                                {
+                                    break;
+                                }
+                            }
+                        })
+                        .await
+                        .unwrap();
+                        turn.cancel().await.unwrap();
+                    }
+                    turn.result().await
+                }
+                Err(error) => Err(error),
+            };
+            let error = result.unwrap_err();
+            if !cancel {
+                assert!(error.to_string().contains("overloaded_error"));
+            }
+            assert_eq!(requests.lock().unwrap().len(), if cancel { 1 } else { 5 });
+            eprintln!(
+                "retry terminal cancel={cancel} replay={replay}: requests={}, error={error}",
+                requests.lock().unwrap().len()
+            );
+            agent.shutdown().await.unwrap();
+            drop((agent, events));
+        }
+        server.abort();
+    }
+}
+
+async fn denied_tool_recovery(fail_at: Option<usize>, after_commit: bool) -> (usize, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let writes = Arc::new(AtomicUsize::new(0));
+    let response_write = Arc::new(AtomicUsize::new(usize::MAX));
+    let (client, requests, server) = server({
+        let writes = writes.clone();
+        let response_write = response_write.clone();
+        move |_, request| {
+            response_write.fetch_min(writes.load(Ordering::SeqCst), Ordering::SeqCst);
+            if request["messages"].as_array().unwrap().iter().any(|message| {
+                message["content"].as_array().unwrap().iter().any(|block| block["type"] == "tool_result")
+            }) {
+                sse(text("denial retained"), "end_turn", 10)
+            } else {
+                sse(vec![json!({"type":"tool_use","id":"denied-plan","name":"update_plan","input":{}})], "tool_use", 10)
+            }
+        }
+    }).await;
+    let request = || PromptRequest::new("use only admitted tools").request_id("denied-turn");
+    let state = DurableSession::open(
+        FaultStore {
+            inner: SqliteStore::open(&path).unwrap(),
+            writes: writes.clone(),
+            fail_at,
+            after_commit,
+            fail_when_armed: None,
+        },
+        "claude-synthetic",
+    )
+    .await
+    .unwrap();
+    let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+        .durability(state)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    let first = agent.prompt(request()).await.unwrap().result().await;
+    if fail_at.is_some() {
+        assert!(
+            first.is_err(),
+            "write {fail_at:?}/{after_commit} must interrupt the driver"
+        );
+    } else {
+        assert_eq!(first.unwrap().final_message(), "denial retained");
+    }
+    let total_writes = writes.load(Ordering::SeqCst);
+    let _ = agent.shutdown().await;
+    drop((agent, events));
+
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let (agent, events) = Nanocodex::builder(Claude::new(client, "changed-model"))
+        .tool(
+            ToolDefinition {
+                name: "update_plan".into(),
+                ..tool()
+            },
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("newly attached effect".into()) }
+            },
+        )
+        .durability(reopen(&path).await)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "denial retained"
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        0,
+        "reopen cannot authorize the denied call at {fail_at:?}/{after_commit}"
+    );
+    let log = requests.lock().unwrap().clone();
+    for request in &log {
+        assert!(request["tools"].as_array().is_none_or(Vec::is_empty));
+        assert_eq!(request["model"], "test");
+    }
+    let receipt = &log.last().unwrap()["messages"][2]["content"][0];
+    assert_eq!(receipt["tool_use_id"], "denied-plan");
+    assert_eq!(receipt["is_error"], true);
+    assert!(
+        receipt["content"]
+            .as_str()
+            .unwrap()
+            .contains("no handler was invoked")
+    );
+    eprintln!(
+        "denied tool recovery cut={fail_at:?}; after_commit={after_commit}; requests={}; effects=0; receipt={receipt}",
+        log.len()
+    );
+    agent.shutdown().await.unwrap();
+    drop((agent, events));
+    server.abort();
+    (response_write.load(Ordering::SeqCst), total_writes)
+}
+
+#[tokio::test]
+async fn denied_tool_stays_denied_across_every_recovery_write() {
+    let (response_write, total_writes) = denied_tool_recovery(None, false).await;
+    // The provider response starts after the original catalog is durable.
+    // Cover both sides of every write through denial receipt and terminal commit.
+    for after_commit in [false, true] {
+        for ordinal in response_write..total_writes {
+            denied_tool_recovery(Some(ordinal), after_commit).await;
+        }
+    }
+}
+
 async fn transaction_recovery(
     fail_at: Option<usize>,
     after_commit: bool,
@@ -567,7 +878,7 @@ async fn transaction_recovery(
             .any(|block| block["type"] == "tool_result");
         if context_exhaustion
             && has_receipt
-            && !request["messages"].to_string().contains("signed-exhaustion")
+            && !request["messages"].to_string().contains("completed-fetch")
         {
             sse(
                 vec![
@@ -745,7 +1056,7 @@ async fn transaction_recovery(
     if context_exhaustion {
         let log = requests.lock().unwrap();
         let continuation = log.last().unwrap()["messages"].to_string();
-        assert!(continuation.contains("signed-exhaustion"));
+        assert!(!continuation.contains("signed-exhaustion"));
         assert!(continuation.contains("completed-fetch"));
         if after_commit || fail_at.is_none() {
             assert_eq!(log.len(), 4, "committed model responses must not repeat");
@@ -1693,7 +2004,10 @@ async fn manual_compaction_cancels_active_tool_then_preserves_safe_context_on_re
         .unwrap();
     let log = requests.lock().unwrap().clone();
     assert_eq!(log.len(), 3);
-    assert_eq!(log[2]["messages"][1]["content"], json!(signed_round()));
+    assert_eq!(
+        log[2]["messages"][1]["content"],
+        json!(&signed_round()[2..])
+    );
     let receipt = &log[2]["messages"][2]["content"][0];
     assert_eq!(receipt["tool_use_id"], "effect-once");
     assert_eq!(receipt["is_error"], true);
@@ -1915,7 +2229,7 @@ async fn uncertain_paused_server_turn_survives_compaction_cancellation_and_sqlit
             1,
             "uncertain effects must not repeat"
         );
-        assert_eq!(log[2]["messages"][1]["content"][1]["id"], "paused-mutation");
+        assert_eq!(log[2]["messages"][1]["content"][0]["id"], "paused-mutation");
         assert!(!log[1]["messages"].to_string().contains("paused-mutation"));
         for request in &log[3..] {
             assert!(
@@ -1935,7 +2249,7 @@ async fn uncertain_paused_server_turn_survives_compaction_cancellation_and_sqlit
                 .find(|text| text.contains("paused-mutation"))
                 .expect("prior server evidence");
             assert!(evidence.contains("outcome unknown"));
-            assert!(evidence.contains("opaque-paused-signature"));
+            assert!(!evidence.contains("opaque-paused-signature"));
             assert!(evidence.contains("retain-evidence"));
             assert!(evidence.contains("provider transcript truncated"));
             assert!(evidence.len() <= 66_000, "bounded UTF-8 evidence");
@@ -2138,5 +2452,137 @@ async fn legacy_failed_server_snapshot_accepts_new_input_without_native_replay()
     assert!(messages.to_string().contains("outcome unknown"));
     assert_eq!(messages.to_string().matches("NEW_USER_REQUEST").count(), 1);
     assert_eq!(log[0]["container"], "legacy-container");
+    server.abort();
+}
+
+// A legacy compacted checkpoint can retain thinking bound to an omitted prefix.
+// Its completed tool transcript and admitted identities still belong to the
+// session, while thinking returned for the replacement prefix remains replayable.
+#[tokio::test]
+async fn legacy_compacted_snapshot_recovers_and_retains_new_thinking_after_reopen() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy-compacted.sqlite");
+    let retained = vec![
+        json!({"type":"server_tool_use","id":"legacy-completed-fetch","name":"web_fetch","input":{"url":"https://example.org"},"opaque":{"authorization":"original"}}),
+        json!({"type":"web_fetch_tool_result","tool_use_id":"legacy-completed-fetch","content":{"type":"web_fetch_result","url":"https://example.org","content":"retained page"},"opaque":{"receipt":[1,{"value":"unchanged"}]}}),
+        signed_round()[2].clone(),
+    ];
+    let receipt = json!({
+        "type":"tool_result","tool_use_id":"effect-once",
+        "content":[
+            {"type":"text","text":"effect committed"},
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}}
+        ],
+        "opaque":{"receipt":"original"}
+    });
+    let mut legacy_blocks = signed_round()[..2].to_vec();
+    legacy_blocks.extend(retained.clone());
+    let session = reopen(&path).await;
+    session
+        .admit("legacy-compacted", &json!({"legacy":"complete one effect"}))
+        .await
+        .unwrap();
+    session.begin_attempt("legacy-compacted").await.unwrap();
+    session.fail("legacy-compacted", &json!({
+        "provider":"claude", "version":1, "discovered":[], "tasks":null,
+        "conversation":{
+            "admitted_tool_ids":["effect-once"], "recovery_notices":[],
+            "messages":[
+                {"role":"assistant","content":legacy_blocks},
+                {"role":"user","content":[receipt.clone()]}
+            ],
+            "summary":"The original task authorized one effect, which committed.",
+            "active_context_tokens":10, "pending_continuation":true,
+            "auto_compaction_suppressed":true, "rapid_compactions":1, "rounds_since_compaction":0,
+            "previous_message_id":"legacy-summary", "container":"legacy-container"
+        }
+    }), "synthetic continuation failure").await.unwrap();
+    drop(session);
+
+    let fresh = vec![
+        json!({"type":"thinking","thinking":"reconcile the preserved receipt","signature":"replacement-prefix-signature","binding":{"opaque":"new prefix"}}),
+        json!({"type":"redacted_thinking","data":"replacement-prefix-redacted","binding":{"opaque":"new prefix"}}),
+        json!({"type":"text","text":"legacy compacted state reconciled"}),
+    ];
+    let output = fresh.clone();
+    let (client, requests, server) = server(move |index, _| match index {
+        1 => sse(output.clone(), "end_turn", 10),
+        _ => sse(vec![signed_round()[2].clone()], "tool_use", 10),
+    })
+    .await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let recovered_request = || {
+        PromptRequest::new("reconcile the completed legacy effect")
+            .request_id("recover-legacy-compacted")
+    };
+    let mut recorded_usage = None;
+    for recovery in [false, true] {
+        let counter = effects.clone();
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
+            .tool(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("must not repeat".into()) }
+            })
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let result = agent
+            .prompt(recovered_request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        assert_eq!(result.final_message(), "legacy compacted state reconciled");
+        let usage = result.usage().unwrap().total_tokens();
+        assert_eq!(*recorded_usage.get_or_insert(usage), usage);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "terminal receipt replay must not call HTTP after reopen"
+        );
+        if recovery {
+            let error = agent
+                .prompt(PromptRequest::new("review the receipt again").request_id("review-legacy"))
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("reused an admitted tool_use id"),
+                "compaction and reopen must retain admission identity: {error}"
+            );
+        }
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+    }
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        0,
+        "the completed legacy effect must never be dispatched again"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0]["messages"][1]["content"], json!(retained));
+    assert_eq!(log[0]["messages"][2]["content"], json!([receipt]));
+    assert!(
+        log[0]["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("The original task authorized one effect, which committed.")
+    );
+    assert_eq!(log[0]["container"], "legacy-container");
+    assert_eq!(
+        &log[1]["messages"].as_array().unwrap()[..4],
+        log[0]["messages"].as_array().unwrap(),
+        "the recovered prefix must remain exact after restart"
+    );
+    assert_eq!(log[1]["messages"][4]["content"], json!(fresh));
     server.abort();
 }

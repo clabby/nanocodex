@@ -83,6 +83,13 @@ Claude snapshots use the store's chunked immutable payloads; they do not yet
 use the OpenAI adapter's per-message context pages. Snapshot serialization and
 restoration therefore process the full retained Claude context.
 
+An unfinished Claude turn retains its original tool catalog across reopening.
+A well-formed client call outside that catalog receives a paired `is_error`
+result without invoking a handler, so the model can continue with an available
+tool. Attaching a new handler cannot authorize a previously denied call.
+Committed denial and success receipts replay unchanged; malformed calls and
+calls to deferred tools before discovery still fail response validation.
+
 Durability belongs to each explicitly configured agent. The core spawn/fork
 lifecycle does not inherit a durable owner or journal. An embedding that hosts
 Claude's Agent tool can construct each child with its own `DurableSession` and

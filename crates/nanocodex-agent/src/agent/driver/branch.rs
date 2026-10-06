@@ -65,7 +65,7 @@ where
         parent_session_id: &str,
         model: Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         host_context: Option<Arc<str>>,
         side_conversation: bool,
     ) -> Result<(Nanocodex, AgentEvents)> {
@@ -77,7 +77,7 @@ where
         let mut config = (*spawner.config).clone();
         config.model = model;
         config.thinking = thinking;
-        config.fast_mode = fast_mode;
+        config.service_tier = service_tier;
         spawner.config = Arc::new(config);
         spawner.depth = self.depth.saturating_add(1);
         let service = (spawner.service_factory)(Arc::clone(&spawner.config));
@@ -106,7 +106,7 @@ where
         parent_session_id: &str,
         model: Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         stateless_http: bool,
         host_context: Option<Arc<str>>,
     ) -> Result<(Nanocodex, AgentEvents)> {
@@ -116,7 +116,7 @@ where
         let mut config = (*self.config).clone();
         config.model = model;
         config.thinking = thinking;
-        config.fast_mode = fast_mode;
+        config.service_tier = service_tier;
         if stateless_http {
             config.responses_transport = ResponsesTransport::Https;
             config.responses_history = ResponsesHistory::FullReplay;
@@ -181,7 +181,7 @@ where
         let mut config = (*spawner.config).clone();
         config.model = snapshot.model;
         config.thinking = snapshot.thinking;
-        config.fast_mode = snapshot.fast_mode;
+        config.service_tier = snapshot.service_tier;
         if snapshot.stateless_http {
             config.responses_transport = ResponsesTransport::Https;
             config.responses_history = ResponsesHistory::FullReplay;
@@ -260,7 +260,7 @@ where
                 parent_session_id,
                 defaults.model,
                 defaults.thinking,
-                defaults.fast_mode,
+                defaults.service_tier,
                 false,
                 host_context
                     .as_ref()

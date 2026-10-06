@@ -106,6 +106,7 @@ async fn https_ephemeral_replays_complete_follow_on_history() -> Result<()> {
     let server = tokio::spawn(async move {
         let first = next_http_json(&listener).await?;
         assert_eq!(first.body["store"], false);
+        assert_eq!(first.body["service_tier"], "ultrafast");
         assert!(first.body.get("type").is_none());
         assert!(first.body.get("previous_response_id").is_none());
         assert!(first.body.to_string().contains("first prompt"));
@@ -113,6 +114,7 @@ async fn https_ephemeral_replays_complete_follow_on_history() -> Result<()> {
 
         let second = next_http_json(&listener).await?;
         assert_eq!(second.body["store"], false);
+        assert_eq!(second.body["service_tier"], "default");
         assert!(second.body.get("type").is_none());
         assert!(second.body.get("previous_response_id").is_none());
         let replay = second.body.to_string();
@@ -124,6 +126,8 @@ async fn https_ephemeral_replays_complete_follow_on_history() -> Result<()> {
 
     let workspace = temporary_workspace("https-ephemeral-follow-on")?;
     let openai = OpenAi::builder("test-key")
+        .model(Model::Astra)
+        .service_tier(ServiceTier::Ultrafast)
         .transport(ResponsesTransport::Https)
         .store(false)
         .api_base_url(endpoint)
@@ -142,6 +146,7 @@ async fn https_ephemeral_replays_complete_follow_on_history() -> Result<()> {
             .final_message(),
         "done"
     );
+    agent.set_service_tier(ServiceTier::Standard).await?;
     assert_eq!(
         agent
             .prompt("second prompt")

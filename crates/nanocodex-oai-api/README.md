@@ -49,12 +49,21 @@ changes only the wire model ID; model-specific reasoning, compaction, pricing,
 and snapshots continue to use the typed [`Model`] value. It does not add an
 alternate provider or arbitrary-model surface.
 
-USD estimates require no pricing configuration. Each model applies its
-published standard or long-context rates and its model-specific fast rates when
-[`OpenAiBuilder::fast_mode`] is enabled. GPT-6 requests use `priority` on the
-wire for fast mode. Luna and Astra usage receive the same complete estimate and
-status treatment as Sol. Provider-omitted usage
-remains distinguishable as `usage_not_reported`.
+Select Standard, Fast, or Astra Ultrafast with
+`OpenAiBuilder::service_tier(pricing::ServiceTier::Ultrafast)`. Sol and Luna clamp
+Ultrafast to Fast; gateway models use Standard. Standard sends an explicit
+`default`, Fast sends `priority`, and Astra Ultrafast sends `ultrafast` over HTTP
+and WebSocket. The existing `fast_mode(bool)` method selects Fast or Standard,
+replacing any prior tier selection.
+
+USD estimates require no pricing configuration. Each model applies its published
+standard or long-context rates for the same effective tier used by its requests,
+including cached input and cache writes. These are local estimates of requested
+processing, not observed provider charges. Provider-omitted usage remains
+`usage_not_reported`.
+
+Custom service factories read `ModelConfig::service_tier`; it replaces the former
+public `fast_mode` field. Existing boolean builder calls remain source compatible.
 
 ## ChatGPT subscription login
 

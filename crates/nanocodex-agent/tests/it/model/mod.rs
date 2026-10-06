@@ -15,8 +15,9 @@ use tokio::{
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 
 use nanocodex_agent::{
-    AgentHandle, ExecutionEnvironment, Model, Nanocodex, NanocodexError, OpenAi, PromptRoute,
-    ReasoningMode, ResponseError, SpawnOptions, Thinking, Tools,
+    AgentHandle, ChildRuntimeSnapshot, ChildSnapshot, ExecutionEnvironment, Model, Nanocodex,
+    NanocodexError, OpenAi, PromptRoute, ReasoningMode, ResponseError, SpawnOptions, Thinking,
+    Tools,
     events::{AgentEvent, AgentEventData, RunEvent},
     input::Prompt,
     rollout::RolloutConfig,
@@ -29,7 +30,7 @@ use nanocodex_oai_api::{
         OpenAiAuthSource,
     },
     events::AgentEventKind,
-    pricing::CostStatus,
+    pricing::{CostStatus, ServiceTier},
     session::SessionId,
 };
 
@@ -342,7 +343,7 @@ async fn next_http_json(listener: &TcpListener) -> Result<CapturedHttpRequest> {
     })
 }
 
-async fn send_http_final(mut stream: TcpStream, response_id: &str) -> Result<()> {
+async fn send_http_final(stream: TcpStream, response_id: &str) -> Result<()> {
     let event = completed_response(
         response_id,
         &[json!({
@@ -351,7 +352,18 @@ async fn send_http_final(mut stream: TcpStream, response_id: &str) -> Result<()>
             "content": [{ "type": "output_text", "text": "done" }]
         })],
     );
-    let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+    send_http_events(stream, [event]).await
+}
+
+async fn send_http_events(
+    mut stream: TcpStream,
+    events: impl IntoIterator<Item = Value>,
+) -> Result<()> {
+    let mut body = events
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<String>();
+    body.push_str("data: [DONE]\n\n");
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()

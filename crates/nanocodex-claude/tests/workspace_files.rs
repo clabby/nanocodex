@@ -88,7 +88,7 @@ async fn explicitly_opted_in_claude_tools_never_expose_codex_catalog() {
 }
 
 #[tokio::test]
-async fn completed_file_write_survives_followup_transport_error_in_session() {
+async fn completed_file_write_survives_exhausted_followup_retries_in_session() {
     use axum::{http::StatusCode, response::IntoResponse};
     let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().unwrap();
@@ -101,7 +101,7 @@ async fn completed_file_write_survives_followup_transport_error_in_session() {
             let index={let mut l=log.lock().unwrap();l.push(body);l.len()};
             match index {
                 1 => ([ ("content-type","text/event-stream") ],sse(json!({"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"effect.txt","content":"written once"}}),"tool_use")).into_response(),
-                2 => (StatusCode::BAD_GATEWAY,"synthetic follow-up failure").into_response(),
+                2..=6 => (StatusCode::BAD_GATEWAY,"synthetic follow-up failure").into_response(),
                 _ => ([ ("content-type","text/event-stream") ],sse(json!({"type":"text","text":"resumed"}),"end_turn")).into_response(),
             }
         }
@@ -135,9 +135,9 @@ async fn completed_file_write_survives_followup_transport_error_in_session() {
         "resumed"
     );
     let r = requests.lock().unwrap();
-    assert_eq!(r.len(), 3);
-    assert_eq!(r[2]["messages"][1]["content"][0]["name"], "Write");
-    assert_eq!(r[2]["messages"][2]["content"][0]["tool_use_id"], "w1");
+    assert_eq!(r.len(), 7);
+    assert_eq!(r[6]["messages"][1]["content"][0]["name"], "Write");
+    assert_eq!(r[6]["messages"][2]["content"][0]["tool_use_id"], "w1");
     server.abort();
 }
 

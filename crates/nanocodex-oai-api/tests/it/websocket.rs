@@ -1,8 +1,8 @@
 use eyre::{Result, eyre};
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use nanocodex_oai_api::{
-    OpenAi, ResponseEvent, responses::ContentItem, session::ResponseInput,
-    transport::ResponsesError,
+    Model, OpenAi, ResponseEvent, pricing::ServiceTier, responses::ContentItem,
+    session::ResponseInput, transport::ResponsesError,
 };
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, time::timeout};
@@ -239,6 +239,7 @@ async fn rejected_compaction_image_is_replaced_before_full_replay() -> Result<()
         let (stream, _) = listener.accept().await?;
         let mut socket = accept_async(stream).await?;
         let first = next_ws_json(&mut socket).await?;
+        assert_eq!(first["service_tier"], "ultrafast");
         assert!(first.to_string().contains(PNG_DATA_URL));
         send_ws_json(
             &mut socket,
@@ -247,6 +248,7 @@ async fn rejected_compaction_image_is_replaced_before_full_replay() -> Result<()
         .await?;
 
         let compact = next_ws_json(&mut socket).await?;
+        assert_eq!(compact["service_tier"], "ultrafast");
         assert!(compact.to_string().contains("compaction_trigger"));
         assert_eq!(compact["previous_response_id"], "resp-image");
         send_ws_json(
@@ -265,6 +267,7 @@ async fn rejected_compaction_image_is_replaced_before_full_replay() -> Result<()
         .await?;
 
         let (mut socket, replay) = next_request_or_reconnect(socket, &listener).await?;
+        assert_eq!(replay["service_tier"], "ultrafast");
         assert!(replay.get("previous_response_id").is_none());
         let encoded = replay["input"].to_string();
         assert!(encoded.contains("Describe this image."));
@@ -280,12 +283,15 @@ async fn rejected_compaction_image_is_replaced_before_full_replay() -> Result<()
         .await?;
 
         let continuation = next_ws_json(&mut socket).await?;
+        assert_eq!(continuation["service_tier"], "ultrafast");
         assert_eq!(continuation["previous_response_id"], "resp-replayed");
         send_ws_json(&mut socket, completed_response("resp-next", "Next.")).await?;
         Ok::<_, eyre::Report>(vec![first, compact, replay, continuation])
     });
 
     let openai = OpenAi::builder("test-api-key")
+        .model(Model::Astra)
+        .service_tier(ServiceTier::Ultrafast)
         .websocket_url(websocket_url)
         .build()?;
     let mut session = openai.instructions("Describe images briefly.").build()?;

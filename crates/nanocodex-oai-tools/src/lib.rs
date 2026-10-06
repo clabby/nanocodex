@@ -32,7 +32,7 @@ mod code_mode_spec;
 pub mod embedded;
 #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 pub mod extensions;
-#[cfg(feature = "code-mode")]
+#[cfg(feature = "image-processing")]
 pub mod image;
 #[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 mod image_generation;

@@ -1,3 +1,4 @@
+use crate::pricing::ServiceTier;
 use std::{
     num::NonZeroU32,
     sync::{
@@ -161,7 +162,7 @@ pub struct ResponsesAttempt {
     previous_response_id: Option<String>,
     model: Model,
     thinking: Thinking,
-    fast_mode: bool,
+    service_tier: ServiceTier,
     pub(crate) profile: Arc<RequestProfile>,
     pub(crate) observer: ResponsesObserver,
     pub(crate) attempt: u32,
@@ -175,7 +176,7 @@ impl ResponsesAttempt {
     fn warmup(
         model: Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         profile: Arc<RequestProfile>,
         observer: ResponsesObserver,
         session_transport: Arc<SessionTransport>,
@@ -190,7 +191,7 @@ impl ResponsesAttempt {
             previous_response_id: None,
             model,
             thinking,
-            fast_mode,
+            service_tier,
             profile,
             observer,
             attempt: 1,
@@ -210,7 +211,7 @@ impl ResponsesAttempt {
         previous_response_id: Option<&str>,
         model: Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         profile: Arc<RequestProfile>,
         observer: ResponsesObserver,
         session_transport: Arc<SessionTransport>,
@@ -225,7 +226,7 @@ impl ResponsesAttempt {
             previous_response_id: previous_response_id.map(str::to_owned),
             model,
             thinking,
-            fast_mode,
+            service_tier,
             profile,
             observer,
             attempt: 1,
@@ -246,7 +247,7 @@ impl ResponsesAttempt {
         trigger: ResponseItem,
         model: Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         profile: Arc<RequestProfile>,
         observer: ResponsesObserver,
         session_transport: Arc<SessionTransport>,
@@ -261,7 +262,7 @@ impl ResponsesAttempt {
             previous_response_id: previous_response_id.map(str::to_owned),
             model,
             thinking,
-            fast_mode,
+            service_tier,
             profile,
             observer,
             attempt: 1,
@@ -316,10 +317,16 @@ impl ResponsesAttempt {
         self.model
     }
 
-    /// Returns whether this replayable attempt uses priority service.
+    /// Returns the effective processing tier fixed for this replayable attempt.
+    #[must_use]
+    pub const fn service_tier(&self) -> ServiceTier {
+        self.service_tier.effective_for_model(self.model)
+    }
+
+    /// Returns whether accelerated processing was requested for this attempt.
     #[must_use]
     pub const fn fast_mode(&self) -> bool {
-        self.fast_mode
+        !matches!(self.service_tier, ServiceTier::Standard)
     }
 
     /// Returns the current physical attempt number.
@@ -559,11 +566,16 @@ impl ResponsesAttemptFactory {
 
     /// Builds a WebSocket warmup attempt.
     #[must_use]
-    pub fn warmup(&self, model: Model, thinking: Thinking, fast_mode: bool) -> ResponsesAttempt {
+    pub fn warmup(
+        &self,
+        model: Model,
+        thinking: Thinking,
+        service_tier: impl Into<ServiceTier>,
+    ) -> ResponsesAttempt {
         let mut attempt = ResponsesAttempt::warmup(
             model,
             thinking,
-            fast_mode,
+            service_tier.into(),
             Arc::clone(&self.profile),
             self.observer.clone(),
             Arc::clone(&self.session_transport),
@@ -580,7 +592,7 @@ impl ResponsesAttemptFactory {
         history: &RequestHistory,
         model: Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: impl Into<ServiceTier>,
     ) -> ResponsesAttempt {
         let mut attempt = ResponsesAttempt::generation(
             call_index,
@@ -590,7 +602,7 @@ impl ResponsesAttemptFactory {
             history.previous_response_id.as_deref(),
             model,
             thinking,
-            fast_mode,
+            service_tier.into(),
             Arc::clone(&self.profile),
             self.observer.clone(),
             Arc::clone(&self.session_transport),
@@ -608,7 +620,7 @@ impl ResponsesAttemptFactory {
         trigger: ResponseItem,
         model: Model,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: impl Into<ServiceTier>,
     ) -> ResponsesAttempt {
         let mut attempt = ResponsesAttempt::compaction(
             call_index,
@@ -619,7 +631,7 @@ impl ResponsesAttemptFactory {
             trigger,
             model,
             thinking,
-            fast_mode,
+            service_tier.into(),
             Arc::clone(&self.profile),
             self.observer.clone(),
             Arc::clone(&self.session_transport),

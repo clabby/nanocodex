@@ -22,7 +22,9 @@ xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
 url.workspace = true
 nanocodex-claude-tools = { path = "../nanocodex-claude-tools", version = "0.6.6", default-features = false, optional = true }
 futures-util.workspace = true
+httpdate = "1.0.3"
 nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.6", default-features = false }
+nanocodex-oai-tools = { path = "../nanocodex-oai-tools", version = "0.6.6", default-features = false, features = ["image-processing"] }
 tokio = { workspace = true, features = ["macros", "sync", "time"] }
 web-time.workspace = true
 uuid.workspace = true
@@ -36,8 +38,10 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-bindgen-futures.workspace = true
+wasmtimer = { version = "0.4.3", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+image.workspace = true
 tempfile.workspace = true
 rustls.workspace = true
 

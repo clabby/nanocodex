@@ -12,7 +12,7 @@ use std::{
 use eyre::{Result, eyre};
 use nanocodex_agent::{
     ExecutionPolicyDisposition, Nanocodex, NanocodexError, OpenAi, PromptRequest, PromptRoute,
-    ResponseError, Tools,
+    ResponseError, ServiceTier, Tools,
     events::{AgentEventKind, AgentEvents, RunStatus, RunTerminal},
     execution::{
         ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy,
@@ -2618,49 +2618,95 @@ async fn cancelled_standalone_compaction_does_not_block_a_cold_follow_on() -> Re
 
 #[tokio::test]
 async fn live_replacement_resubmits_a_pending_standalone_compaction() -> Result<()> {
-    let store = MemoryStore::new()?;
-    let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let started = Arc::new(tokio::sync::Notify::new());
-    let openai = OpenAi::builder("test-key")
-        .service({
-            let compactions = Arc::clone(&compactions);
-            let started = Arc::clone(&started);
-            move || PendingStandaloneCompactionService {
-                compactions: Arc::clone(&compactions),
-                started: Arc::clone(&started),
+    for tier in [
+        ServiceTier::Standard,
+        ServiceTier::Fast,
+        ServiceTier::Ultrafast,
+    ] {
+        let store = MemoryStore::new()?;
+        let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let openai = OpenAi::builder("test-key")
+            .model(nanocodex_agent::Model::Astra)
+            .service_tier(tier)
+            .service({
+                let compactions = Arc::clone(&compactions);
+                let started = Arc::clone(&started);
+                move || {
+                    let mut service = PendingStandaloneCompactionService {
+                        compactions: Arc::clone(&compactions),
+                        started: Arc::clone(&started),
+                    };
+                    tower::service_fn(move |request: nanocodex_oai_api::tower::ResponsesAttempt| {
+                        assert_eq!(request.service_tier(), tier);
+                        tower::Service::call(&mut service, request)
+                    })
+                }
+            })
+            .build()?;
+        let workspace = temporary_workspace("standalone-compaction-live-replacement")?;
+        let state = DurableSession::open(store, "standalone-compaction-live-replacement").await?;
+        let (agent, events) = Nanocodex::builder(openai)
+            .workspace(&workspace)
+            .durability(state.clone())
+            .await?
+            .build()?;
+        agent
+            .prompt("seed compaction input")
+            .await?
+            .result()
+            .await?;
+
+        let first = tokio::spawn({
+            let agent = agent.clone();
+            async move { agent.compact().await }
+        });
+        started.notified().await;
+        assert_eq!(compactions.load(Ordering::SeqCst), 1);
+        let retained = state.state().await?;
+        let input = &retained.pending_operations()[0].1.input;
+        let input = state.resolve(input).await?.json()?.to_owned();
+        if tier == ServiceTier::Ultrafast {
+            let decoded: serde_json::Value = serde_json::from_str(&input)?;
+            assert_eq!(decoded["service_tier"], "ultrafast");
+            assert!(decoded.get("fast_mode").is_none());
+        } else {
+            #[derive(serde::Deserialize, serde::Serialize)]
+            struct LegacyCompactionInput {
+                kind: String,
+                base_checkpoint: Option<LegacyCompactionBase>,
+                model: String,
+                effort: String,
+                fast_mode: bool,
+                workspace: Option<String>,
             }
-        })
-        .build()?;
-    let workspace = temporary_workspace("standalone-compaction-live-replacement")?;
-    let state = DurableSession::open(store, "standalone-compaction-live-replacement").await?;
-    let (agent, events) = Nanocodex::builder(openai)
-        .workspace(&workspace)
-        .durability(state)
-        .await?
-        .build()?;
-    agent
-        .prompt("seed compaction input")
-        .await?
-        .result()
-        .await?;
+            #[derive(serde::Deserialize, serde::Serialize)]
+            struct LegacyCompactionBase {
+                lineage_id: String,
+                prompt_cache_key: String,
+                workspace: String,
+                history: Vec<Box<serde_json::value::RawValue>>,
+            }
+            let legacy: LegacyCompactionInput = serde_json::from_str(&input)?;
+            assert_eq!(legacy.fast_mode, tier == ServiceTier::Fast);
+            assert_eq!(
+                serde_json::to_string(&legacy)?,
+                input,
+                "pending legacy compaction must retain exact admission bytes"
+            );
+        }
+        agent.compact().await?;
+        assert!(matches!(first.await?, Err(NanocodexError::TurnCancelled)));
+        assert_eq!(
+            compactions.load(Ordering::SeqCst),
+            2,
+            "same-live replacement must resubmit an unfinished provider call"
+        );
 
-    let first = tokio::spawn({
-        let agent = agent.clone();
-        async move { agent.compact().await }
-    });
-    started.notified().await;
-    assert_eq!(compactions.load(Ordering::SeqCst), 1);
-    agent.compact().await?;
-    assert!(matches!(first.await?, Err(NanocodexError::TurnCancelled)));
-    assert_eq!(
-        compactions.load(Ordering::SeqCst),
-        2,
-        "same-live replacement must resubmit an unfinished provider call"
-    );
-
-    agent.shutdown().await?;
-    drop((agent, events));
-    std::fs::remove_dir_all(workspace)?;
+        agent.shutdown().await?;
+        drop((agent, events));
+        std::fs::remove_dir_all(workspace)?;
+    }
     Ok(())
 }
 
@@ -3659,11 +3705,29 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let openai = || {
+    let openai = |tier| {
         let generations = Arc::clone(&generations);
         OpenAi::builder("test-key")
-            .service(move || DurableToolService {
-                generations: Arc::clone(&generations),
+            .model(nanocodex_agent::Model::Astra)
+            .service_tier(tier)
+            .service(move || {
+                let generations = Arc::clone(&generations);
+                let mut service = DurableToolService {
+                    generations: Arc::clone(&generations),
+                };
+                tower::service_fn(move |request: nanocodex_oai_api::tower::ResponsesAttempt| {
+                    let expected = if generations.load(Ordering::SeqCst) < 2 {
+                        ServiceTier::Ultrafast
+                    } else {
+                        ServiceTier::Standard
+                    };
+                    assert_eq!(
+                        request.service_tier(),
+                        expected,
+                        "unfinished execution retains tier; new turns use reopened defaults"
+                    );
+                    tower::Service::call(&mut service, request)
+                })
             })
             .build()
     };
@@ -3677,7 +3741,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
     };
     let workspace = temporary_workspace("portable-durability-ambiguous-tool")?;
     let state = self::DurableSession::open(failing_store, "ambiguous-tool").await?;
-    let builder = Nanocodex::builder(openai()?)
+    let builder = Nanocodex::builder(openai(ServiceTier::Ultrafast)?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(tools()?)
@@ -3697,7 +3761,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
     drop((agent, events));
 
     let state = self::DurableSession::open(store.clone(), "ambiguous-tool").await?;
-    let builder = Nanocodex::builder(openai()?)
+    let builder = Nanocodex::builder(openai(ServiceTier::Standard)?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(tools()?)
@@ -3719,7 +3783,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
     drop((resumed, resumed_events));
 
     let state = self::DurableSession::open(store, "ambiguous-tool").await?;
-    let builder = Nanocodex::builder(openai()?)
+    let builder = Nanocodex::builder(openai(ServiceTier::Standard)?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(tools()?)

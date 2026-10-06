@@ -213,6 +213,21 @@ pub trait LifecycleBackend: Send + Sync + 'static {
     /// Changes priority policy for later turns.
     fn set_fast_mode(&self, enabled: bool) -> BackendFuture<Result<()>>;
 
+    /// Changes processing policy for later turns.
+    ///
+    /// Backends with only a priority switch reject Ultrafast unless they override this method.
+    fn set_service_tier(&self, service_tier: ServiceTier) -> BackendFuture<Result<()>> {
+        match service_tier {
+            ServiceTier::Standard => self.set_fast_mode(false),
+            ServiceTier::Priority | ServiceTier::Fast => self.set_fast_mode(true),
+            ServiceTier::Ultrafast => Box::pin(async {
+                Err(NanocodexError::InvalidRequest(
+                    "backend does not support ultrafast processing".into(),
+                ))
+            }),
+        }
+    }
+
     /// Compacts retained context.
     fn compact(&self) -> BackendFuture<Result<()>>;
 
@@ -431,7 +446,7 @@ impl LifecycleBackend for LocalLifecycle {
                     accepted,
                     cancel_on_admission: request.cancel_on_admission,
                     thinking: None,
-                    fast_mode: None,
+                    service_tier: None,
                     parent,
                     events: EventSink::from_publisher(request.events),
                     result,
@@ -585,11 +600,15 @@ impl LifecycleBackend for LocalLifecycle {
     }
 
     fn set_fast_mode(&self, enabled: bool) -> BackendFuture<Result<()>> {
+        self.set_service_tier(ServiceTier::from_fast_mode(enabled))
+    }
+
+    fn set_service_tier(&self, service_tier: ServiceTier) -> BackendFuture<Result<()>> {
         let commands = self.commands.clone();
         let shutdown = self.shutdown.clone();
         Box::pin(async move {
-            request_command(&commands, &shutdown, |result| Command::SetFastMode {
-                enabled,
+            request_command(&commands, &shutdown, |result| Command::SetServiceTier {
+                service_tier,
                 result,
             })
             .await

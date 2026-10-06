@@ -221,7 +221,7 @@ where
                 if let Some(usage) = &execution.usage {
                     self.stats
                         .warmup_usage
-                        .add(usage, self.model, self.fast_mode);
+                        .add(usage, self.model, self.service_tier);
                 }
                 (
                     execution
@@ -238,7 +238,7 @@ where
             };
         span.record("warmup.source", source);
         if let Some(usage) = &usage {
-            record_usage(&span, usage, self.model, self.fast_mode);
+            record_usage(&span, usage, self.model, self.service_tier);
         }
         span.record("status", "completed");
         span.record("otel.status_code", "OK");
@@ -276,7 +276,7 @@ where
         }
         let success = match self
             .client
-            .execute(factory.warmup(self.model, self.thinking, self.fast_mode))
+            .execute(factory.warmup(self.model, self.thinking, self.service_tier))
             .instrument(span.clone())
             .await
         {
@@ -346,7 +346,7 @@ where
         let step_id = format!("compaction-{after_model_call_index}");
         let model = self.model;
         let thinking = self.thinking;
-        let fast_mode = self.fast_mode;
+        let service_tier = self.service_tier;
         let trigger = compaction::trigger();
         // This barrier is shared by explicit, pre-turn, and mid-turn compaction.
         // It must settle before even tool-output trimming, and failures leave
@@ -415,7 +415,7 @@ where
             trigger,
             model,
             thinking,
-            fast_mode,
+            service_tier,
         );
         let (input_item_count, input_bytes, input_content) = trace_model_input(&request);
         let span = compaction_span(after_model_call_index, input_item_count, input_bytes);
@@ -563,8 +563,8 @@ where
             lifecycle.stats.model_duration_ns += duration_ns;
             lifecycle.stats.compaction_duration_ns += duration_ns;
             if let Some(usage) = &usage {
-                record_usage(&span, usage, model, self.fast_mode);
-                lifecycle.stats.usage.add(usage, model, self.fast_mode);
+                record_usage(&span, usage, model, self.service_tier);
+                lifecycle.stats.usage.add(usage, model, self.service_tier);
             }
             lifecycle.stats.last_response_id = Some(response_id);
             Ok((item, usage, server_reasoning_included))

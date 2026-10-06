@@ -13,6 +13,7 @@ extern crate self as nanocodex_agent;
 mod agent;
 mod error;
 mod harness;
+mod service_tier_serde;
 pub use harness::{ClaudeModel, HarnessFamily, HarnessModel};
 #[cfg(feature = "openai")]
 mod model;

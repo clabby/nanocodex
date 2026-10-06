@@ -37,6 +37,134 @@ fn stream(blocks: Vec<Value>, stop: &str) -> String {
     out
 }
 
+async fn unknown_tool_recovery(parallel: bool) {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let app = Router::new().route(
+        "/v1/messages",
+        post({
+            let requests = requests.clone();
+            let effects = effects.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                let effects = effects.clone();
+                async move {
+                    let index = {
+                        let mut log = requests.lock().unwrap();
+                        log.push(body);
+                        log.len()
+                    };
+                    let (blocks, stop) = match index {
+                        1 => (vec![
+                            json!({"type":"tool_use","id":"denied-plan","name":"update_plan","input":{"plan":[]}}),
+                            json!({"type":"tool_use","id":"denied-long-name","name":"unknown界".repeat(10_000),"input":{}}),
+                        ], "tool_use"),
+                        2 => {
+                            assert_eq!(effects.load(Ordering::SeqCst), 0, "denied calls cannot run a callback");
+                            (vec![json!({"type":"tool_use","id":"corrected","name":"exec","input":{}})], "tool_use")
+                        }
+                        3 => (vec![json!({"type":"text","text":"corrected and completed"})], "end_turn"),
+                        4 => (vec![json!({"type":"tool_use","id":"denied-plan","name":"exec","input":{}})], "tool_use"),
+                        _ => panic!("unexpected provider request {index}"),
+                    };
+                    ([("content-type", "text/event-stream")], stream(blocks, stop))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let counter = effects.clone();
+    let (agent, _) = Nanocodex::builder(Claude::new(
+        ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic"),
+        "test",
+    ))
+    .parallel_tools(parallel)
+    .tool(
+        ToolDefinition {
+            name: "exec".into(),
+            description: "Synthetic admitted effect".into(),
+            input_schema: json!({"type":"object"}),
+            strict: None,
+            defer_loading: false,
+        },
+        move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok("committed once".into()) }
+        },
+    )
+    .build()
+    .unwrap();
+    let outcome = agent
+        .prompt("complete using the admitted tool")
+        .await
+        .unwrap()
+        .result()
+        .await;
+    let log = requests.lock().unwrap().clone();
+    eprintln!(
+        "unknown tool recovery parallel={parallel}; requests={}; effects={}; outcome={outcome:?}",
+        log.len(),
+        effects.load(Ordering::SeqCst)
+    );
+    assert_eq!(outcome.unwrap().final_message(), "corrected and completed");
+    assert_eq!(log.len(), 3);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    for request in &log {
+        assert_eq!(request["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(request["tools"][0]["name"], "exec");
+    }
+    let denied = &log[1]["messages"];
+    assert_eq!(denied[1]["role"], "assistant");
+    assert_eq!(denied[2]["role"], "user");
+    for (index, id) in ["denied-plan", "denied-long-name"].iter().enumerate() {
+        assert_eq!(denied[1]["content"][index]["id"], *id);
+        let result = &denied[2]["content"][index];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["tool_use_id"], *id);
+        assert_eq!(result["is_error"], true);
+        let reason = result["content"].as_str().unwrap();
+        assert!(reason.len() <= 256, "denial must have a bounded reason");
+        assert!(reason.contains("no handler was invoked"));
+        eprintln!("denied receipt: {result}");
+    }
+    let success = &log[2]["messages"][4]["content"][0];
+    assert_eq!(success["tool_use_id"], "corrected");
+    assert_ne!(success["is_error"], true);
+    assert_eq!(success["content"], "committed once");
+    let reused = agent
+        .prompt("reuse the denied identity")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap_err();
+    assert!(
+        reused
+            .to_string()
+            .contains("reused an admitted tool_use id")
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "a denied identity cannot later authorize an effect"
+    );
+    agent.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn unknown_tool_recovers_through_paired_error() {
+    unknown_tool_recovery(false).await;
+}
+
+#[tokio::test]
+async fn parallel_unknown_tool_recovers_through_paired_error() {
+    unknown_tool_recovery(true).await;
+}
+
 #[tokio::test]
 async fn sonnet_55_uses_its_million_token_window_before_compacting() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -98,7 +226,7 @@ async fn stream_tool_once_compact_and_failed_turn_preserves_history() {
         let requests = requests.clone();
         async move {
             let index = { let mut r = requests.lock().unwrap(); r.push(body.clone()); r.len() };
-            if index == 5 { return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "synthetic failure".to_string()).into_response(); }
+            if index == 5 { return (axum::http::StatusCode::BAD_REQUEST, "synthetic failure".to_string()).into_response(); }
             let (blocks, reason) = match index {
                 1 => (vec![json!({"type":"text","text":"Hello "}),json!({"type":"text","text":"world"})], "end_turn"),
                 2 => (vec![json!({"type":"thinking","thinking":"","signature":"signed-tool-turn","binding":"opaque"}),json!({"type":"tool_use","id":"tool-1","name":"lookup","input":{"key":"x"}})], "tool_use"),
@@ -263,7 +391,7 @@ async fn failed_compaction_and_cancelled_turn_keep_previous_context() {
                     };
                     match index {
                         2 => (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::http::StatusCode::BAD_REQUEST,
                             "synthetic compact failure".to_string(),
                         )
                             .into_response(),
@@ -662,7 +790,7 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
     );
     let (agent,_)=Nanocodex::builder(Claude::new(client,"test"))
         .tool_blocks(ToolDefinition { name:"ReadImage".into(), description:"Test image".into(), input_schema:json!({"type":"object"}),strict:None,defer_loading:false }, |_| async {
-            Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}})])
+            Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}})])
         }).build().unwrap();
     assert_eq!(
         agent
@@ -678,7 +806,7 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
     let log = requests.lock().unwrap();
     assert_eq!(
         log[1]["messages"][2]["content"][0]["content"][1]["source"]["data"],
-        "cG5n"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"
     );
     assert_eq!(log[1]["messages"][2]["content"][0]["type"], "tool_result");
     server.abort();
@@ -1382,6 +1510,7 @@ async fn response_usage_arrives_before_tool_completion_and_excludes_summary() {
 
 #[tokio::test]
 async fn fast_mode_applies_per_accepted_turn_on_supported_models() {
+    use nanocodex_agent::ServiceTier;
     use tokio::sync::Semaphore;
     let _ = rustls::crypto::ring::default_provider().install_default();
     // Records each request's speed field and whether the fast-mode beta was sent.
@@ -1435,6 +1564,7 @@ async fn fast_mode_applies_per_accepted_turn_on_supported_models() {
     };
 
     let opus = agent("claude-opus-5-5");
+    assert!(opus.set_service_tier(ServiceTier::Ultrafast).await.is_err());
     let active = opus.prompt("first").await.unwrap();
     while received.lock().unwrap().is_empty() {
         tokio::task::yield_now().await;
