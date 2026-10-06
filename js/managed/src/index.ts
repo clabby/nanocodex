@@ -111,6 +111,7 @@ import { imageGeneration, updatePlan, web } from "nanocodex/tools";
 import { createWorkspaceFilesystem, resolveNamespaceCwd } from "nanocodex-tools";
 import { SessionAttachments } from "./attachments";
 import { CLAUDE_INLINE_PREVIEW_MAX_BYTES, inlineClaudeAttachmentPreviews } from "./claude-attachments";
+import { CLAUDE_PENDING_CONTEXT_MAX_ENTRIES, CLAUDE_REALTIME_END, CLAUDE_REALTIME_START, claudeRealtimeContext, prependClaudeContext } from "./claude-realtime";
 import { createManagedImageFetch, managedImageReference } from "./managed-image-fetch";
 import { recentSessionImages, SESSION_IMAGE_REMEMBER_EVENT } from "./session-images";
 import { createR2ViewImage } from "./attachment-image";
@@ -4005,6 +4006,11 @@ export class DurableAgentSession extends DurableComputerObject {
         authorization_json TEXT NOT NULL DEFAULT '{"capabilities":[]}',
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS claude_pending_context (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS managed_portability_restoration (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         source_storage_id TEXT NOT NULL,
@@ -7327,8 +7333,11 @@ export class DurableAgentSession extends DurableComputerObject {
         requestHash,
         async () => {
           await this.#settingsMutationTail;
-          const agent = await this.#ensureAgent();
-          if (this.#deleting || this.#agent !== agent) {
+          // Claude voice lifecycle markers are adapter-owned prompt context;
+          // only a delegation needs the live Claude runtime.
+          const claude = this.#settings().model.startsWith("claude-");
+          const agent = claude && kind !== "delegate" ? undefined : await this.#ensureAgent();
+          if (this.#deleting || (agent !== undefined && this.#agent !== agent)) {
             throw retryableError(
               "agent became unavailable during realtime operation",
             );
@@ -7348,7 +7357,13 @@ export class DurableAgentSession extends DurableComputerObject {
                 active.voice_session_id,
               );
             }
-            const context = await agent.session.realtime.start();
+            let context: AgentSessionContext;
+            if (agent === undefined) {
+              this.#queueClaudeContext(CLAUDE_REALTIME_START);
+              context = this.#claudeRealtimeContext();
+            } else {
+              context = await agent.session.realtime.start();
+            }
             assertRealtimeContext(context);
             this.ctx.storage.sql.exec(
               `INSERT INTO managed_realtime_session (
@@ -7382,7 +7397,8 @@ export class DurableAgentSession extends DurableComputerObject {
             this.#requireRealtimeAuthorization(active, authorization);
             const transcriptContext = realtimeTranscriptContext(parsed.transcript ?? []);
             if (transcriptContext) {
-              await agent.session.appendDeveloperMessage(transcriptContext);
+              if (agent === undefined) this.#queueClaudeContext(transcriptContext);
+              else await agent.session.appendDeveloperMessage(transcriptContext);
             }
             const context = await this.#endManagedRealtimeSession(
               agent,
@@ -7403,7 +7419,7 @@ export class DurableAgentSession extends DurableComputerObject {
             );
           }
           this.#requireRealtimeAuthorization(this.#managedRealtimeSession()!, authorization);
-          return this.#routeRealtimeDelegation(agent, parsed, requestHash, authorization, callerContext(request.headers));
+          return this.#routeRealtimeDelegation(agent!, parsed, requestHash, authorization, callerContext(request.headers));
         },
       );
       this.#observe("managed.realtime.operation", {
@@ -7644,10 +7660,14 @@ export class DurableAgentSession extends DurableComputerObject {
         input = promptInputText(this.#startupContext.enrich(id, input));
         assertActive();
       }
+      // Claude receives queued voice lifecycle/transcript context inline.
+      const claudeContext = this.#settings().model.startsWith("claude-") ? this.#claudePendingContext() : undefined;
+      if (claudeContext?.entries.length) input = prependClaudeContext(input, claudeContext.entries);
       this.#realtimeEventBuffer = [];
       let turn: Turn | undefined;
       try {
         turn = await CloudflareAgent.route(agent, { input });
+        if (claudeContext?.entries.length) this.#consumeClaudeContext(claudeContext.maxId);
       } catch (error) {
         const buffered = this.#takeRealtimeEventBuffer();
         for (const event of buffered) this.#recordAgentEvent(event, agent.sessionId);
@@ -8439,6 +8459,7 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#turnInputs.set(row.id, input);
     try {
       let dispatchInputJson = this.#managedDispatchInput(row);
+      let claudeContext: { entries: string[]; maxId: number } | undefined;
       const epoch = this.#session()?.authorization_epoch;
       const assertActive = () => {
         this.#assertDurabilityAdmissionActive();
@@ -8506,7 +8527,10 @@ export class DurableAgentSession extends DurableComputerObject {
         assertModelAcceptsInput(this.#settings().model, input);
         // Claude has no developer-context session; startup context rides in
         // the prompt. Text stays text; attachments keep their ordered blocks.
-        const enriched = this.#startupContext.enrich(row.id, input);
+        // Voice lifecycle markers and transcripts queued since the last
+        // Claude turn also ride here; consumed once the dispatch is frozen.
+        claudeContext = this.#claudePendingContext();
+        const enriched = prependClaudeContext(this.#startupContext.enrich(row.id, input), claudeContext.entries);
         dispatchInputJson = JSON.stringify(typeof input === "string" ? promptInputText(enriched)
           : await inlineClaudeAttachmentPreviews(enriched as Exclude<PromptInput, string>, (path) =>
             this.#claudeAttachmentPreview(session.session_id, path)));
@@ -8523,10 +8547,12 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#turnInputs.delete(row.id);
         return dispatchable ?? row;
       }
-      dispatchInputJson = this.#managedDispatchInput(dispatchable) ?? dispatchInputJson;
+      const frozenDispatchInput = this.#managedDispatchInput(dispatchable);
+      dispatchInputJson = frozenDispatchInput ?? dispatchInputJson;
       // Freeze the exact Rust admission input immediately before dispatch.
       // This is the only accepted representation of a managed operation.
       this.#freezeManagedDispatchInput(row.id, dispatchInputJson);
+      if (frozenDispatchInput === undefined && claudeContext?.entries.length) this.#consumeClaudeContext(claudeContext.maxId);
       this.#observe("managed.turn.dispatch", {
         turn_id: row.id,
         replayed,
@@ -12872,6 +12898,42 @@ export class DurableAgentSession extends DurableComputerObject {
       .toArray()[0];
   }
 
+  /** Queues adapter-owned context for the next Claude prompt (Claude has no developer messages). */
+  #queueClaudeContext(text: string): void {
+    this.ctx.storage.sql.exec("INSERT INTO claude_pending_context(text, created_at) VALUES (?, ?)", text, Date.now());
+    // Retain only the newest bounded entries.
+    this.ctx.storage.sql.exec(
+      `DELETE FROM claude_pending_context WHERE id NOT IN
+         (SELECT id FROM claude_pending_context ORDER BY id DESC LIMIT ?)`,
+      CLAUDE_PENDING_CONTEXT_MAX_ENTRIES,
+    );
+  }
+
+  #claudePendingContext(): { entries: string[]; maxId: number } {
+    const rows = this.ctx.storage.sql.exec<{ id: number; text: string }>(
+      "SELECT id, text FROM claude_pending_context ORDER BY id",
+    ).toArray();
+    return { entries: rows.map((row) => row.text), maxId: rows.at(-1)?.id ?? 0 };
+  }
+
+  #consumeClaudeContext(maxId: number): void {
+    this.ctx.storage.sql.exec("DELETE FROM claude_pending_context WHERE id <= ?", maxId);
+  }
+
+  /** Text-only thread continuity for a Realtime frontend over a Claude thread. */
+  #claudeRealtimeContext(): AgentSessionContext {
+    const rows = this.#managedTurns(
+      "WHERE terminal_json IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 20",
+    ).reverse();
+    return claudeRealtimeContext(rows.map((row) => {
+      const terminal = JSON.parse(row.terminal_json!) as TurnTerminal;
+      return {
+        user: promptInputText(JSON.parse(row.input_json) as PromptInput),
+        assistant: terminal.type === "turn_completed" ? terminal.final_message : undefined,
+      };
+    }));
+  }
+
   #managedRealtimeSession(): ManagedRealtimeSessionRow | undefined {
     return this.ctx.storage.sql
       .exec<ManagedRealtimeSessionRow>(
@@ -12896,10 +12958,16 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async #endManagedRealtimeSession(
-    agent: CloudflareAgent.Agent,
+    agent: CloudflareAgent.Agent | undefined,
     voiceSessionId: string,
   ): Promise<AgentSessionContext> {
-    const context = await agent.session.realtime.end();
+    let context: AgentSessionContext;
+    if (agent === undefined) {
+      this.#queueClaudeContext(CLAUDE_REALTIME_END);
+      context = this.#claudeRealtimeContext();
+    } else {
+      context = await agent.session.realtime.end();
+    }
     assertRealtimeContext(context);
     this.ctx.storage.sql.exec(
       "DELETE FROM managed_realtime_session WHERE singleton = 1 AND voice_session_id = ?",
