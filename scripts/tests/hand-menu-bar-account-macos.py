@@ -46,17 +46,33 @@ func walk(_ element: AXUIElement, _ depth: Int, _ path: [String] = []) {
     for child in (attribute(kAXChildrenAttribute) as? [AXUIElement] ?? []).prefix(2500) { walk(child, depth + 1, childPath) }
 }
 walk(app, 0)
-if CommandLine.arguments.count > 2 {
+if CommandLine.arguments.count > 2 && CommandLine.arguments[2] == "Verify Refresh" {
+    guard rows.contains(where: { ($0["title"] as? String) == "Account: Checking…" }) else { exit(5) }
+    let retained = elements.filter { $0.0 == kAXMenuItemRole && $0.1.hasSuffix("(1)") }
+    guard retained.count == 5 else { exit(6) }
+    let deadline = Date().addingTimeInterval(15)
+    repeat {
+        Thread.sleep(forTimeInterval: 0.05)
+        rows.removeAll()
+        elements.removeAll()
+        walk(app, 0)
+        // A refresh must neither close the menu nor replace its category rows.
+        for old in retained {
+            guard let current = elements.first(where: { $0.0 == old.0 && $0.1 == old.1 }),
+                  CFEqual(old.2, current.2) else { exit(7) }
+        }
+        if !rows.contains(where: { ($0["title"] as? String) == "Account: Checking…" }) { break }
+    } while Date() < deadline
+    guard rows.contains(where: { ($0["title"] as? String) == "Account: Signed in · Synthetic account" }),
+          rows.contains(where: { ($0["title"] as? String) == "Connections: 3 connected" }) else { exit(8) }
+}
+else if CommandLine.arguments.count > 2 && !(CommandLine.arguments[2] == "Open Menu" && elements.contains(where: { $0.0 == kAXMenuItemRole })) {
     let title = CommandLine.arguments[2]
     let category = title.range(of: #"^(Computers|Workspaces|Virtual machines|Screens|Other connections|Offline) \([1-9][0-9]*\)\z"#, options: .regularExpression) != nil
     let page = title.range(of: #"^Connections [1-9][0-9]*–[1-9][0-9]*\z"#, options: .regularExpression) != nil
     guard title == "Refresh Status" || title == "Open Menu" || title == "Quit Hand" || category || page else { exit(64) }
     guard let target = elements.first(where: { title == "Open Menu" ? $0.0 == kAXMenuBarItemRole : ($0.0 == kAXMenuItemRole && $0.1 == title) }) else { exit(3) }
-    var result = AXUIElementPerformAction(target.2, kAXPressAction as CFString)
-    if result != .success, let bar = elements.first(where: { $0.0 == kAXMenuBarItemRole }) {
-        _ = AXUIElementPerformAction(bar.2, kAXPressAction as CFString)
-        result = AXUIElementPerformAction(target.2, kAXPressAction as CFString)
-    }
+    let result = AXUIElementPerformAction(target.2, kAXPressAction as CFString)
     if result != .success { exit(4) }
 }
 let data = try JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])
@@ -90,6 +106,8 @@ def main():
         def do_GET(self):
             requests.append({"method": "GET", "path": self.path, "scenario": mode["name"]})
             assert self.headers.get("Authorization") == "Bearer " + synthetic_key
+            if mode["name"] == "slow" and self.path == "/v1/me":
+                time.sleep(4)
             status = 200
             if mode["name"] == "network" and self.path == "/v1/me":
                 status, value = 503, {}
@@ -211,7 +229,7 @@ def main():
                     open_menu()
                     parent_depth = None
                     for title in path:
-                        rows = snapshot()
+                        rows = expect(name + "-parent-" + str(len(path)), [title])
                         row = next(row for row in rows if row["title"] == title and row["role"] == "AXMenuItem")
                         assert row["enabled"], f"Submenu is disabled: {title}"
                         if parent_depth is not None:
@@ -234,6 +252,15 @@ def main():
                 refresh()
                 rows = expect("signed-in", ["Account: Signed in · Synthetic account", "Connections: 3 connected", *categories], sign_in=False)
                 small_root_count = inventory_root(rows, categories)
+                mode["name"] = "slow"
+                refresh()
+                expect("refresh-started-while-open", ["Account: Checking…", "Connections: 3 connected · Refreshing…", *categories])
+                subprocess.run([str(reader), str(process.pid), "Computers (1)"], capture_output=True, check=True, timeout=10)
+                verified = subprocess.run([str(reader), str(process.pid), "Verify Refresh"], capture_output=True, check=True, timeout=20)
+                (evidence / "refresh-retained-ax-items.json").write_bytes(verified.stdout)
+                expect("refresh-while-open", ["Account: Signed in", "Connections: 3 connected", *categories,
+                        "Synthetic Mac · Connected"], ["Checking…", "Refreshing…"])
+                mode["name"] = "ready"
                 for category, title in zip(categories, ["Synthetic Mac · Connected", "Project workspace · Connected",
                         "Build VM · Connected", "Synthetic screen · Screen advertised — No connected tool Hand", "Sleeping laptop · Disconnected"]):
                     submenu("category-" + category.split()[0].lower(), [category], [title])

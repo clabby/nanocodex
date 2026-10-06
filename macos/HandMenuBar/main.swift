@@ -97,13 +97,13 @@ struct MenuPresentation {
             }
         }
         if signingIn { lines.append("Sign-in: Continue in Terminal") }
-        if busy {
+        if busy && !(checking && status != nil) {
             lines.append("Hands: Refreshing…")
         } else if let inventory = status?.inventory {
             switch inventory.state {
             case "ready":
                 let connected = inventory.hands.filter { $0.health == "connected" }.count
-                lines.append("Connections: \(connected) connected")
+                lines.append("Connections: \(connected) connected\(checking ? " · Refreshing…" : "")")
             case "signed_out": lines.append("Hands: Sign in to view")
             case "expired": lines.append("Hands: Sign in again to view")
             case "partial": lines.append("Hands: Some connections unavailable")
@@ -220,13 +220,6 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshStatus()
     }
 
-    private func add(_ title: String, _ action: Selector? = nil, enabled: Bool = false) {
-        let row = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        row.target = action == nil ? nil : self
-        row.isEnabled = enabled
-        menu.addItem(row)
-    }
-
     func menuWillOpen(_ menu: NSMenu) { refreshStatus() }
     func applicationDidBecomeActive(_ notification: Notification) { refreshStatus() }
 
@@ -242,12 +235,18 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func render() {
         let view = presentation
-        menu.removeAllItems()
+        let next = NSMenu()
+        func add(_ title: String, _ action: Selector? = nil, enabled: Bool = false) {
+            let row = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            row.target = action == nil ? nil : self
+            row.isEnabled = enabled
+            next.addItem(row)
+        }
         add("Nanocodex Hand · \(MenuPresentation.text(Host.current().localizedName ?? "This Mac"))")
         for line in view.summary { add(line) }
         if let quitFailure { add(quitFailure) }
         if !view.groups.isEmpty {
-            menu.addItem(.separator())
+            next.addItem(.separator())
             for group in view.groups {
                 let row = NSMenuItem(title: group.label, action: nil, keyEquivalent: "")
                 row.isEnabled = true
@@ -270,24 +269,57 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 }
                 row.submenu = submenu
-                menu.addItem(row)
+                next.addItem(row)
             }
         }
-        menu.addItem(.separator())
+        next.addItem(.separator())
         add(signInScript == nil ? "Sign In…" : "Sign-in Open in Terminal", #selector(signIn), enabled: view.canSignIn)
         if let signInFailure { add(signInFailure) }
         add(view.stop ? "Stop Hand" : "Start Hand", #selector(toggleHand), enabled: view.canToggle)
         add("Restart Hand", #selector(restartHand), enabled: view.canRestart)
         add("Refresh Status", #selector(refreshStatus), enabled: !busy)
-        menu.addItem(.separator())
+        next.addItem(.separator())
         add("Open Hand Log", #selector(openLog), enabled: true)
         add("Copy Status", #selector(copyStatus), enabled: true)
-        menu.addItem(.separator())
+        next.addItem(.separator())
         add("Quit Hand", #selector(quitHand), enabled: !quitting && signInScript == nil && (!busy || pendingOperation == "menu-status"))
+        updateMenu(menu, from: next)
         item?.button?.toolTip = view.summary.joined(separator: "\n")
         item?.button?.setAccessibilityLabel("Nanocodex Hand · " + view.summary.dropFirst().joined(separator: ". "))
         item?.button?.image = NSImage(systemSymbolName: view.warning ? "exclamationmark.triangle" : "hand.raised.fill", accessibilityDescription: "Nanocodex Hand")
         item?.button?.image?.isTemplate = true
+    }
+
+    // Preserve NSMenuItem and submenu identities during tracking. Rebuilding
+    // the tree invalidates AppKit's highlighted rows and accessibility refs.
+    private func updateMenu(_ target: NSMenu, from desired: NSMenu) {
+        let rows = desired.items
+        for (index, fresh) in rows.enumerated() {
+            if index >= target.items.count {
+                desired.removeItem(fresh)
+                target.addItem(fresh)
+                continue
+            }
+            let current = target.items[index]
+            if current.isSeparatorItem != fresh.isSeparatorItem {
+                target.removeItem(at: index)
+                desired.removeItem(fresh)
+                target.insertItem(fresh, at: index)
+                continue
+            }
+            current.title = fresh.title
+            current.action = fresh.action
+            current.target = fresh.target
+            current.isEnabled = fresh.isEnabled
+            if let child = fresh.submenu {
+                if let existing = current.submenu { updateMenu(existing, from: child) }
+                else {
+                    fresh.submenu = nil
+                    current.submenu = child
+                }
+            } else { current.submenu = nil }
+        }
+        while target.items.count > rows.count { target.removeItem(at: target.items.count - 1) }
     }
 
     private func addConnections(_ entries: [String], to target: NSMenu) {
@@ -296,6 +328,13 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             row.isEnabled = false
             target.addItem(row)
         }
+    }
+
+    // AppKit tracks an open menu in its own run-loop mode. Status completions
+    // and deadlines must keep running while the user is reading that menu.
+    private func after(_ interval: TimeInterval, _ action: @escaping () -> Void) {
+        let deadline = Timer(timeInterval: interval, repeats: false) { _ in action() }
+        RunLoop.main.add(deadline, forMode: .common)
     }
 
     // Serialized child processes keep every network read off the AppKit thread.
@@ -327,7 +366,7 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let data = operation == "menu-status" ? output.fileHandleForReading.readDataToEndOfFile() : Data()
             child.waitUntilExit()
             let result = CommandResult(succeeded: child.terminationStatus == 0, output: data)
-            DispatchQueue.main.async {
+            RunLoop.main.perform(inModes: [.common, .eventTracking]) {
                 guard let self, self.commandGeneration == generation else { return }
                 self.command = nil
                 self.busy = false
@@ -337,13 +376,13 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Mutations retain the controller's deadline, including graceful Stop.
         // Only read-only observations may be terminated by the companion.
         if operation == "menu-status" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self, weak child] in
+            after(20) { [weak self, weak child] in
                 guard let self, self.commandGeneration == generation, let child, child.isRunning else { return }
                 self.lastFailure = "Status check timed out"
                 self.status = nil
                 child.terminate()
                 self.render()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak child] in
+                self.after(1) { [weak self, weak child] in
                     guard let self, self.commandGeneration == generation, let child, child.isRunning else { return }
                     kill(child.processIdentifier, SIGKILL)
                 }
@@ -446,7 +485,7 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
             NSWorkspace.shared.open([script], withApplicationAt: terminal, configuration: configuration) { [weak self] _, error in
-                DispatchQueue.main.async {
+                RunLoop.main.perform(inModes: [.common, .eventTracking]) {
                     guard let self else { return }
                     if error != nil {
                         try? files.removeItem(at: directory)
@@ -484,7 +523,7 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // read-only child is cancelled; service actions remain serialized.
             commandGeneration += 1
             observation.terminate()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            after(1) {
                 if observation.isRunning { kill(observation.processIdentifier, SIGKILL) }
             }
             command = nil
