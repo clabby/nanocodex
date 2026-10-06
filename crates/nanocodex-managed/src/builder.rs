@@ -701,7 +701,8 @@ impl<S> ManagedBuilder<S> {
         prompt
             .validate()
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-        let input = crate::driver::managed_prompt(prompt.clone(), settings.model)?;
+        let input =
+            crate::driver::managed_prompt(prompt.clone(), settings.unwrap_or_default().model)?;
         let idempotency_key = idempotency_key.into();
         crate::client::validate_idempotency_key(&idempotency_key).map_err(backend_error)?;
         #[cfg(feature = "tools")]
@@ -741,6 +742,7 @@ impl<S> ManagedBuilder<S> {
             .start(
                 receipt.agent_id,
                 receipt.session_id,
+                settings.unwrap_or_default().model,
                 EventCursor::parse("0").map_err(backend_error)?,
                 events,
                 Some(initial_turn),
@@ -855,14 +857,22 @@ impl<S> ManagedBuilder<S> {
             Err(error) => return Err(error),
         };
 
-        self.start(agent_id, state.session_id, cursor, None, None)
-            .await
+        self.start(
+            agent_id,
+            state.session_id,
+            state.settings.model,
+            cursor,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn start(
         mut self,
         agent_id: String,
         session_id: String,
+        model: crate::ManagedModel,
         cursor: EventCursor,
         initial_stream: Option<ManagedEvents>,
         initial_turn: Option<crate::driver::InitialTurn>,
@@ -932,7 +942,7 @@ impl<S> ManagedBuilder<S> {
         let driver = ManagedDriver::new(
             self.managed.service,
             agent_id,
-            state.settings.model,
+            model,
             stream,
             commands,
             runtime.events(),
