@@ -1,3 +1,4 @@
+import { routeAccountNavigation } from "./account-navigation";
 import { inventoryEntry, type HandInventoryEntry } from "./hand-inventory";
 import { CUA_JS_NAME, CUA_RESET_NAME } from "nanocodex-computer/contract";
 import { parseNativeVaultInjection } from "./browser-vault-injection";
@@ -1714,6 +1715,8 @@ async function managedFetchRoute(
     if (realtimeTransport) return realtimeTransport;
     const hostPrincipal = await routeHostPrincipalRequest(request, env, url);
     if (hostPrincipal) return hostPrincipal;
+    const navigation = routeAccountNavigation(request, url);
+    if (navigation) return navigation;
     const accountLink = await routeAccountLinkRequest(request, env, url);
     if (accountLink) return accountLink;
     const account = await routeAccountRequest(request, env, url);
