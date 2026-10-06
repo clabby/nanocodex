@@ -274,3 +274,158 @@ it("reuses a full registry slot after a definitively disconnected session is pol
       .some((entry: any) => entry.id === "new-publisher" && entry.online === true)).toBe(true);
   } finally { socket.close(1000); }
 });
+
+it("retires only the observed disconnected pre-runtime generation through the public API", async () => {
+  const f = fixture();
+  const owner: Principal = { ...f.principal, capabilities: ["agents:read", "agents:write", "tools:use"] };
+  const api = (body?: unknown, actor: Principal | undefined = owner) => worker.fetch(
+    new Request("https://nanocodex.example/v1/account/hand-relays" + (body === undefined ? "" : "/retire"), {
+      method: body === undefined ? "GET" : "POST",
+      ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    }), env as Parameters<typeof worker.fetch>[1], createExecutionContext(), actor);
+  const connect = async () => {
+    const response = await worker.fetch(new Request("https://nanocodex.example/v1/account/tool-host", {
+      headers: { upgrade: "websocket" },
+    }), env as Parameters<typeof worker.fetch>[1], createExecutionContext(), owner);
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    socket.accept();
+    const ready = next(socket);
+    socket.send(JSON.stringify({ type: "catalog", capabilities: ["turn_metadata"], attachment_id: "pre-runtime", machines: [machine("pre-runtime")], tools: [{
+      provider: "native", remote_name: "device_info", parallel_safe: true, timeout_ms: 15000,
+      definition: { type: "function", name: "device_info", description: "Fixture", strict: false,
+        parameters: { type: "object", properties: {}, required: [], additionalProperties: false } },
+    }] }));
+    expect(await ready).toEqual({ type: "ready" });
+    return socket;
+  };
+  const status = async () => (await (await api()).json() as any).legacy;
+  let socket = await connect();
+  try {
+    const [observed] = await status();
+    expect(observed).toMatchObject({ machine_id: "pre-runtime", runtime_id: null, online: true, pending_calls: 0, retirable: false });
+    expect(Number.isSafeInteger(observed.generation)).toBe(true);
+    expect(observed.generation).toBeGreaterThan(0);
+    const target = { machine_id: observed.machine_id, runtime_id: null, generation: observed.generation };
+    expect(await (await api(target)).json()).toEqual({ error: "legacy_runtime_still_connected" });
+    socket.close(1000);
+    await expect.poll(async () => (await status())[0].retirable).toBe(true);
+    for (const generation of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1"]) {
+      expect((await api({ ...target, generation })).status).toBe(400);
+    }
+    expect((await api({ ...target, extra: true })).status).toBe(400);
+    expect((await api(target, f.principal)).status).toBe(403);
+    expect((await api(target, { ...owner, connectGrant: { grantId: "fixture" } as NonNullable<Principal["connectGrant"]> })).status).toBe(403);
+    expect((await api(target, { ...owner, userId: crypto.randomUUID() })).status).toBe(409);
+    const unauthenticated = await worker.fetch(new Request("https://nanocodex.example/v1/account/hand-relays/retire", {
+      method: "POST", body: JSON.stringify(target),
+    }), env as Parameters<typeof worker.fetch>[1], createExecutionContext());
+    expect(unauthenticated.status).toBe(401);
+    socket = await connect();
+    socket.close(1000);
+    await expect.poll(async () => (await status())[0].retirable).toBe(true);
+    const [current] = await status();
+    expect(current.generation).toBeGreaterThan(target.generation);
+    expect(await (await api(target)).json()).toEqual({ error: "legacy_generation_changed" });
+    const exact = { ...target, generation: current.generation };
+    // Seed an unresolved historical ledger entry, preserving the real Worker,
+    // broker, socket and public retirement transport throughout the journey.
+    await runInDurableObject(f.account, async (_, state) => {
+      state.storage.sql.exec(`INSERT INTO hosted_tool_calls(call_id,session_id,source_call_id,hand_id,host_runtime_id,
+        host_id,lease_id,generation,model,name,input_json,output_token_budget,output_byte_budget,deadline_at,
+        cancel_requested,state,created_at,updated_at)
+        VALUES('legacy-pending','fixture','fixture','pre-runtime',NULL,'fixture','fixture',?,'fixture','fixture','{}',1,1,?,0,'admitted',1,1)`,
+        current.generation, Date.now() + 60_000);
+    });
+    expect((await status())[0]).toMatchObject({ pending_calls: 1, retirable: false });
+    expect(await (await api(exact)).json()).toEqual({ error: "legacy_runtime_has_pending_calls" });
+    await runInDurableObject(f.account, async (_, state) => {
+      state.storage.sql.exec("UPDATE hosted_tool_calls SET state='completed',result_json='{}' WHERE call_id='legacy-pending'");
+    });
+    const receipt = { retired: true, ...exact };
+    expect(await (await api(exact)).json()).toEqual(receipt);
+    expect(await (await api(exact)).json()).toEqual(receipt);
+    expect(await status()).toEqual([]);
+    expect((await (await f.call()).json() as any).data).toEqual([]);
+    await runInDurableObject(f.account, async (_, state) => {
+      expect(state.storage.sql.exec("SELECT state,result_json FROM hosted_tool_calls WHERE call_id='legacy-pending'").toArray())
+        .toEqual([{ state: "completed", result_json: "{}" }]);
+      expect(state.storage.sql.exec("SELECT machines_json,catalog_json FROM hosted_tool_routes").toArray())
+        .toEqual([{ machines_json: null, catalog_json: null }]);
+    });
+    socket = await connect();
+    expect((await api(exact)).status).toBe(409);
+    expect((await status())[0]).toMatchObject({ online: true, retirable: false });
+    expect((await (await f.call()).json() as any).data).toEqual([
+      { id: "pre-runtime", name: "pre-runtime", kind: "hand", online: true, health: "connected" },
+    ]);
+    socket.close(1000);
+    await expect.poll(async () => (await status())[0].retirable).toBe(true);
+    expect((await api(exact)).status).toBe(409);
+  } finally { socket.close(1000); }
+}, 15_000);
+
+it("retires an exact offline regional publication without removing a concurrent successor", async () => {
+  const f = fixture();
+  const owner: Principal = { ...f.principal, capabilities: ["agents:read", "agents:write", "tools:use"] };
+  const testEnv = { ...env, NANOCODEX_REGIONAL_HAND_RELAYS: "true" } as Parameters<typeof worker.fetch>[1];
+  const api = (body?: unknown, actor = owner) => worker.fetch(new Request(
+    "https://nanocodex.example/v1/account/hand-relays" + (body === undefined ? "" : "/retire"), {
+      method: body === undefined ? "GET" : "POST",
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }), testEnv, createExecutionContext(), actor);
+  const status = async () => (await (await api()).json() as any).regional;
+  const open = (runtime: string) => worker.fetch(new Request("https://nanocodex.example/v1/account/tool-host", {
+    headers: { upgrade: "websocket", "x-nanocodex-hand-machine-id": "regional-device", "x-nanocodex-hand-runtime-id": runtime },
+    cf: { continent: "EU", country: "DE", longitude: "8.68" },
+  }), testEnv, createExecutionContext(), owner);
+  const connect = async (runtime: string) => {
+    const response = await open(runtime);
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!; socket.accept();
+    const ready = next(socket);
+    socket.send(JSON.stringify({ type: "catalog", capabilities: ["turn_metadata"], attachment_id: "regional-device",
+      runtime_id: runtime, machines: [machine("regional-device")], tools: [{
+        provider: "native", remote_name: "device_info", parallel_safe: true, timeout_ms: 15000,
+        definition: { type: "function", name: "regional_device_info", description: "Fixture", strict: false,
+          parameters: { type: "object", properties: {}, required: [], additionalProperties: false } },
+      }] }));
+    expect(await ready).toEqual({ type: "ready" });
+    return socket;
+  };
+  const identity = (row: any) => ({ machine_id: row.machine_id, runtime_id: row.runtime_id,
+    publication_id: row.publication_id, region: row.region });
+  let runtime = crypto.randomUUID(), socket = await connect(runtime);
+  try {
+    const [live] = await status();
+    expect(live).toMatchObject({ machine_id: "regional-device", runtime_id: runtime, region: "weur", online: true, retirable: false });
+    const target = identity(live);
+    expect((await api(target)).status).toBe(409);
+    expect((await api(target, f.principal)).status).toBe(403);
+    expect((await api(target, { ...owner, connectGrant: { grantId: "fixture" } as NonNullable<Principal["connectGrant"]> })).status).toBe(403);
+    expect((await api(target, { ...owner, userId: crypto.randomUUID() })).status).toBe(409);
+    socket.close(1000);
+    await expect.poll(async () => (await status())[0].retirable).toBe(true);
+    expect((await api({ ...target, publication_id: crypto.randomUUID() })).status).toBe(409);
+    const nextRuntime = crypto.randomUUID();
+    const [retirement, successor] = await Promise.all([api(target), connect(nextRuntime)]);
+    expect([200, 409]).toContain(retirement.status);
+    socket = successor; runtime = nextRuntime;
+    expect((await status())[0]).toMatchObject({ runtime_id: runtime, online: true, retirable: false });
+    await api(target); // Idempotent old receipt or conflict; neither changes the successor.
+    expect((await (await f.call()).json() as any).data).toEqual([
+      { id: "regional-device", name: "regional-device", kind: "hand", online: true, health: "connected" },
+    ]);
+    socket.close(1000);
+    await expect.poll(async () => (await status())[0].retirable).toBe(true);
+    const exact = identity((await status())[0]);
+    expect(await (await api(exact)).json()).toEqual({ retired: true, ...exact });
+    expect(await (await api(exact)).json()).toEqual({ retired: true, ...exact });
+    expect(await status()).toEqual([]);
+    expect((await (await f.call()).json() as any).data).toEqual([]);
+    expect((await open(runtime)).status).toBe(409);
+    socket = await connect(crypto.randomUUID());
+    await api(exact);
+    expect((await status())[0]).toMatchObject({ online: true, retirable: false });
+  } finally { socket.close(1000); }
+}, 15_000);
