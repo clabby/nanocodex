@@ -85,7 +85,7 @@ impl<F> NanocodexBuilder<F> {
         self = self
             .model(snapshot.model)
             .thinking(snapshot.thinking)
-            .fast_mode(snapshot.fast_mode);
+            .service_tier(snapshot.service_tier);
         self.session_id = Some(snapshot.session_id.parse().map_err(|error| {
             NanocodexError::InvalidSessionSnapshot(format!("invalid child session: {error}"))
         })?);
@@ -159,10 +159,18 @@ impl<F> NanocodexBuilder<F> {
     /// agent.
     ///
     /// Without this call the agent inherits the client default. A later
-    /// [`Nanocodex::set_fast_mode`] call affects subsequently accepted turns.
+    /// [`Nanocodex::set_service_tier`] call affects subsequently accepted turns.
     #[must_use]
-    pub const fn fast_mode(mut self, enabled: bool) -> Self {
-        self.config.fast_mode = enabled;
+    pub const fn fast_mode(self, enabled: bool) -> Self {
+        self.service_tier(ServiceTier::from_fast_mode(enabled))
+    }
+
+    /// Selects the processing tier for subsequently accepted turns.
+    ///
+    /// Unsupported tiers use the fastest tier supported by the selected model.
+    #[must_use]
+    pub const fn service_tier(mut self, service_tier: ServiceTier) -> Self {
+        self.config.service_tier = service_tier;
         self
     }
 

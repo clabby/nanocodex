@@ -11,8 +11,8 @@ use std::{
 
 use eyre::{Result, eyre};
 use nanocodex_agent::{
-    ExecutionPolicyDisposition, Nanocodex, NanocodexError, OpenAi, PromptRequest, PromptRoute,
-    ResponseError, Tools,
+    ExecutionPolicyDisposition, Model, Nanocodex, NanocodexError, OpenAi, PromptRequest,
+    PromptRoute, ResponseError, ServiceTier, Tools,
     events::{AgentEventKind, AgentEvents, RunStatus, RunTerminal},
     execution::{
         ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy,
@@ -21,7 +21,7 @@ use nanocodex_agent::{
     input::Prompt,
     session::{SessionId, SessionSnapshot},
 };
-use serde_json::json;
+use serde_json::{Value, json, value::RawValue};
 
 use nanocodex_durability::{
     DurableAgentExt, DurableSession, MemoryStore, OperationStatus, OwnedState, OwnerId, OwnerToken,
@@ -2618,49 +2618,94 @@ async fn cancelled_standalone_compaction_does_not_block_a_cold_follow_on() -> Re
 
 #[tokio::test]
 async fn live_replacement_resubmits_a_pending_standalone_compaction() -> Result<()> {
-    let store = MemoryStore::new()?;
-    let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let started = Arc::new(tokio::sync::Notify::new());
-    let openai = OpenAi::builder("test-key")
-        .service({
-            let compactions = Arc::clone(&compactions);
-            let started = Arc::clone(&started);
-            move || PendingStandaloneCompactionService {
-                compactions: Arc::clone(&compactions),
-                started: Arc::clone(&started),
-            }
-        })
-        .build()?;
-    let workspace = temporary_workspace("standalone-compaction-live-replacement")?;
-    let state = DurableSession::open(store, "standalone-compaction-live-replacement").await?;
-    let (agent, events) = Nanocodex::builder(openai)
-        .workspace(&workspace)
-        .durability(state)
-        .await?
-        .build()?;
-    agent
-        .prompt("seed compaction input")
-        .await?
-        .result()
-        .await?;
+    for tier in [ServiceTier::Fast, ServiceTier::Ultrafast] {
+        let store = MemoryStore::new()?;
+        let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let openai = OpenAi::builder("test-key")
+            .model(Model::Astra)
+            .service_tier(tier)
+            .service({
+                let compactions = Arc::clone(&compactions);
+                let started = Arc::clone(&started);
+                move || {
+                    let mut service = PendingStandaloneCompactionService {
+                        compactions: Arc::clone(&compactions),
+                        started: Arc::clone(&started),
+                    };
+                    tower::service_fn(move |request: nanocodex_oai_api::tower::ResponsesAttempt| {
+                        assert_eq!(request.service_tier(), tier);
+                        tower::Service::call(&mut service, request)
+                    })
+                }
+            })
+            .build()?;
+        let workspace = temporary_workspace("standalone-compaction-live-replacement")?;
+        let state = DurableSession::open(store, "standalone-compaction-live-replacement").await?;
+        let (agent, events) = Nanocodex::builder(openai)
+            .workspace(&workspace)
+            .durability(state.clone())
+            .await?
+            .build()?;
+        agent
+            .prompt("seed compaction input")
+            .await?
+            .result()
+            .await?;
 
-    let first = tokio::spawn({
-        let agent = agent.clone();
-        async move { agent.compact().await }
-    });
-    started.notified().await;
-    assert_eq!(compactions.load(Ordering::SeqCst), 1);
-    agent.compact().await?;
-    assert!(matches!(first.await?, Err(NanocodexError::TurnCancelled)));
-    assert_eq!(
-        compactions.load(Ordering::SeqCst),
-        2,
-        "same-live replacement must resubmit an unfinished provider call"
-    );
+        let first = tokio::spawn({
+            let agent = agent.clone();
+            async move { agent.compact().await }
+        });
+        started.notified().await;
+        assert_eq!(compactions.load(Ordering::SeqCst), 1);
+        assert_compaction_admission_identity(&state, tier).await?;
+        agent.compact().await?;
+        assert!(matches!(first.await?, Err(NanocodexError::TurnCancelled)));
+        assert_eq!(
+            compactions.load(Ordering::SeqCst),
+            2,
+            "same-live replacement must resubmit an unfinished provider call"
+        );
 
-    agent.shutdown().await?;
-    drop((agent, events));
-    std::fs::remove_dir_all(workspace)?;
+        agent.shutdown().await?;
+        drop((agent, events));
+        std::fs::remove_dir_all(workspace)?;
+    }
+    Ok(())
+}
+
+/// Pending compaction admissions are matched by exact input bytes after a restart, so
+/// Standard and Fast must keep the boolean encoding written by earlier releases.
+async fn assert_compaction_admission_identity(
+    state: &DurableSession,
+    tier: ServiceTier,
+) -> Result<()> {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct LegacyCompactionInput {
+        kind: String,
+        base_checkpoint: Option<Box<RawValue>>,
+        model: String,
+        effort: String,
+        fast_mode: bool,
+        workspace: Option<String>,
+    }
+
+    let retained = state.state().await?;
+    let pending = retained.pending_operations();
+    let [(_, operation)] = pending.as_slice() else {
+        return Err(eyre!("expected one pending compaction admission"));
+    };
+    let input = state.resolve(&operation.input).await?.json()?.to_owned();
+    if tier == ServiceTier::Ultrafast {
+        let decoded: Value = serde_json::from_str(&input)?;
+        assert_eq!(decoded["service_tier"], "ultrafast");
+        assert!(decoded.get("fast_mode").is_none());
+    } else {
+        let legacy: LegacyCompactionInput = serde_json::from_str(&input)?;
+        assert_eq!(legacy.fast_mode, tier == ServiceTier::Fast);
+        assert_eq!(serde_json::to_string(&legacy)?, input);
+    }
     Ok(())
 }
 

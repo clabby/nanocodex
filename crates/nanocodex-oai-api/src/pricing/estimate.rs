@@ -77,6 +77,21 @@ const ASTRA_LONG_CONTEXT_PRIORITY: TokenRates = TokenRates {
     cache_write_input: 50_000,
     output: 150_000,
 };
+
+// https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast
+const ASTRA_ULTRAFAST: TokenRates = TokenRates {
+    input: 60_000,
+    cached_input: 6_000,
+    cache_write_input: 75_000,
+    output: 300_000,
+};
+const ASTRA_LONG_CONTEXT_ULTRAFAST: TokenRates = TokenRates {
+    input: 120_000,
+    cached_input: 12_000,
+    cache_write_input: 150_000,
+    output: 450_000,
+};
+
 // https://developers.cloudflare.com/workers-ai/models/glm-5.3/
 // Workers AI publishes no separate cache-write or priority surcharge.
 const GLM53_STANDARD: TokenRates = TokenRates {
@@ -111,8 +126,18 @@ struct TokenRates {
 
 impl TokenRates {
     const fn for_model(model: Model, service_tier: ServiceTier, input_tokens: u64) -> Self {
-        let fast = !matches!(service_tier, ServiceTier::Standard);
         let long = input_tokens > LONG_CONTEXT_THRESHOLD;
+        if matches!(
+            (model, service_tier),
+            (Model::Astra, ServiceTier::Ultrafast)
+        ) {
+            return if long {
+                ASTRA_LONG_CONTEXT_ULTRAFAST
+            } else {
+                ASTRA_ULTRAFAST
+            };
+        }
+        let fast = !matches!(service_tier, ServiceTier::Standard);
         match (model, fast, long) {
             (Model::Glm53, _, _) => GLM53_STANDARD,
             (Model::Kimi, _, _) => KIMI_STANDARD,
@@ -140,10 +165,12 @@ pub enum ServiceTier {
     /// Standard processing and token rates.
     #[default]
     Standard,
-    /// Priority processing selected by `fast_mode`.
+    /// Compatibility alias for Fast processing.
     Priority,
-    /// Fast processing label used for models newer than GPT-5.6.
+    /// Fast processing and token rates.
     Fast,
+    /// Ultrafast processing and token rates, supported by Astra.
+    Ultrafast,
 }
 
 impl ServiceTier {
@@ -154,16 +181,46 @@ impl ServiceTier {
             Self::Standard => "standard",
             Self::Priority => "priority",
             Self::Fast => "fast",
+            Self::Ultrafast => "ultrafast",
         }
     }
 
-    /// Resolves the tier label assumed for the selected model and mode.
+    /// Converts the legacy priority-processing switch into a tier preference.
+    #[must_use]
+    pub const fn from_fast_mode(enabled: bool) -> Self {
+        if enabled { Self::Fast } else { Self::Standard }
+    }
+
+    /// Clamps a preference to the fastest tier supported by the selected model.
+    #[must_use]
+    pub const fn effective_for_model(self, model: Model) -> Self {
+        match (model, self) {
+            (Model::Glm53 | Model::Kimi | Model::Mimo, _) => Self::Standard,
+            (Model::Sol | Model::Luna, Self::Ultrafast) => Self::Fast,
+            _ => self,
+        }
+    }
+
+    /// Resolves the tier label assumed for the selected model and legacy mode.
     #[must_use]
     pub const fn for_model(model: Model, fast_mode: bool) -> Self {
-        match (model, fast_mode) {
-            (Model::Glm53 | Model::Kimi | Model::Mimo, _) | (_, false) => Self::Standard,
-            (Model::Sol | Model::Luna | Model::Astra, true) => Self::Fast,
+        Self::from_fast_mode(fast_mode).effective_for_model(model)
+    }
+
+    /// Returns the Responses API `service_tier` value, omitting Standard.
+    #[cfg(feature = "client")]
+    pub(crate) const fn request_value(self, model: Model) -> Option<&'static str> {
+        match self.effective_for_model(model) {
+            Self::Standard => None,
+            Self::Priority | Self::Fast => Some("priority"),
+            Self::Ultrafast => Some("ultrafast"),
         }
+    }
+}
+
+impl From<bool> for ServiceTier {
+    fn from(enabled: bool) -> Self {
+        Self::from_fast_mode(enabled)
     }
 }
 
@@ -310,6 +367,7 @@ pub(crate) fn estimate_tokens(
     model: Model,
     service_tier: ServiceTier,
 ) -> EstimatedUsdCost {
+    let service_tier = service_tier.effective_for_model(model);
     let rates = TokenRates::for_model(model, service_tier, input_tokens);
     let cached_input_tokens = cached_input_tokens.min(input_tokens);
     let remaining_input = input_tokens.saturating_sub(cached_input_tokens);

@@ -23,7 +23,8 @@ struct CurrentExecution {
     prompt_cache_key: String,
     model: String,
     effort: Thinking,
-    fast_mode: bool,
+    #[serde(flatten, with = "crate::service_tier_serde")]
+    service_tier: ServiceTier,
     reasoning_mode: String,
     model_id_prefix: Option<String>,
     store_responses: bool,
@@ -100,7 +101,7 @@ where
             .parse::<crate::Model>()
             .map_err(NanocodexError::InvalidExecutionPolicy)?;
         self.thinking = saved.effort;
-        self.fast_mode = saved.fast_mode;
+        self.service_tier = saved.service_tier;
         let config = Arc::make_mut(&mut self.config);
         config.reasoning_mode = saved
             .reasoning_mode
@@ -234,7 +235,7 @@ where
             prompt_cache_key: session.factory.profile().prompt_cache_key().to_owned(),
             model: self.model.as_str().to_owned(),
             effort: self.thinking,
-            fast_mode: self.fast_mode,
+            service_tier: self.service_tier,
             reasoning_mode: self.config.reasoning_mode.as_str().to_owned(),
             model_id_prefix: self.config.model_id_prefix.as_deref().map(str::to_owned),
             store_responses: self.config.store_responses,
@@ -285,7 +286,7 @@ mod tests {
             prompt_cache_key: "synthetic".into(),
             model: Model::Astra.as_str().into(),
             effort: Thinking::Low,
-            fast_mode: false,
+            service_tier: ServiceTier::Standard,
             reasoning_mode: "standard".into(),
             model_id_prefix: None,
             store_responses: false,
