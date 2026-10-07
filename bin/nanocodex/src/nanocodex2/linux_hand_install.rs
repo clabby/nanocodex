@@ -879,6 +879,8 @@ mod tests {
             "https://u:p@x",
         ] {
             let invalid = Request {
+                prepare: false,
+                prepare_components: false,
                 origin: origin.into(),
                 credential: valid.credential.clone(),
                 owner: valid.owner.clone(),
