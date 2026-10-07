@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
-import { AccountHealthError, accountHealth, accountHealthMessages, releaseWorkers } from './release-workers.mjs';
+import { AccountHealthError, accountHealth, accountHealthMessages, releaseWorkers, waitForAccountHealth } from './release-workers.mjs';
 
 const SECRET = 'sk-live-SECRET-1234';
 const REVISION = 'b'.repeat(40);
@@ -129,4 +129,71 @@ test('release annotation names the health category and never leaks response or e
   const error = await release.catch(error => error);
   assert.deepEqual(annotations, ['::error title=Worker release failed::account account health check']);
   assert.doesNotMatch(error.message, new RegExp(SECRET));
+});
+
+// Real loopback Worker whose answers change per request, like edge propagation.
+const sequence = responses => {
+  let requests = 0;
+  const handler = (request, response) => json(...responses[Math.min(requests, responses.length - 1)])(request, response, requests++);
+  return { handler, requests: () => requests };
+};
+const releaseThrough = (health) => {
+  const annotations = []; const logs = []; const events = [];
+  const plan = { revision: REVISION, selected: ['account'], fingerprints: { account: 'a'.repeat(64) } };
+  const release = releaseWorkers(plan, { env: {}, isCurrent: async () => true, prepare: async () => {}, run: async () => true, health,
+    ledger: { start: async name => name, finish: async (name, state) => events.push([state, name]) } });
+  return { annotations, logs, events, release };
+};
+
+test('release waits through bounded revision propagation and transient 5xx before certifying', async t => {
+  const logs = [];
+  t.mock.method(console, 'log', line => logs.push(String(line)));
+  const previous = { ...healthy, deployment_sha: 'c'.repeat(40) };
+  const worker = sequence([[{ ...healthy, deployment_sha: null }], [previous], [{ secret: SECRET }, 503], [healthy]]);
+  await serve(worker.handler, async url => {
+    const { events, release } = releaseThrough(revision => waitForAccountHealth(revision, { url, retryDelayMs: 5, deadlineMs: 30_000 }));
+    await release;
+    assert.deepEqual(events, [['success', 'account']]);
+  });
+  assert.equal(worker.requests(), 4);
+  const output = logs.join('\n');
+  assert.match(output, /Account health did not report a deployment revision after 1 attempt/);
+  assert.match(output, new RegExp(`must identify the released revision after 2 attempts over [0-9.]+s; last observed revision ${'c'.repeat(40)}; expected ${REVISION}`));
+  assert.match(output, /unexpected HTTP status \(HTTP 503\) after 3 attempts/);
+  assert.match(output, /::notice title=Account health::healthy after 4 attempts/);
+  assert.doesNotMatch(output, new RegExp(SECRET));
+});
+
+test('persistent revision mismatch still fails after the deadline with final observed diagnostics', async t => {
+  const annotations = [];
+  t.mock.method(console, 'error', line => annotations.push(String(line)));
+  t.mock.method(console, 'log', () => {});
+  const stale = 'c'.repeat(40);
+  for (const [observed, shown] of [[stale, `; last observed revision ${stale}`], [SECRET, '']]) {
+    annotations.length = 0;
+    const worker = sequence([[{ ...healthy, deployment_sha: observed }]]);
+    const started = Date.now();
+    const error = await serve(worker.handler, async url => {
+      const { events, release } = releaseThrough(revision => waitForAccountHealth(revision, { url, retryDelayMs: 20, deadlineMs: 300, minimumProbeMs: 50 }));
+      const error = await release.then(() => assert.fail('expected rejection'), error => error);
+      assert.deepEqual(events, [['failure', 'account']]);
+      return error;
+    });
+    assert.ok(Date.now() - started < 2_000, 'retry stays inside its deadline');
+    assert.ok(worker.requests() > 1);
+    assert.equal(annotations.length, 1);
+    assert.equal(annotations[0], `::error title=Worker release failed::account account health check: Account health must identify the released revision after ${worker.requests()} attempts over ${annotations[0].match(/over ([0-9.]+)s/)[1]}s${shown}; expected ${REVISION}`);
+    assert.ok(error.message.includes(annotations[0].split('::').at(-1)));
+    assert.doesNotMatch(annotations.join('') + error.message, new RegExp(SECRET));
+  }
+});
+
+test('identity and client HTTP failures are not retried', async t => {
+  t.mock.method(console, 'log', () => {});
+  for (const [response, category] of [[[{ ...healthy, service: SECRET }], 'service_mismatch'], [[{ secret: SECRET }, 404], 'http_status']]) {
+    const worker = sequence([response, [healthy]]);
+    const error = await serve(worker.handler, url => waitForAccountHealth(REVISION, { url, retryDelayMs: 5, deadlineMs: 30_000 }).catch(error => error));
+    assert.equal(error.category, category);
+    assert.equal(worker.requests(), 1);
+  }
 });

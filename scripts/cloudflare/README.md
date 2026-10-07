@@ -56,7 +56,10 @@ its audited Docker inputs. API releases consume a published receipt; before the
 first such receipt, they preserve each existing Cloudflare application's image.
 Account image selection is pinned during planning. Vite's config is rewritten
 beside its output, preserving relative paths. Account releases explicitly stamp
-the revision, and health must report it before the release is certified.
+the revision, and health must report it before the release is certified. Health
+polls for up to two minutes while edge propagation, a missing revision or
+transient 5xx/transport failures settle; identity and client errors fail at once.
+A final failure reports attempts, elapsed time, and the last valid observed revision.
 
 Worker release identity combines source/dependency/config keys with account scope.
 The ledger records intent before mutation. Success requires command completion,
