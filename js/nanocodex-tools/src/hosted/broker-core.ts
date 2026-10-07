@@ -225,6 +225,7 @@ export type HostedToolsCodeTool = Readonly<{
   definition?: HostedToolsCodeDefinition;
   /** Opaque immutable route identity for trusted broker-to-broker relays. */
   routeToken?: string;
+  processSessionKey?: string;
   endTurn?(sessionId: string, turnId: string, event: "Stop" | "Interrupt" | "SubagentStop"): Promise<void>;
   handler(
     input: unknown,
@@ -1571,6 +1572,7 @@ export class HostedToolsBrokerCore {
       parallelSafe: prepared.entry.parallel_safe,
       definition: { ...prepared.providerDefinition, defer_loading: true as const },
       routeToken: prepared.routeToken,
+      ...(prepared.canonicalName === "write_stdin" ? { processSessionKey: prepared.routeToken } : {}),
       provider: prepared.entry.provider,
       remoteName: prepared.entry.remote_name,
       summary: prepared.entry.summary,

@@ -3512,6 +3512,7 @@ function createManagedNamespaceRuntime(
   processStorage?: NamespaceProcessStorage,
   threadId?: string,
   localPreparation?: (context: ToolContext, name: string | undefined, input: unknown) => NamespaceCaptureFilter | undefined | Promise<NamespaceCaptureFilter | undefined>,
+  recoverProcessTool?: Parameters<typeof createNamespaceExecutionRuntime>[7],
 ): Readonly<{ tools: NamedTool[]; capture(context: ToolContext): Promise<void> }> {
   const runtime = createNamespaceExecutionRuntime(
     machines,
@@ -3521,6 +3522,7 @@ function createManagedNamespaceRuntime(
     authorizationKey,
     processStorage,
     threadId,
+    recoverProcessTool,
   );
   const captured = new Set<string>();
   const locallyCaptured = new Set<string>();
@@ -10526,6 +10528,13 @@ export class DurableAgentSession extends DurableComputerObject {
         // Incremental capture preserves earlier cell routes, including their
         // original generation when another selected Hand is looked up later.
         return machine => machine.id === selected.id;
+      },
+      (binding, context) => {
+        const authorization = this.#authorizationForToolContext(context);
+        if (!this.#canUseExecutionNamespace(authorization) || !this.#hasFullAccountAuthority(authorization)
+          || !binding.machineId.startsWith("user:")) return undefined;
+        return this.#accountHostedTools?.recoverProcessTool(
+          binding.machineId.slice("user:".length), binding.processSessionKey, context);
       },
     );
     const cloudTools: NamedTool[] = [

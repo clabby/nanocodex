@@ -1038,6 +1038,25 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     return this.#allowed(context) ? this.#machineTools.get(machineToolKey(machineId, name)) : undefined;
   }
 
+  /** Restore only the persisted executor route; no inventory or rerouting. */
+  recoverProcessTool(machineId: string, key: string, context?: AuthorizationContext): HostedToolsCodeTool | undefined {
+    if (!this.#allowed(context)) return undefined;
+    let identity: unknown;
+    try { identity = JSON.parse(key); } catch { return undefined; }
+    if (!Array.isArray(identity) || identity.length !== 3 || identity[0] !== "account-process"
+      || identity[1] !== machineId || typeof identity[2] !== "string") return undefined;
+    return this.#processTool(machineId, identity[2]);
+  }
+
+  #processTool(machineId: string, routeToken: string): HostedToolsCodeTool {
+    return Object.freeze({
+      name: "write_stdin", parallelSafe: true,
+      processSessionKey: JSON.stringify(["account-process", machineId, routeToken]),
+      handler: (input: unknown, context: InvocationContext) =>
+        this.#invoke("write_stdin", routeToken, input, context, machineId, "fixed"),
+    });
+  }
+
   screenTool(machineId: string, context?: AuthorizationContext): HostedToolsCodeTool | undefined {
     return this.#allowed(context) ? this.#screenTools.get(machineId) : undefined;
   }
@@ -1430,10 +1449,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
       metadata: result.metadata,
       value: result.value,
       ...(machineId !== undefined && name === "exec_command" && typeof result.process_route_token === "string"
-        ? { [PROCESS_SESSION_TOOL]: Object.freeze({
-          handler: (input: unknown, context: InvocationContext) =>
-            this.#invoke("write_stdin", result.process_route_token!, input, context, machineId, "fixed"),
-        }) } : {}),
+        ? { [PROCESS_SESSION_TOOL]: this.#processTool(machineId, result.process_route_token) } : {}),
       ...(result.pre_admission_unavailable === true
         ? { [HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE]: true as const }
         : {}),

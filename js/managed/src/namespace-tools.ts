@@ -152,6 +152,7 @@ export function createNamespaceExecutionRuntime(
   authorizationKey: (context: ToolContext) => string = () => "account",
   processStorage?: NamespaceProcessStorage,
   threadId?: string,
+  recoverProcessTool?: (binding: DurableProcessBinding, context: ToolContext) => RoutedTool | undefined,
 ): NamespaceExecutionRuntime {
   const correlation = (context: ToolContext) => ({ thread_id: threadId, session_id: context.sessionId,
     turn_id: context.turnId, parent_call_id: context.parentCallId });
@@ -421,7 +422,7 @@ export function createNamespaceExecutionRuntime(
         // Recheck mount authority and immutable provider identity on every
         // durable poll. A matching path/machine ID alone cannot retarget it.
         const writeStdin = durable === undefined ? retained?.writeStdin
-          : resolveMachineTool(durable.machineId, "write_stdin", context);
+          : recoverProcessTool?.(durable, context) ?? resolveMachineTool(durable.machineId, "write_stdin", context);
         if (writeStdin === undefined || (durable !== undefined
           && writeStdin.processSessionKey !== durable.processSessionKey)) {
           throw new Error("unknown or stale namespace process session");
