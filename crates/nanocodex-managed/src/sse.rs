@@ -4,7 +4,7 @@ use reqwest::{
     Response, StatusCode,
     header::{ACCEPT, CONTENT_TYPE},
 };
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep, timeout_at};
 
 use crate::{
     ManagedClient, ManagedError, ManagedEvent,
@@ -14,6 +14,9 @@ use crate::{
 const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MIN_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+// A displaced Worker can keep sending comments without newer durable events.
+// Renew the response even when those bytes satisfy the socket read timeout.
+const RESPONSE_LEASE: Duration = Duration::from_secs(60);
 
 /// Validated durable event-stream cursor.
 ///
@@ -90,7 +93,7 @@ pub struct ManagedEventStream {
     agent_id: String,
     cursor: EventCursor,
     reconnect_delay: Duration,
-    response: Option<Response>,
+    response: Option<(Response, Instant)>,
     buffer: Vec<u8>,
     search_from: usize,
 }
@@ -175,6 +178,7 @@ impl ManagedEventStream {
         client: ManagedClient,
         mut response: Response,
     ) -> Result<(crate::AgentRunReceipt, Self), ManagedError> {
+        let deadline = Instant::now() + RESPONSE_LEASE;
         if !response
             .headers()
             .get(CONTENT_TYPE)
@@ -203,7 +207,7 @@ impl ManagedEventStream {
                     .map_err(|_| ManagedError::InvalidResponse("invalid agent run receipt"))?;
                 let mut stream =
                     Self::new(client, receipt.agent_id.clone(), EventCursor::parse("0")?);
-                stream.response = Some(response);
+                stream.response = Some((response, deadline));
                 stream.buffer = buffer;
                 stream.search_from = search_from;
                 return Ok((receipt, stream));
@@ -213,7 +217,18 @@ impl ManagedEventStream {
                     "agent run receipt exceeds size limit",
                 ));
             }
-            match response.chunk().await.map_err(ManagedError::Transport)? {
+            if Instant::now() >= deadline {
+                return Err(ManagedError::InvalidResponse(
+                    "agent run stream lease expired before receipt",
+                ));
+            }
+            match timeout_at(deadline, response.chunk())
+                .await
+                .map_err(|_| {
+                    ManagedError::InvalidResponse("agent run stream lease expired before receipt")
+                })?
+                .map_err(ManagedError::Transport)?
+            {
                 Some(chunk) => buffer.extend_from_slice(&chunk),
                 None => {
                     return Err(ManagedError::InvalidResponse(
@@ -293,7 +308,10 @@ impl ManagedEventStream {
                 self.connect().await?;
             }
             let chunk = match self.response.as_mut() {
-                Some(response) => response.chunk().await,
+                Some((_, deadline)) if Instant::now() >= *deadline => Ok(None),
+                Some((response, deadline)) => timeout_at(*deadline, response.chunk())
+                    .await
+                    .unwrap_or(Ok(None)),
                 None => continue,
             };
             match chunk {
@@ -339,7 +357,7 @@ impl ManagedEventStream {
                             "managed event response is not text/event-stream".to_owned(),
                         ));
                     }
-                    self.response = Some(response);
+                    self.response = Some((response, Instant::now() + RESPONSE_LEASE));
                     return Ok(());
                 }
                 Ok(response)
