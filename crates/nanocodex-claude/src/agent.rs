@@ -1,8 +1,8 @@
 //! Provider-specific Messages agent loop. No OpenAI transport or CLI credentials.
 use crate::{
-    ClaudeClient, ClaudeToolSpec, ContentBlock, ContentDelta, Message, MessagesRequest, Role,
-    ServerToolDefinition, StopReason, StreamEvent, ToolDefinition, ToolResultContent, Usage,
-    collect_stream,
+    ClaudeClient, ClaudeError, ClaudeToolSpec, ContentBlock, ContentDelta, Message,
+    MessagesRequest, Role, ServerToolDefinition, StopReason, StreamEvent, ToolDefinition,
+    ToolResultContent, Usage, collect_stream,
 };
 use futures_util::StreamExt;
 use nanocodex_agent::{
@@ -31,8 +31,13 @@ use std::{
         Arc, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 use tokio::sync::{Mutex, Notify, oneshot};
+#[cfg(not(target_family = "wasm"))]
+use tokio::time::sleep;
+#[cfg(target_family = "wasm")]
+use wasmtimer::tokio::sleep;
 use web_time::Instant;
 
 fn estimate_text_tokens(text: &str) -> u64 {
@@ -2339,106 +2344,160 @@ impl State {
                 });
             }
         }
-        if cancel.flag.load(Ordering::SeqCst) {
-            return Err(ResponseFailure {
-                error: NanocodexError::TurnCancelled,
-                recovery: if upgrade.is_some() { recovery } else { None },
-            });
-        }
-        let mut stream = tokio::select! {
-            result = client.stream(&request) => match result {
-                Ok(stream) => stream,
-                Err(error) => {
-                    // A rejected request has no remote effect. A transport or
-                    // server failure can occur after the provider admitted it.
-                    let uncertain = matches!(&error,
-                        crate::ClaudeError::Transport(_) | crate::ClaudeError::StreamError { .. }
-                        | crate::ClaudeError::IncompleteStream
-                    ) || matches!(&error, crate::ClaudeError::Http { status, .. } if *status >= 500);
-                    return Err(ResponseFailure {
-                        error: provider_error(error),
-                        recovery: if uncertain || upgrade.is_some() { recovery } else { None },
-                    });
-                }
-            },
-            () = cancel.cancelled() => return Err(ResponseFailure {
-                error: NanocodexError::TurnCancelled, recovery,
-            }),
-        };
-        let mut captured = Vec::new();
-        let mut first_event = None;
-        let mut first_output = None;
-        // Streamed text and the final assistant message must share one item
-        // identity. Clients fold the canonical message into the streamed row
-        // only when both identify the same provider message; a null delta ID
-        // beside a concrete final ID renders every Claude answer twice.
-        let mut message_id: Option<String> = None;
+        // Retries resend the admitted request inside one live execution, so a
+        // replayed receipt never reaches the network and each execution after a
+        // crash or reopen starts with a fresh budget.
+        let max_attempts = if context.disable_tools { 3 } else { 5 };
+        let mut attempt = 0;
         loop {
-            let event = tokio::select! {
-                event = stream.next() => event,
+            if cancel.flag.load(Ordering::SeqCst) {
+                return Err(ResponseFailure {
+                    error: NanocodexError::TurnCancelled,
+                    recovery: if upgrade.is_some() { recovery } else { None },
+                });
+            }
+            attempt += 1;
+            let mut accepted = false;
+            let mut published_text = false;
+            let mut first_event = None;
+            let mut first_output = None;
+            // Streamed text and the final assistant message must share one item
+            // identity. Clients fold the canonical message into the streamed row
+            // only when both identify the same provider message; a null delta ID
+            // beside a concrete final ID renders every Claude answer twice.
+            let mut message_id: Option<String> = None;
+            let opened = tokio::select! {
+                result = client.stream(&request) => result,
                 () = cancel.cancelled() => return Err(ResponseFailure {
                     error: NanocodexError::TurnCancelled, recovery,
                 }),
             };
-            match event {
-                Some(Ok(event)) => {
-                    first_event.get_or_insert_with(&elapsed_ns);
-                    if matches!(event, StreamEvent::ContentBlockDelta { .. }) {
-                        first_output.get_or_insert_with(&elapsed_ns);
-                    }
-                    if let Some(recovery) = &mut recovery {
-                        recovery.observe(&event);
-                    }
-                    if let StreamEvent::MessageStart { message } = &event {
-                        message_id = Some(message.id.clone());
-                    }
-                    if let (
-                        Some(events),
-                        StreamEvent::ContentBlockDelta {
-                            delta: ContentDelta::TextDelta { text },
-                            ..
-                        },
-                    ) = (events, &event)
-                    {
-                        self.emit(events,AgentEventKind::AssistantDelta,json!({"model_call_index":index,"item_id":message_id,"phase":null,"text":text}));
-                    }
-                    let terminal = matches!(event, StreamEvent::MessageStop);
-                    captured.push(Ok(event));
-                    if terminal {
-                        break;
+            let result = match opened {
+                Err(error) => Err(error),
+                Ok(mut stream) => {
+                    accepted = true;
+                    let mut captured = Vec::new();
+                    loop {
+                        let event = tokio::select! {
+                            event = stream.next() => event,
+                            () = cancel.cancelled() => return Err(ResponseFailure {
+                                error: NanocodexError::TurnCancelled, recovery,
+                            }),
+                        };
+                        let event = match event {
+                            Some(Ok(event)) => event,
+                            Some(Err(error)) => break Err(error),
+                            None => break Err(ClaudeError::IncompleteStream),
+                        };
+                        first_event.get_or_insert_with(&elapsed_ns);
+                        if matches!(event, StreamEvent::ContentBlockDelta { .. }) {
+                            first_output.get_or_insert_with(&elapsed_ns);
+                        }
+                        if let Some(recovery) = &mut recovery {
+                            recovery.observe(&event);
+                        }
+                        if let StreamEvent::MessageStart { message } = &event {
+                            message_id = Some(message.id.clone());
+                        }
+                        if let (
+                            Some(events),
+                            StreamEvent::ContentBlockDelta {
+                                delta: ContentDelta::TextDelta { text },
+                                ..
+                            },
+                        ) = (events, &event)
+                        {
+                            published_text = true;
+                            self.emit(events,AgentEventKind::AssistantDelta,json!({"model_call_index":index,"item_id":message_id,"phase":null,"text":text}));
+                        }
+                        let terminal = matches!(event, StreamEvent::MessageStop);
+                        captured.push(event);
+                        if terminal {
+                            let first = captured.remove(0);
+                            let rest = captured.into_iter().map(Ok);
+                            break collect_stream(first, futures_util::stream::iter(rest)).await;
+                        }
                     }
                 }
-                Some(Err(error)) => {
-                    return Err(ResponseFailure {
-                        error: provider_error(error),
-                        recovery,
+            };
+            let error = match result {
+                Ok(response) => {
+                    if let Some(effect) = active_effect {
+                        effect
+                            .complete(serde_json::to_value(&response).map_err(provider_error)?)
+                            .await?;
+                    }
+                    completed(
+                        &response,
+                        attempt,
+                        first_event.unwrap_or_default(),
+                        first_output,
+                    );
+                    return Ok(ResponseOutcome {
+                        message: response,
+                        upgrade,
                     });
                 }
-                None => {
-                    return Err(ResponseFailure {
-                        error: provider_error("stream ended without message_stop"),
-                        recovery,
-                    });
-                }
+                Err(error) => error,
+            };
+
+            // Server tools may execute before any block is observed, so only an
+            // explicit rejection proves that the request had no remote effect.
+            let uncertain = accepted
+                || matches!(
+                    &error,
+                    ClaudeError::Transport(_)
+                        | ClaudeError::StreamError { .. }
+                        | ClaudeError::IncompleteStream
+                )
+                || matches!(&error, ClaudeError::Http { status, .. } if *status >= 500);
+            let retry_after = match &error {
+                ClaudeError::Http { retry_after, .. } => *retry_after,
+                _ => None,
+            };
+            let jitter = 90 + (u64::from(index) * 31 + u64::from(attempt) * 17) % 21;
+            let backoff = Duration::from_millis(1_000 * 2_u64.pow(attempt - 1) * jitter / 100);
+            let delay = retry_after.map_or(backoff, |delay| delay.max(backoff));
+
+            // Published deltas cannot be withdrawn, and possible server effects
+            // need reconciliation rather than a blind repeat. A long server hint
+            // ends the call instead of being shortened into an early retry.
+            if attempt >= max_attempts
+                || !error.is_transient()
+                || published_text
+                || (uncertain && recovery.is_some())
+                || delay > Duration::from_secs(60)
+            {
+                return Err(ResponseFailure {
+                    error: provider_error(error),
+                    recovery: if uncertain || upgrade.is_some() {
+                        recovery
+                    } else {
+                        None
+                    },
+                });
+            }
+            if let Some(events) = events {
+                self.emit(
+                    events,
+                    AgentEventKind::ModelAttemptRetrying,
+                    json!({
+                        "model_call_index": index,
+                        "attempt": attempt,
+                        "next_attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                        "delay_ns": u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX),
+                        "server_requested_delay": retry_after.is_some(),
+                        "error": error.to_string(),
+                    }),
+                );
+            }
+            // Cancellation during backoff is reported at the top of the loop.
+            tokio::select! {
+                () = cancel.cancelled() => {}
+                () = sleep(delay) => {}
             }
         }
-        let first = captured.remove(0).map_err(provider_error)?;
-        let response = collect_stream(first, futures_util::stream::iter(captured))
-            .await
-            .map_err(|error| ResponseFailure {
-                error: provider_error(error),
-                recovery,
-            })?;
-        if let Some(effect) = active_effect {
-            effect
-                .complete(serde_json::to_value(&response).map_err(provider_error)?)
-                .await?;
-        }
-        completed(&response, 1, first_event.unwrap_or_default(), first_output);
-        Ok(ResponseOutcome {
-            message: response,
-            upgrade,
-        })
     }
     async fn run(
         &self,
@@ -3419,6 +3478,7 @@ impl State {
                 let mut seen_ids = HashSet::new();
                 let mut text = String::new();
                 let mut citations = Vec::new();
+                let mut catalog_rejection = None;
                 for block in &response.content {
                     match block {
                         ContentBlock::Text { text: part, extra } => {
@@ -3430,7 +3490,10 @@ impl State {
                         ContentBlock::ToolUse {
                             id, name, input, ..
                         } => {
-                            if response.stop_reason != Some(StopReason::ToolUse) {
+                            if !matches!(
+                                response.stop_reason,
+                                Some(StopReason::ToolUse | StopReason::MaxTokens)
+                            ) {
                                 return Err(provider_error(
                                     "tool_use block without tool_use stop reason",
                                 ));
@@ -3447,21 +3510,20 @@ impl State {
                             }
                             // A recovered host can attach additional handlers, but that
                             // must not enlarge this operation's admitted catalog.
-                            let definition = cursor
-                                .template
-                                .tools
-                                .iter()
-                                .find_map(|tool| match tool {
+                            let definition =
+                                cursor.template.tools.iter().find_map(|tool| match tool {
                                     ClaudeToolSpec::Client(tool) if tool.name == *name => {
                                         Some(tool)
                                     }
                                     _ => None,
-                                })
-                                .ok_or_else(|| {
-                                    provider_error(format!(
-                                        "Claude tool {name} is outside the admitted catalog"
-                                    ))
-                                })?;
+                                });
+                            let Some(definition) = definition else {
+                                catalog_rejection = Some(format!(
+                                    "Claude tool {name} is outside the admitted catalog"
+                                ));
+                                tool_calls.push((id, name, input, None));
+                                continue;
+                            };
                             if definition.defer_loading
                                 && !discovered.contains(name)
                                 && !server_discovered.contains(name.as_str())
@@ -3506,9 +3568,14 @@ impl State {
                 if response.stop_reason == Some(StopReason::ToolUse) && tool_calls.is_empty() {
                     return Err(provider_error("tool_use stop without tool call"));
                 }
-                Ok((tool_calls, text, citations))
+                if let Some(reason) = &catalog_rejection
+                    && (has_server_effects || unfinished_server_turn_start(&pending).is_some())
+                {
+                    return Err(provider_error(reason));
+                }
+                Ok((tool_calls, text, citations, catalog_rejection))
             })();
-            let (tool_calls, text, citations) = match validated {
+            let (tool_calls, text, citations, catalog_rejection) = match validated {
                 Ok(validated) => validated,
                 Err(error) => {
                     if has_server_effects || unfinished_server_turn_start(&pending).is_some() {
@@ -3543,6 +3610,67 @@ impl State {
                     return Err(error);
                 }
             };
+            if let Some(reason) = catalog_rejection {
+                // Reject the entire validated batch before any hook or handler.
+                // Pair every call with an explicit non-execution receipt, including
+                // otherwise admitted calls, so continuation cannot replay effects.
+                conversation
+                    .admitted_tool_ids
+                    .extend(tool_calls.iter().map(|(id, _, _, _)| (*id).clone()));
+                let results = tool_calls
+                    .iter()
+                    .map(|(id, name, _, _)| {
+                        self.emit(
+                            &request.events,
+                            AgentEventKind::ToolResult,
+                            json!({
+                                "call_id":id,"tool":name,"status":"failed",
+                                "result":{"text":reason},"outcome_unknown":false,
+                            }),
+                        );
+                        ContentBlock::tool_result_content(
+                            id.as_str(),
+                            ToolResultContent::Text(format!(
+                                "{reason}. No client tools in this response were executed."
+                            )),
+                            true,
+                        )
+                    })
+                    .collect();
+                pending.push(Message {
+                    role: Role::Assistant,
+                    content: response.content,
+                });
+                pending.push(Message::tool_results(results));
+                let notice = format!(
+                    "Harness recovery notice: {reason}. No client tools in the rejected batch were executed. Use only tools in the admitted catalog and discover deferred tools before calling them. Do not repeat completed actions from earlier responses."
+                );
+                conversation.recovery_notices.push(notice.clone());
+                pending.push(Message::text(Role::User, notice));
+                conversation.messages = pending.clone();
+                conversation.previous_message_id = previous_message_id.clone();
+                conversation.summary.clear();
+                conversation.pending_continuation = true;
+                conversation.advance_boundary();
+                conversation.active_context_tokens = estimate_text_tokens(&json!({
+                    "system":cursor.template.system, "tools":cursor.template.tools, "messages":pending,
+                }).to_string());
+                if cancel.flag.load(Ordering::SeqCst) {
+                    return Err(NanocodexError::TurnCancelled);
+                }
+                if cursor.catalog_recovery_attempted {
+                    return Err(provider_error(format!(
+                        "Claude catalog validation failed after one recovery: {reason}; rejected calls were not executed"
+                    )));
+                }
+                cursor.catalog_recovery_attempted = true;
+                cursor.index = index + 1;
+                cursor.pending = pending.clone();
+                cursor.usage = usage.clone();
+                // Keep the admitted catalog frozen; retry is not a capability grant.
+                self.advance_cursor(&mut cursor, conversation).await?;
+                continue;
+            }
             if !text.is_empty() {
                 self.emit(&request.events,AgentEventKind::AssistantMessage,json!({"model_call_index":index,"item_id":response.id,"phase":null,"text":text,"citations":citations}));
             }
@@ -3688,7 +3816,7 @@ impl State {
                 role: Role::Assistant,
                 content: response.content,
             });
-            if response.stop_reason == Some(StopReason::ToolUse) {
+            if has_tool_calls {
                 let mut results: Vec<_> = results.into_iter().map(Option::unwrap).collect();
                 images::prepare_tool_images(&mut results).await;
                 pending.push(Message::tool_results(results));
@@ -3722,8 +3850,10 @@ impl State {
                 // Admit discovery/removal for the next request before persisting it.
                 // Reopening a prepared cursor never expands its original catalog.
                 self.refresh_dynamic_tools(&mut cursor);
-                self.advance_cursor(&mut cursor, conversation).await?;
-                continue;
+                if response.stop_reason == Some(StopReason::ToolUse) {
+                    self.advance_cursor(&mut cursor, conversation).await?;
+                    continue;
+                }
             }
             if response.stop_reason == Some(StopReason::PauseTurn) {
                 // Server tools continue with the same tool array and paused
@@ -3748,7 +3878,8 @@ impl State {
                 continue;
             }
             let exhausted = response.stop_reason == Some(StopReason::ModelContextWindowExceeded);
-            if has_server_effects || exhausted {
+            let output_exhausted = response.stop_reason == Some(StopReason::MaxTokens);
+            if has_server_effects || exhausted || output_exhausted {
                 // Complete provider content owns partial output and any server
                 // effects. Keep this boundary even if recovery or cancellation
                 // prevents the next assistant response.
@@ -3772,6 +3903,32 @@ impl State {
                 return Err(provider_error(
                     "server turn ended without a complete server-tool result; outcome unknown",
                 ));
+            }
+            if output_exhausted {
+                if cancel.flag.load(Ordering::SeqCst) {
+                    return Err(NanocodexError::TurnCancelled);
+                }
+                // This budget is persisted with the admitted operation. Completed
+                // content and paired tool receipts are committed before checking it.
+                if cursor.output_continuations >= 3 {
+                    return Err(provider_error(
+                        "Claude output token limit exhausted after 3 continuations; partial output and completed tool results retained",
+                    ));
+                }
+                cursor.output_continuations += 1;
+                pending.push(Message::text(
+                    Role::User,
+                    "Continue the current task from the interrupted response. The output token limit was reached. Do not repeat completed tool actions. Any incomplete tool input was not executed; issue a fresh complete call if still needed.",
+                ));
+                // Automatic compaction rebuilds pending from this history. Keep
+                // the instruction with the interrupted boundary across that swap.
+                conversation.messages = pending.clone();
+                cursor.index = index + 1;
+                cursor.pending = pending.clone();
+                cursor.usage = usage.clone();
+                self.refresh_dynamic_tools(&mut cursor);
+                self.advance_cursor(&mut cursor, conversation).await?;
+                continue;
             }
             if exhausted {
                 if cancel.flag.load(Ordering::SeqCst) {

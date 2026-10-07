@@ -5943,6 +5943,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "getrandom 0.4.3",
+ "httpdate",
  "image",
  "libc",
  "nanocodex-agent",
@@ -5960,6 +5961,7 @@ dependencies = [
  "url",
  "uuid",
  "wasm-bindgen-futures",
+ "wasmtimer",
  "web-time",
  "xxhash-rust",
 ]

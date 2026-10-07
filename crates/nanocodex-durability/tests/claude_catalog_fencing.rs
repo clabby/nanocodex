@@ -30,102 +30,135 @@ fn sse(tool: bool) -> String {
 #[tokio::test]
 async fn reopened_pending_turn_cannot_dispatch_a_tool_outside_its_frozen_catalog() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("state.sqlite");
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
-    let app = Router::new().route(
-        "/v1/messages",
-        post({
-            let (started, release, requests) = (started.clone(), release.clone(), requests.clone());
-            move |Json(body): Json<Value>| {
+    for block_index in [1, 2] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let app = Router::new().route(
+            "/v1/messages",
+            post({
                 let (started, release, requests) =
                     (started.clone(), release.clone(), requests.clone());
-                async move {
-                    let index = {
-                        let mut log = requests.lock().unwrap();
-                        log.push(body);
-                        log.len()
-                    };
-                    if index == 1 {
-                        started.notify_one();
-                        release.notified().await;
+                move |Json(body): Json<Value>| {
+                    let (started, release, requests) =
+                        (started.clone(), release.clone(), requests.clone());
+                    async move {
+                        let index = {
+                            let mut log = requests.lock().unwrap();
+                            log.push(body);
+                            log.len()
+                        };
+                        if index == block_index {
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        (
+                            [("content-type", "text/event-stream")],
+                            sse(index <= if block_index == 1 { 2 } else { 3 })
+                                .replace("new-effect", &format!("new-effect-{index}")),
+                        )
                     }
-                    ([("content-type", "text/event-stream")], sse(index <= 2))
                 }
-            }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let client = ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic");
-    let state = || async {
-        DurableSession::open(SqliteStore::open(&path).unwrap(), "synthetic-catalog")
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic");
+        let state = || async {
+            DurableSession::open(SqliteStore::open(&path).unwrap(), "synthetic-catalog")
+                .await
+                .unwrap()
+        };
+        let request =
+            || PromptRequest::new("only the admitted capabilities").request_id("frozen-turn");
+        // The first owner has no tools. Its admitted request stays in-flight.
+        let (old, old_events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .durability(state().await)
             .await
             .unwrap()
-    };
-    let request = || PromptRequest::new("only the admitted capabilities").request_id("frozen-turn");
-    // The first owner has no tools. Its admitted request stays in-flight.
-    let (old, old_events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
-        .durability(state().await)
-        .await
-        .unwrap()
-        .build()
-        .unwrap();
-    let old_turn = old.prompt(request()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), started.notified())
-        .await
-        .unwrap();
-    let effects = Arc::new(AtomicUsize::new(0));
-    let counter = effects.clone();
-    // A host upgrade adds a tool. The old operation must retain its zero-tool catalog.
-    let (recovered, recovered_events) = Nanocodex::builder(Claude::new(client, "new-model"))
-        .client_tool_search()
-        .tool(
-            ToolDefinition {
-                name: "new-host-effect".into(),
-                description: "new capability".into(),
-                input_schema: json!({"type":"object"}),
-                strict: None,
-                defer_loading: true,
-            },
-            move |_| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                async { Ok("effect happened".into()) }
-            },
-        )
-        .durability(state().await)
-        .await
-        .unwrap()
-        .build()
-        .unwrap();
-    let outcome = recovered.prompt(request()).await.unwrap().result().await;
-    release.notify_one();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(5), old_turn.result())
+            .build()
+            .unwrap();
+        let old_turn = old.prompt(request()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .unwrap();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        // A host upgrade adds a tool. The old operation must retain its zero-tool catalog.
+        let (recovered, recovered_events) = Nanocodex::builder(Claude::new(client, "new-model"))
+            .client_tool_search()
+            .tool(
+                ToolDefinition {
+                    name: "new-host-effect".into(),
+                    description: "new capability".into(),
+                    input_schema: json!({"type":"object"}),
+                    strict: None,
+                    defer_loading: true,
+                },
+                move |_| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    async { Ok("effect happened".into()) }
+                },
+            )
+            .durability(state().await)
             .await
             .unwrap()
-            .is_err()
-    );
-    let log = requests.lock().unwrap().clone();
-    assert_eq!(log[0], log[1], "recovery must keep the frozen request body");
-    assert!(
-        log[1]["tools"].as_array().is_none_or(Vec::is_empty),
-        "the admitted request has no tools"
-    );
-    let observed = effects.load(Ordering::SeqCst);
-    eprintln!(
-        "frozen catalog requests={}; unexpected newly attached effect executions={observed}; recovered outcome={outcome:?}",
-        log.len()
-    );
-    recovered.shutdown().await.unwrap();
-    let _ = old.shutdown().await;
-    drop((old, old_events, recovered, recovered_events));
-    server.abort();
-    assert_eq!(
-        observed, 0,
-        "a recovered frozen catalog cannot authorize a newly attached host tool"
-    );
+            .build()
+            .unwrap();
+        let outcome = recovered.prompt(request()).await.unwrap().result().await;
+        release.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), old_turn.result())
+                .await
+                .unwrap()
+                .is_err()
+        );
+        let log = requests.lock().unwrap().clone();
+        assert_eq!(
+            log.len(),
+            3,
+            "exactly one catalog recovery, including reopen"
+        );
+        assert_eq!(
+            log[block_index - 1],
+            log[block_index],
+            "recovery must keep the frozen request body"
+        );
+        assert_eq!(
+            log[1]["tools"], log[2]["tools"],
+            "retry cannot expand the admitted catalog"
+        );
+        if block_index == 1 {
+            assert_eq!(outcome.as_ref().unwrap().final_message(), "done");
+        } else {
+            assert!(
+                outcome
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("after one recovery"),
+                "the recovery budget must survive reopening: {outcome:?}"
+            );
+        }
+        assert!(
+            log[1]["tools"].as_array().is_none_or(Vec::is_empty),
+            "the admitted request has no tools"
+        );
+        let observed = effects.load(Ordering::SeqCst);
+        eprintln!(
+            "frozen catalog requests={}; unexpected newly attached effect executions={observed}; block_index={block_index}; recovered outcome={outcome:?}",
+            log.len()
+        );
+        recovered.shutdown().await.unwrap();
+        let _ = old.shutdown().await;
+        drop((old, old_events, recovered, recovered_events));
+        server.abort();
+        assert_eq!(
+            observed, 0,
+            "a recovered frozen catalog cannot authorize a newly attached host tool"
+        );
+    }
 }

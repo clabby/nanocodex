@@ -95,6 +95,14 @@ remain rejected.
 
 Fast mode sends `service_tier: "priority"`; disabling it omits `service_tier`,
 matching [codex-rs request normalization](https://github.com/openai/codex/blob/822e58cc3d666166c7446c5b1ea2e52f5d09594c/codex-rs/protocol/src/openai_models.rs#L988-L1003).
+Astra also supports Ultrafast, which sends `service_tier: "ultrafast"`
+([Ultrafast mode](https://developers.openai.com/api/docs/guides/ultrafast-mode)).
+Sol and Luna run an Ultrafast selection as Fast. Select a tier with
+`service_tier(ServiceTier)` on `OpenAiBuilder` or `NanocodexBuilder`, or with
+`Nanocodex::set_service_tier` for later turns; the boolean `fast_mode` and
+`set_fast_mode` calls select Fast or Standard. Child snapshots keep the requested
+tier, so a child on another model applies that model's limit. Backends without
+native tiers, such as Claude, reject Ultrafast.
 The selected mode remains explicit in session settings. It does not change the
 reasoning effort, reasoning context, or system/developer instructions.
 
@@ -109,6 +117,8 @@ tokens at standard short-context rates:
 
 Above 272,000 input tokens, the whole request uses twice the input and cache
 rates and 1.5 times the output rate. Fast mode doubles those applicable rates.
+Astra Ultrafast uses six times the Standard rates, with the same long-context
+multipliers.
 Provider-reported usage drives result and trace estimates. API-equivalent
 subscription estimates are not subscription charges. Historical measurements
 retain their original model IDs and do not establish GPT-6.1 Sol performance.

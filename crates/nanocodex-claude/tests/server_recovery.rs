@@ -1,5 +1,5 @@
 //! Recovery of provider-side effects through the real streaming HTTP boundary.
-//! Failure cases: complete server effect + failed terminal, truncated stream,
+//! Failure cases: complete server effect + output cutoff, truncated stream,
 //! and cancellation after server execution has been observed. None may retry.
 use axum::{Json, Router, body::Body, response::IntoResponse, routing::post};
 use futures_util::{StreamExt, stream};
@@ -85,6 +85,12 @@ async fn fixture(
                 if std::env::var_os("NANOCLAUDE_SERVER_RECOVERY_TRACE").is_some() {
                     eprintln!("{}", json!({"request_index":index,"request":body}));
                 }
+                if body["tool_choice"]["type"] == "none" {
+                    return (
+                        [("content-type", "text/event-stream")],
+                        completed(vec![json!({"type":"text","text":"Synthetic receipt committed once; reconcile the existing receipt."})], "end_turn"),
+                    ).into_response();
+                }
                 if index > 1 {
                     return (
                         [("content-type", "text/event-stream")],
@@ -139,25 +145,35 @@ async fn fixture(
 }
 
 #[tokio::test]
-async fn completed_server_effect_survives_failed_terminal_and_compaction() {
+async fn completed_server_effect_survives_token_continuation_and_compaction() {
     let (client, log, effects, server) = fixture(Fault::Completed).await;
     let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
         .server_tool(ServerToolDefinition::code_execution_current())
         .build()
         .unwrap();
-    assert!(
+    assert_eq!(
         agent
             .prompt("perform one server effect")
             .await
             .unwrap()
             .result()
             .await
-            .is_err()
+            .unwrap()
+            .final_message(),
+        "recovered"
     );
     assert_eq!(
         log.lock().unwrap().len(),
-        1,
-        "failed terminal must not trigger a retry"
+        2,
+        "token cutoff continues without replaying server effects"
+    );
+    assert!(
+        log.lock().unwrap()[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "assistant"
+                && message["content"] == json!(completed_blocks()))
     );
     agent.compact().await.unwrap();
     agent
@@ -168,8 +184,8 @@ async fn completed_server_effect_survives_failed_terminal_and_compaction() {
         .await
         .unwrap();
     let log = log.lock().unwrap();
-    assert_eq!(log.len(), 3);
-    assert_eq!(log[2]["container"], "recovery-container");
+    assert_eq!(log.len(), 4);
+    assert_eq!(log[3]["container"], "recovery-container");
     assert!(
         log[2]["messages"]
             .as_array()
@@ -177,7 +193,12 @@ async fn completed_server_effect_survives_failed_terminal_and_compaction() {
             .iter()
             .any(|message| message["role"] == "assistant"
                 && message["content"] == json!(completed_blocks())),
-        "completed signed server boundary must remain exact after compaction"
+        "summary request must receive the exact completed signed server boundary"
+    );
+    assert!(
+        log[3]["messages"]
+            .to_string()
+            .contains("Synthetic receipt committed once")
     );
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     server.abort();

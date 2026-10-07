@@ -543,8 +543,9 @@ pub struct ChildRuntimeSnapshot {
     pub model: Model,
     /// Pinned reasoning effort.
     pub thinking: Thinking,
-    /// Fast-mode policy.
-    pub fast_mode: bool,
+    /// Requested processing tier.
+    #[serde(flatten, with = "crate::service_tier_serde")]
+    pub service_tier: ServiceTier,
     /// Whether this child uses full-history HTTP independently of its parent.
     #[serde(default)]
     pub stateless_http: bool,
@@ -576,7 +577,7 @@ pub(super) enum Command {
         accepted: Option<oneshot::Sender<Result<String>>>,
         cancel_on_admission: bool,
         thinking: Option<Thinking>,
-        fast_mode: Option<bool>,
+        service_tier: Option<ServiceTier>,
         parent: Option<tracing::Span>,
         events: EventSink,
         result: oneshot::Sender<Result<TurnResult>>,
@@ -641,8 +642,8 @@ pub(super) enum Command {
         thinking: Thinking,
         result: oneshot::Sender<Result<()>>,
     },
-    SetFastMode {
-        enabled: bool,
+    SetServiceTier {
+        service_tier: ServiceTier,
         result: oneshot::Sender<Result<()>>,
     },
     Compact {
@@ -706,7 +707,7 @@ pub(super) enum QueuedTurn {
         prompt: Prompt,
         execution_operation: Option<ExecutionOperation>,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         parent: Option<tracing::Span>,
         events: EventSink,
         result: oneshot::Sender<Result<TurnResult>>,
@@ -717,7 +718,7 @@ pub(super) enum QueuedTurn {
         execution_operation: Option<ExecutionOperation>,
         cancellation_committed: bool,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         parent: Option<tracing::Span>,
         events: EventSink,
         result: oneshot::Sender<Result<TurnResult>>,
