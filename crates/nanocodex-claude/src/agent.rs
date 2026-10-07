@@ -974,20 +974,10 @@ impl ClaudeBuilder {
                                 "No matching tools".into(),
                             )));
                         }
-                        let names = matches
-                            .iter()
-                            .map(|tool| tool.name.as_str())
-                            .collect::<Vec<_>>();
-                        let mut references = matches
+                        let references = matches
                             .into_iter()
                             .map(|tool| json!({"type":"tool_reference","tool_name":tool.name}))
                             .collect::<Vec<_>>();
-                        // Interactive Claude Code also includes a short text
-                        // companion after its reference blocks. This is our
-                        // own neutral description, not a copied private prompt.
-                        references.push(json!({"type":"text","text":format!(
-                            "Loaded tools for the next request: {}", names.join(", ")
-                        )}));
                         Ok(ClaudeToolReply::success(ToolResultContent::Blocks(
                             references,
                         )))
@@ -1616,6 +1606,55 @@ fn current_server_turn_start(messages: &[Message]) -> Option<usize> {
         .then_some(start)
 }
 
+// Normalize custom handlers and older retained receipts at the request boundary.
+// The API expands native references into definitions and rejects mixed content.
+// Companions follow all receipts so parallel tool-result ordering stays valid.
+fn separate_tool_references(messages: &mut [Message]) {
+    for message in messages {
+        let mut companions = Vec::new();
+        for block in &mut message.content {
+            let ContentBlock::ToolResult {
+                content: ToolResultContent::Blocks(blocks),
+                is_error,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            if !blocks.iter().any(|block| block["type"] == "tool_reference") {
+                continue;
+            }
+            if *is_error {
+                // A failed search must not introduce executable definitions.
+                for block in blocks {
+                    if block["type"] == "tool_reference" {
+                        *block = json!({"type":"text","text":block.to_string()});
+                    }
+                }
+                continue;
+            }
+            blocks.retain(|block| {
+                if block["type"] == "tool_reference" {
+                    return true;
+                }
+                // Only ordinary user content can move out of a tool result.
+                // Quoting other blocks avoids promoting nested protocol messages.
+                let companion = match serde_json::from_value::<ContentBlock>(block.clone()) {
+                    Ok(
+                        content @ (ContentBlock::Text { .. }
+                        | ContentBlock::Image { .. }
+                        | ContentBlock::Document { .. }),
+                    ) => content,
+                    _ => ContentBlock::text(block.to_string()),
+                };
+                companions.push(companion);
+                false
+            });
+        }
+        message.content.extend(companions);
+    }
+}
+
 fn client_discovered_tools(messages: &[Message]) -> HashSet<&str> {
     let search_ids = messages
         .iter()
@@ -2207,6 +2246,7 @@ impl State {
             .cloned()
             .unwrap_or_else(|| self.request_template(self.speed()));
         request.messages = messages;
+        separate_tool_references(&mut request.messages);
         request.tools = tools;
         request.container = context.container.map(str::to_owned);
         if request.diagnostics.is_some() {

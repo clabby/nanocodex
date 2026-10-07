@@ -15,11 +15,17 @@ pub(super) fn install(mut tools: ClaudeTools, handle: McpHandle) -> ClaudeTools 
                 return Err("query must contain 1–512 bytes".into());
             }
             let result = handle.native_search(&input.query, input.max_results).await?;
-            let mut blocks = result["tools"].as_array().into_iter().flatten()
+            let blocks = result["tools"].as_array().into_iter().flatten()
                 .filter_map(|tool| tool["name"].as_str())
                 .map(|name| json!({"type":"tool_reference","tool_name":name})).collect::<Vec<_>>();
-            blocks.push(json!({"type":"text","text":serde_json::to_string(&result).map_err(|e|e.to_string())?}));
-            let mut reply = ClaudeToolReply::success(ToolResultContent::Blocks(blocks));
+            // References expand into definitions; their content array cannot also
+            // contain text. Full discovery diagnostics remain in structured events.
+            let content = if blocks.is_empty() {
+                ToolResultContent::Text(serde_json::to_string(&result).map_err(|e|e.to_string())?)
+            } else {
+                ToolResultContent::Blocks(blocks)
+            };
+            let mut reply = ClaudeToolReply::success(content);
             reply.structured_result = Some(result);
             Ok(reply)
         }

@@ -329,6 +329,7 @@ async fn live_interrupted_effect_is_unknown_after_compaction_and_reopen() {
 
 #[tokio::test]
 async fn discovery_and_container_survive_restart_then_compaction_requires_rediscovery() {
+    use nanocodex_claude::{ClaudeToolReply, ClaudeTools, ToolResultContent};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
@@ -344,6 +345,21 @@ async fn discovery_and_container_survive_restart_then_compaction_requires_redisc
         let counter = effects.clone();
         let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
             .client_tool_search()
+            .tools_factory(|_| {
+                let mut search = tool();
+                search.name = "ToolSearch".into();
+                search.defer_loading = false;
+                Ok(ClaudeTools::new().custom_tool_search().tool_with_context(
+                    search,
+                    |_, _| async {
+                        // Preserve a pre-fix/custom discovery receipt in SQLite.
+                        Ok(ClaudeToolReply::success(ToolResultContent::Blocks(vec![
+                            json!({"type":"tool_reference","tool_name":"effect"}),
+                            json!({"type":"text","text":"retained discovery details"}),
+                        ])))
+                    },
+                ))
+            })
             .tool(deferred, move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
                 async { Ok("receipt".into()) }
@@ -378,6 +394,22 @@ async fn discovery_and_container_survive_restart_then_compaction_requires_redisc
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 6);
     assert_eq!(effects.load(Ordering::SeqCst), 1);
+    for request in &*log {
+        for message in request["messages"].as_array().unwrap() {
+            for receipt in message["content"].as_array().unwrap() {
+                if let Some(blocks) = receipt["content"].as_array()
+                    && blocks.iter().any(|b| b["type"] == "tool_reference")
+                {
+                    assert!(blocks.iter().all(|b| b["type"] == "tool_reference"));
+                }
+            }
+        }
+    }
+    assert!(
+        log[2]["messages"]
+            .to_string()
+            .contains("retained discovery details")
+    );
     assert!(log[2]["messages"].to_string().contains("tool_reference"));
     assert!(!log[5]["messages"].to_string().contains("tool_reference"));
     assert_eq!(log[2]["container"], "stable-container");

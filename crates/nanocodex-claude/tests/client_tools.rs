@@ -116,18 +116,8 @@ async fn client_tool_search_then_nested_web_search_then_compaction() {
             .any(|t| t["name"] == "WebSearch")
     );
     assert_eq!(
-        r[1]["messages"][2]["content"][0]["content"][0],
-        json!({"type":"tool_reference","tool_name":"WebSearch"})
-    );
-    assert_eq!(
-        r[1]["messages"][2]["content"][0]["content"][1]["type"],
-        "text"
-    );
-    assert!(
-        r[1]["messages"][2]["content"][0]["content"][1]["text"]
-            .as_str()
-            .unwrap()
-            .contains("WebSearch")
+        r[1]["messages"][2]["content"][0]["content"],
+        json!([{"type":"tool_reference","tool_name":"WebSearch"}])
     );
     assert_eq!(
         r[2]["tools"],
@@ -799,6 +789,13 @@ async fn failed_tool_search_post_hook_does_not_authorize_deferred_effect() {
     assert_eq!(requests.len(), 2);
     let receipt = &requests[1]["messages"][2]["content"][0];
     assert_eq!(receipt["is_error"], true);
+    assert!(
+        receipt["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| b["type"] == "text")
+    );
     assert!(
         receipt
             .to_string()

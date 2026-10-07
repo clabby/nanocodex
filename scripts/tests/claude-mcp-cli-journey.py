@@ -6,6 +6,9 @@ python3 scripts/tests/claude-mcp-cli-journey.py --binary target/debug/nanocodex
 import argparse
 import importlib.util
 import json
+import os
+import shutil
+import sys
 from pathlib import Path
 import shlex
 import subprocess
@@ -47,10 +50,10 @@ if p['hook_event_name'] == 'PreToolUse' and p['tool_input'].get('message') == 'd
 else: print('{}')
 """)
     hooks = artifact / "hooks.json"
-    hooks.write_text(json.dumps({"hooks": {event: [{"matcher": "^mcp__", "hooks": [{"type": "command", "command": "/usr/bin/python3 " + shlex.quote(str(hook))}]}] for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"]}}))
+    hooks.write_text(json.dumps({"hooks": {event: [{"matcher": "^mcp__", "hooks": [{"type": "command", "command": shlex.quote(sys.executable) + " " + shlex.quote(str(hook))}]}] for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"]}}))
     steps = [
         ("WaitForMcpServers", {}, False, "complete"),
-        ("ToolSearch", {"query": "select:mcp__http__inspect,mcp__stdio__echo"}, False, "input_schema"),
+        ("ToolSearch", {"query": "mcp", "max_results": 20}, False, None),
         ("mcp__stdio__echo", {"message": "__metadata__"}, False, "fixture:__metadata__"),
         ("mcp__http__inspect", {"message": "image"}, False, "native-http-image"),
         ("mcp__http__inspect", {"message": "failure"}, True, "native-http-error"),
@@ -72,6 +75,16 @@ else: print('{}')
             self.send_response(405); self.end_headers()
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            if self.path == "/v1/messages":
+                (artifact / "latest-request.json").write_text(json.dumps(request, indent=2))
+                for message in request["messages"]:
+                    for result in message["content"]:
+                        content = result.get("content")
+                        if result.get("type") == "tool_result" and isinstance(content, list) and any(b.get("type") == "tool_reference" for b in content) and any(b.get("type") != "tool_reference" for b in content):
+                            errors.append("Tool definitions/code execution functions cannot be mixed with other content")
+                            body = json.dumps({"type":"error","error":{"type":"invalid_request_error","message":errors[-1]}}).encode()
+                            self.send_response(400); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+                            return
             if self.path == "/mcp":
                 if self.headers.get("Authorization") != "Bearer synthetic-mcp-configuration-token":
                     errors.append("MCP configured authorization missing or replaced")
@@ -157,7 +170,8 @@ else: print('{}')
                     receipt = [b for m in request["messages"] for b in m["content"] if b.get("type") == "tool_result" and b.get("tool_use_id") == f"mcp_{stage-1}"][-1]
                     name, arguments, failed, marker = steps[stage-1]
                     require(bool(receipt.get("is_error", False)) == failed, f"wrong {name} error status: {receipt}")
-                    require(marker in text_of(receipt), f"missing {name} marker {marker}: {receipt}")
+                    if marker is not None:
+                        require(marker in text_of(receipt), f"missing {name} marker {marker}: {receipt}")
                     if arguments.get("message") == "image" or (name == "ReadMcpResourceTool" and arguments["uri"] == "fixture://http"):
                         require(any(b.get("type") == "image" and b["source"]["data"] == PNG for b in receipt["content"]), "native image lost")
                     if stage == 2:
@@ -174,9 +188,9 @@ else: print('{}')
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Server)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    command = [str(binary), "run", "--claude", "--model", "claude-sonnet-5-5", "--thinking", "medium", "--claude-api-key", "synthetic-claude-key", "--claude-messages-url", f"http://127.0.0.1:{server.server_port}/v1/messages", "--cwd", str(workspace), "--rollouts", "false", "--browser=none", "--mcp-defaults", "false", "--mcp-codex-config", "false", "--web-search", "false", "--image-generation", "false", "--subagents", "false", "--memory", "false", "--mcp", f"http=http://127.0.0.1:{server.server_port}/mcp", "--mcp-bearer-env", "http=SYNTHETIC_MCP_TOKEN", "--mcp-stdio", "stdio=/usr/bin/node", "--mcp-arg", f"stdio={root}/crates/nanocodex-oai-tools/tests/fixtures/mcp-stdio-server.mjs", "--claude-hooks", str(hooks), "--local-durability", str(artifact / "session.sqlite"), "--local-durability-state-id", "native-mcp-journey", "--request-id", "native-mcp-operation", "Exercise native MCP tools and resources."]
-    environment = {"HOME": str(workspace / "home"), "CODEX_HOME": str(workspace / "codex-home"), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "NANOCODEX_COMPUTER": "off", "SYNTHETIC_MCP_TOKEN": "synthetic-mcp-configuration-token"}
-    (artifact / "scenario.json").write_text(json.dumps({"command": command, "shell_command": shlex.join(command), "environment": environment, "expected": "real MCP HTTP+stdio exact schema, native image/error/structured metadata, resources and validation"}, indent=2))
+    command = [str(binary), "run", "--claude", "--model", "claude-sonnet-5-5", "--thinking", "medium", "--claude-api-key", "synthetic-claude-key", "--claude-messages-url", f"http://127.0.0.1:{server.server_port}/v1/messages", "--cwd", str(workspace), "--rollouts", "false", "--browser=none", "--mcp-defaults", "false", "--mcp-codex-config", "false", "--web-search", "false", "--image-generation", "false", "--subagents", "false", "--memory", "false", "--mcp", f"http=http://127.0.0.1:{server.server_port}/mcp", "--mcp-bearer-env", "http=SYNTHETIC_MCP_TOKEN", "--mcp-stdio", f"stdio={shutil.which('node')}", "--mcp-arg", f"stdio={root}/crates/nanocodex-oai-tools/tests/fixtures/mcp-stdio-server.mjs", "--claude-hooks", str(hooks), "--local-durability", str(artifact / "session.sqlite"), "--local-durability-state-id", "native-mcp-journey-" + artifact.name, "--request-id", "native-mcp-operation", "Exercise native MCP tools and resources."]
+    environment = {**os.environ, "NANOCODEX_COMPUTER": "off", "SYNTHETIC_MCP_TOKEN": "synthetic-mcp-configuration-token"}
+    (artifact / "scenario.json").write_text(json.dumps({"command": command, "shell_command": shlex.join(command), "environment_overrides": {"NANOCODEX_COMPUTER":"off","SYNTHETIC_MCP_TOKEN":"synthetic-mcp-configuration-token"}, "expected": "real MCP HTTP+stdio exact schema, native image/error/structured metadata, resources and validation"}, indent=2))
     outcome = {"success": False}
     try:
         result = subprocess.run(command, cwd=workspace, env=environment, capture_output=True, timeout=90)
