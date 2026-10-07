@@ -258,16 +258,82 @@ export async function runHost(config, { input = process.stdin, output = process.
 // Owner-lease watchdog: provider cancellation uses SIGKILL, which a host cannot
 // catch. Its closed stdin is observed here, and this worker reaps its own signed
 // native helper. The worker adds no runtime dependency; it uses the same Node.
+// LaunchServices lets macOS attribute permissions to the signed app bundle.
+// Directly spawning its executable inherits the launching terminal's identity.
+// The system AppKit bridge retains the exact new app instance and an EOF lease;
+// killing either Node owner still closes that lease, including during launch.
+const nativeAppLease = String.raw`
+ObjC.import('AppKit');
+ObjC.import('Foundation');
+function task(command, args) {
+  var process = $.NSTask.alloc.init;
+  var output = $.NSPipe.pipe;
+  process.launchPath = command;
+  process.arguments = args;
+  process.standardOutput = output;
+  process.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+  process.launch;
+  process.waitUntilExit;
+  return ObjC.unwrap($.NSString.alloc.initWithDataEncoding(output.fileHandleForReading.readDataToEndOfFile, $.NSUTF8StringEncoding));
+}
+function run(args) {
+  var configuration = $.NSWorkspaceOpenConfiguration.configuration;
+  configuration.createsNewApplicationInstance = true;
+  configuration.allowsRunningApplicationSubstitution = false;
+  configuration.activates = false;
+  configuration.addsToRecentItems = false;
+  configuration.promptsUserIfNeeded = false;
+  configuration.environment = $.NSProcessInfo.processInfo.environment;
+  var settled = false, application = null, failure = null;
+  var completion = ObjC.block('void, id, id', function(app, error) {
+    application = app;
+    if (ObjC.unwrap(error) != null) failure = ObjC.unwrap(error.localizedDescription);
+    settled = true;
+  });
+  $.NSWorkspace.sharedWorkspace.openApplicationAtURLConfigurationCompletionHandler(
+    $.NSURL.fileURLWithPath(args[0]), configuration, completion);
+  while (!settled) $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.05));
+  if (failure != null || application == null) throw new Error(failure || 'Native app launch returned no application');
+  var pid = Number(application.processIdentifier);
+  if (!Number.isSafeInteger(pid) || pid < 2 || ObjC.unwrap(application.bundleURL.path) !== args[0]) {
+    application.terminate;
+    throw new Error('Native app launch identity did not match');
+  }
+  var groupOwned = Number(task('/bin/ps', ['-p', String(pid), '-o', 'pgid=']).trim()) === pid;
+  // The owner writes no data: EOF is the sole request to end this app lease.
+  while (Number($.NSFileHandle.fileHandleWithStandardInput.availableData.length) !== 0) {}
+  application.terminate;
+  if (groupOwned) task('/bin/kill', ['-TERM', '--', '-' + pid]);
+  var deadline = Date.now() + 1500;
+  while (Date.now() < deadline) $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.05));
+  if (!application.terminated) application.forceTerminate;
+  // Retain escalation even if the app leader exited before its descendants.
+  if (groupOwned) task('/bin/kill', ['-KILL', '--', '-' + pid]);
+}
+`;
+
+async function runNativeAppWorker(env) {
+  const app = absolute(env.NANOCODEX_CUA_NATIVE_APP, 'NANOCODEX_CUA_NATIVE_APP');
+  absolute(env.NANOCODEX_CUA_POLICY_HOST, 'NANOCODEX_CUA_POLICY_HOST');
+  absolute(env.SKY_CUA_SERVICE_NATIVE_PIPE_PATH, 'SKY_CUA_SERVICE_NATIVE_PIPE_PATH');
+  const bundle = path.join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app');
+  const child = spawn('/usr/bin/osascript', ['-l', 'JavaScript', '-e', nativeAppLease, bundle], {
+    env: { ...env, CODEX_CLI_PATH: env.NANOCODEX_CUA_POLICY_HOST }, detached: true, stdio: ['pipe', 'ignore', 'ignore'],
+  });
+  const stop = () => child.stdin.end();
+  child.stdin.on('error', () => {});
+  process.stdin.resume(); process.stdin.once('end', stop); process.stdin.once('error', stop);
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, stop);
+  await new Promise(resolve => {
+    child.once('error', () => { process.exitCode = 1; resolve(); });
+    child.once('exit', code => { process.exitCode = code ?? 1; resolve(); });
+  });
+}
+
 export async function runWorker(env = process.env, kind = 'native') {
-  const native = kind === 'native';
-  let executable;
-  if (native) {
-    const app = absolute(env.NANOCODEX_CUA_NATIVE_APP, 'NANOCODEX_CUA_NATIVE_APP');
-    absolute(env.NANOCODEX_CUA_POLICY_HOST, 'NANOCODEX_CUA_POLICY_HOST');
-    executable = path.join(app, 'Contents/Resources/cua_node/lib/node_modules/@oai/sky/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService');
-  } else executable = absolute(env.NANOCODEX_CUA_NATIVE_PROVIDER, 'NANOCODEX_CUA_NATIVE_PROVIDER');
-  const child = spawn(executable, [], { env: native ? { ...env, CODEX_CLI_PATH: env.NANOCODEX_CUA_POLICY_HOST } : env,
-    detached: true, stdio: native ? ['ignore', 'ignore', 'ignore'] : ['pipe', 'pipe', 'ignore'] });
+  if (kind === 'native') { await runNativeAppWorker(env); return; }
+  const executable = absolute(env.NANOCODEX_CUA_NATIVE_PROVIDER, 'NANOCODEX_CUA_NATIVE_PROVIDER');
+  const child = spawn(executable, [], { env, detached: true, stdio: ['pipe', 'pipe', 'ignore'] });
   let finished = false;
   const stop = () => {
     if (finished) return; finished = true;
@@ -289,11 +355,9 @@ export async function runWorker(env = process.env, kind = 'native') {
     }, 1500);
   };
   child.once('error', stop); child.once('exit', stop);
-  if (!native) {
-    child.stdin.on('error', stop); child.stdout.once('end', () => { process.stdout.end(); stop(); });
-    child.stdout.pipe(process.stdout); process.stdin.pipe(child.stdin);
-    process.stdout.on('error', stop);
-  }
+  child.stdin.on('error', stop); child.stdout.once('end', () => { process.stdout.end(); stop(); });
+  child.stdout.pipe(process.stdout); process.stdin.pipe(child.stdin);
+  process.stdout.on('error', stop);
   process.stdin.resume(); process.stdin.once('end', stop); process.stdin.once('error', stop);
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, stop);
 }
