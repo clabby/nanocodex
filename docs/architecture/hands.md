@@ -112,16 +112,21 @@ Use `sudo systemctl stop/start nanocodex-hand` on Linux. On macOS, use `sudo lau
 
 The Linux SSH bootstrap installs the same single daemon with its VM recipe. Older separate factory services require an explicit installation/migration decision; an updater never removes or restarts them. Publishers send `capabilities: ["turn_metadata"]`; a retained command journal is advertised with `command_recovery: true` and a stable `runtime_id`. Recovery exchanges command status or retained receipts, and does not provide process persistence across daemon crashes.
 
-The Ubuntu `shared-hands` CI job builds the CLI pair once with the existing Rust
-cache, then runs `scripts/tests/linux-hand-installer.py` against the image in
-`scripts/fixtures/linux-installer/Dockerfile`. The black-box journey owns a
-disposable privileged systemd container; sudo permits reading the built binaries.
-Only the account HTTP/WebSocket service is a fixture. It checks logged-out
-preparation, activation, private credentials, two same-owner observers, daemon
-survival and idempotent setup. The bounded CI steps always upload available
-command, service and account evidence under `output/linux-hand-installer/`.
-This container journey does not establish physical desktop capture or reboot
-behavior on a user's machine.
+Run the Linux installer journey against the built CLI pair:
+
+```sh
+docker build -t nanocodex-installer-journey scripts/fixtures/linux-installer
+sudo python3 scripts/tests/linux-hand-installer.py --bin-dir target/debug \
+  --image nanocodex-installer-journey --output output/linux-hand-installer
+```
+
+The journey owns a disposable privileged systemd container; sudo permits reading
+privately owned build binaries. Only the account HTTP/WebSocket service is a
+fixture. It checks logged-out preparation, activation, private credentials, two
+same-owner observers, daemon survival and idempotent setup, retaining command,
+service and account evidence in the selected output directory. This container
+journey does not establish physical desktop capture or reboot behavior on a
+user's machine.
 
 ## Coordinated updates and independent lifetime
 
