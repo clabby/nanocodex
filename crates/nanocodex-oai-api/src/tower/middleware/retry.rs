@@ -280,7 +280,7 @@ fn wait_for_retry(
 pub type DefaultResponsesService = Retry<ResponsesRetryPolicy, ResponsesService>;
 
 fn retry_delay(attempt: u32, call_index: Option<u32>) -> Duration {
-    let base_ms = if cfg!(test) { 1 } else { 200 };
+    let base_ms = if cfg!(test) { 1 } else { 1_000 };
     let exponent = attempt.saturating_sub(1).min(4);
     let raw_ms = base_ms * 2_u64.pow(exponent);
     let seed = u64::from(call_index.unwrap_or_default()) * 31 + u64::from(attempt) * 17;
