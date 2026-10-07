@@ -359,17 +359,29 @@ pub(super) async fn run_observed(
     if super::native_secure_input::NativeSecureInput::installed() {
         tools = tools.add(super::native_secure_input::NativeSecureInput);
     }
+    let mut machine = state.machine.clone();
     if let Some(computer) = computer_tools().await? {
         for tool in computer.tools() {
             tools = tools.add(tool);
         }
+        let mut capabilities = machine
+            .capabilities()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        capabilities.extend(["computer".to_owned(), "screen".to_owned()]);
+        machine = AttachmentMachine::new(
+            machine.id(),
+            machine.name(),
+            machine.workspace(),
+            capabilities,
+        )
+        .map_err(configuration)?;
     }
     let tools = tools.build().map_err(configuration)?;
     let (attachment, mut events) = tools
         .attach(target)
-        .metadata(AttachmentMetadata::machine(observe_resources(
-            state.machine.clone(),
-        )))
+        .metadata(AttachmentMetadata::machine(observe_resources(machine)))
         .start()
         .map_err(configuration)?;
     let closed = attachment.clone();

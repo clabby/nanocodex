@@ -54,7 +54,7 @@ impl Computer {
         let receipt = nanocodex_computer::provision::provision_upstream(refresh).await?;
         // Discover the exact provider catalog off the interactive path, so a
         // later attachment can register it from the version-bound cache.
-        if background && receipt["status"] == "installed" {
+        if receipt["status"] == "installed" {
             eprintln!("Components verified; preparing the Computer Use tool catalog…");
             let config = nanocodex_computer::provision::config_from_receipt(&receipt)?;
             nanocodex_computer::ComputerTools::connect(config)
