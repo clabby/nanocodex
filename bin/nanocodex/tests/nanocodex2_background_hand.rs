@@ -412,6 +412,7 @@ async fn background_daemon_survives_two_clients_and_routes_native_cwds() {
     let home = temporary.path().canonicalize().unwrap();
     let daemon_log = std::fs::File::create(home.join("daemon.log")).unwrap();
     let mut daemon = command(&home, &origin)
+        .env("NANOCODEX_EXTERNAL_VM_FACTORY", "retained-fixture")
         .args(["hand"])
         .stdout(Stdio::from(daemon_log.try_clone().unwrap()))
         .stderr(Stdio::from(daemon_log))
@@ -443,6 +444,13 @@ async fn background_daemon_survives_two_clients_and_routes_native_cwds() {
             std::fs::read_to_string(home.join("daemon.log")).unwrap()
         )
     });
+    assert!(
+        state.catalog.lock().unwrap().as_ref().unwrap()["machines"][0]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "vm_factory:retained-fixture")
+    );
     let identity_path = home
         .join(".nanocodex/hands")
         .join(scope)

@@ -110,6 +110,14 @@ For a custom login, pass `--managed-url https://your-server` and `--account-file
 
 Use `sudo systemctl stop/start nanocodex-hand` on Linux. On macOS, use `sudo launchctl bootout system/com.nanocodex.hand` to stop and `sudo launchctl bootstrap system /Library/LaunchDaemons/com.nanocodex.hand.plist` to start. Remove/disable the OS service to prevent future boot startup. Windows service installation is not provided by this helper.
 
+When explicitly migrating a machine that already has a separately managed VM
+factory, set `NANOCODEX_EXTERNAL_VM_FACTORY` in the Hand service environment to
+that existing provider's name. The daemon advertises this reference and reports
+`factory.status: "external"`; it neither starts nor stops that factory or its
+VMs. This reference takes precedence over a local VM recipe. It is not evidence
+of live capacity: the broker still validates the provider and allocation. Fresh
+installations normally let the daemon own its configured factory helper.
+
 The Linux SSH bootstrap installs the same single daemon with its VM recipe. Older separate factory services require an explicit installation/migration decision; an updater never removes or restarts them. Publishers send `capabilities: ["turn_metadata"]`; a retained command journal is advertised with `command_recovery: true` and a stable `runtime_id`. Recovery exchanges command status or retained receipts, and does not provide process persistence across daemon crashes.
 
 Run the Linux installer journey against the built CLI pair:

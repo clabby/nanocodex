@@ -616,19 +616,33 @@ async fn share(
             let leases = tokio::spawn(async move {
                 watch_clients(listener, lease_cancel).await;
             });
-            let machine = serde_json::to_value(&state.machine).map_err(error)?;
-            let recipe = factory_recipe(directory, state.machine.id());
+            // Explicit migration reference for a separately managed factory.
+            // Advertising its provider never takes ownership of its lifetime,
+            // starts a second factory, or weakens the broker's allocation checks.
+            let external_factory = std::env::var("NANOCODEX_EXTERNAL_VM_FACTORY")
+                .ok()
+                .filter(|name| !name.is_empty());
+            let recipe = if external_factory.is_some() {
+                Ok(None)
+            } else {
+                factory_recipe(directory, state.machine.id())
+            };
             let factory_error = recipe.as_ref().err().map(ToString::to_string);
             let recipe = recipe.unwrap_or(None);
-            if let Some(recipe) = &recipe {
+            if let Some(name) = external_factory.as_deref() {
+                state.advertise_vm_provider(name)?;
+            } else if let Some(recipe) = &recipe {
                 state.advertise_vm_provider(&recipe.name)?;
             }
+            let machine = serde_json::to_value(&state.machine).map_err(error)?;
             let status = std::sync::Arc::new(std::sync::Mutex::new(
                 json!({"machine": machine, "status": "connecting", "daemon": {"pid": std::process::id(), "executable": std::env::current_exe().ok(), "version": env!("CARGO_PKG_VERSION")}}),
             ));
             {
                 let mut status = status.lock().unwrap();
-                if recipe.is_none() {
+                if let Some(name) = &external_factory {
+                    status["factory"] = json!({"status": "external", "provider": name});
+                } else if recipe.is_none() {
                     status["factory"] = json!({"status": "unavailable", "error": factory_error.unwrap_or_else(|| "No desktop VM image is configured".into())});
                 }
                 publish(directory, &status)?;
