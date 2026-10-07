@@ -642,7 +642,7 @@ export function ProfileConnectors({
       <CloudflareConnection key={`cloudflare:${accountId}`} accountId={accountId} requiresLogin={requiresLogin} />
           {connectors ? connectorDefinitions.map((definition) => {
             const view = connectorProviderView(connectors, definition);
-            return <div className={`account-service-row${focusedProvider === definition.provider ? " is-highlighted" : ""}`} key={definition.provider} role="listitem" data-provider={definition.provider}>
+            return <div className={`account-service-row${focusedProvider === definition.provider ? " is-highlighted" : ""}`} key={definition.provider} role="listitem" data-provider={definition.provider} data-connected={view.connected ? "true" : undefined}>
               <div className="account-service-summary">
                 <ConnectionLogo id={definition.provider} />
                 <div className="account-service-copy">

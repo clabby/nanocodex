@@ -73,3 +73,18 @@
   .account-hub-sign-in { min-height: calc(100dvh - 72px); padding-bottom: 10vh; }
 }
 @media (prefers-reduced-motion: reduce) { .account-loading-dot { animation: none; } }
+
+/* Connections home: wider workspace, section descriptions and CLI pointer. */
+.account-hub-layout { grid-template-columns: 196px minmax(0, 720px); column-gap: 56px; width: min(1000px, calc(100% - 64px)); margin-top: 48px; }
+.account-hub-sidebar nav a.is-current { background: var(--workspace-soft); color: var(--text); font-weight: 500; }
+.account-page-description { margin-top: 8px !important; max-width: 560px; color: var(--workspace-muted); font-size: 13px; }
+.account-hub-cli { display: grid; gap: 6px; margin-top: 28px; padding: 14px 12px; border: 1px solid var(--workspace-line); border-radius: 12px; background: var(--workspace-soft); font-size: 12px; }
+.account-hub-cli > span { color: var(--workspace-muted); }
+.account-hub-cli code { font: 12px/1.5 var(--font-mono, ui-monospace, monospace); user-select: all; }
+.account-hub-cli a { display: inline-flex; align-items: center; gap: 4px; color: var(--workspace-muted); }
+.account-hub-cli a:hover { color: var(--text); }
+.account-hub-cli svg { width: 12px; height: 12px; }
+@media (max-width: 720px) {
+  .account-hub-layout { width: 100%; margin-top: 4px; }
+  .account-hub-cli { display: none; }
+}

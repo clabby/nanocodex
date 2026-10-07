@@ -9,11 +9,11 @@ import { useAccountSession } from "./AccountSession";
 import "./AccountWorkspace.css";
 
 const sections = [
-  { path: "/connect", label: "Connections", icon: Plug, section: "connections" },
-  { path: "/connect/vault", label: "Vault", icon: LockKeyhole, section: "vault" },
-  { path: "/services/phone", label: "Phone numbers", icon: Phone, section: "phone" },
-  { path: "/connect/wallet", label: "Wallet", icon: Wallet, section: "wallet" },
-  { path: "/connect/access", label: "API access", icon: KeyRound, section: "access" },
+  { path: "/connect", label: "Connections", icon: Plug, section: "connections", description: "Models and services your agents can use. Credentials stay in the broker; agents only receive scoped access." },
+  { path: "/connect/vault", label: "Vault", icon: LockKeyhole, section: "vault", description: "" },
+  { path: "/services/phone", label: "Phone numbers", icon: Phone, section: "phone", description: "Dedicated numbers for SMS verification codes and calls." },
+  { path: "/connect/wallet", label: "Wallet", icon: Wallet, section: "wallet", description: "Your account wallet for paid tools and services." },
+  { path: "/connect/access", label: "API access", icon: KeyRound, section: "access", description: "Keys for the CLI, SDKs and apps that act on your account." },
 ] as const;
 
 export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
@@ -77,10 +77,16 @@ export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
           <aside className="account-hub-sidebar">
             <span className="account-nav-label">Your account</span>
             <nav aria-label="Account navigation">
-              {sections.map(item => <NavLink end={item.path === "/connect"} key={item.path} to={item.path}>
+              {sections.map(item => <NavLink end={item.path === "/connect"} key={item.path} to={item.path}
+                className={({ isActive }) => isActive || (item.section === "connections" && location.pathname === "/") ? "active is-current" : undefined}>
                 <item.icon aria-hidden="true" /><span>{item.label}</span>
               </NavLink>)}
             </nav>
+            <div className="account-hub-cli">
+              <span>From your terminal</span>
+              <code>nanocodex2 login</code>
+              <a href="/docs/getting-started">Install the CLI <ArrowUpRight aria-hidden="true" /></a>
+            </div>
             <div className="account-hub-identity">
               <CircleUserRound aria-hidden="true" />
               <div><strong>Personal account</strong><span>{account.address ? `${account.address.slice(0, 6)}…${account.address.slice(-4)}` : `Account ${account.id.slice(0, 8)}`}</span></div>
@@ -88,7 +94,7 @@ export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
             </div>
           </aside>
           <section id="account-content" tabIndex={-1} className={`account-hub-body account-hub-${section.section}`} aria-label={section.label}>
-            {section.section !== "vault" ? <header className="account-page-heading"><h1 ref={heading} tabIndex={-1}>{section.label}</h1></header> : null}
+            {section.section !== "vault" ? <header className="account-page-heading"><div><h1 ref={heading} tabIndex={-1}>{section.label}</h1>{section.description ? <p className="account-page-description">{section.description}</p> : null}</div></header> : null}
             {session.error ? <div className="account-workspace-error" role="alert">{session.error}<button type="button" onClick={() => void session.refresh()}>Try again</button></div> : null}
             {section.section === "phone" ? <PhoneService /> : section.section === "vault" ? <Vault key={account.id} /> : <AccountMenu key={`${account.id}:${section.section}`} inline section={section.section} />}
           </section>

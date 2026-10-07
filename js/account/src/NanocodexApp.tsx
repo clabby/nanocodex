@@ -27,6 +27,7 @@ import {
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate } from "react-router";
 import { AgentExperience } from "./AgentExperience";
+import { HomeLanding } from "./HomeLanding";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -303,16 +304,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [demoNavigationOpen, setDemoNavigationOpen] = useState(false);
   const [gitNavigationOpen, setGitNavigationOpen] = useState(false);
-  const [agentExperienceMounted, setAgentExperienceMounted] = useState(
-    surface === "home" || surface === "agent",
-  );
-  const [retainedAgentSurface, setRetainedAgentSurface] = useState<"home" | "agent" | undefined>(
-    surface === "home" || surface === "agent" ? surface : undefined,
-  );
-  const agentExperienceSurface = surface === "home" || surface === "agent"
-    ? surface
-    : retainedAgentSurface;
-  const terminalSurfaceActive = surface === "home" || surface === "agent";
+  // The homepage is a marketing/Connect surface; only /agent mounts the terminal.
+  const [agentExperienceMounted, setAgentExperienceMounted] = useState(surface === "agent");
+  const terminalSurfaceActive = surface === "agent";
   const needsRepository = surface === "code" || surface === "commits";
   const shellRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -366,7 +360,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   }, [commitRailModalOpen]);
 
   const retainAgentExperience = useCallback((nextSurface: Surface) => {
-    if (nextSurface === "home" || nextSurface === "agent") {
+    if (nextSurface === "agent") {
       setAgentExperienceMounted(true);
     }
   }, []);
@@ -524,7 +518,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   useLayoutEffect(() => {
     retainAgentExperience(surface);
-    if (surface === "home" || surface === "agent") setRetainedAgentSurface(surface);
   }, [retainAgentExperience, surface]);
 
   useEffect(() => {
@@ -712,7 +705,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   useEffect(() => {
     if (surface === "docs") return;
     document.title = surface === "home"
-      ? "Nanocodex · headless Rust agents SDK"
+      ? "Nanocodex · agents connected to your accounts"
       : `${surface === "code"
         ? "Source"
         : surface === "connect"
@@ -740,7 +733,11 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   }, [location.pathname, location.search, navigate, surface]);
 
   const preloadSurface = useCallback((nextSurface: Surface) => {
-    if (nextSurface === "home" || nextSurface === "agent") {
+    if (nextSurface === "home") {
+      void import("./ConnectHome").catch(() => undefined);
+      return;
+    }
+    if (nextSurface === "agent") {
       return;
     }
     if (nextSurface === "multiplayer") {
@@ -1372,43 +1369,24 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           id="top"
           inert={commitSearchModalOpen ? true : undefined}
         >
-          <RouteErrorBoundary surface={agentExperienceMounted ? "agent" : "home"}>
-          {surface === "home" ||
-          surface === "agent" ||
-          agentExperienceMounted ? (
+          <RouteErrorBoundary surface="agent">
+          {surface === "agent" || agentExperienceMounted ? (
             <section
-              className={
-                surface === "home"
-                  ? "home-page is-home"
-                  : surface === "agent"
-                    ? "home-page is-agent"
-                    : "home-page is-stashed"
-              }
-              hidden={surface !== "home" && surface !== "agent"}
-              inert={surface !== "home" && surface !== "agent" ? true : undefined}
-              aria-hidden={surface !== "home" && surface !== "agent"}
-              aria-labelledby={surface === "agent" ? "agent-page-title" : "home-title"}
+              className={surface === "agent" ? "home-page is-agent" : "home-page is-stashed"}
+              hidden={surface !== "agent"}
+              inert={surface !== "agent" ? true : undefined}
+              aria-hidden={surface !== "agent"}
+              aria-labelledby="agent-page-title"
             >
               <article className="home-article">
-                <h1
-                  className="sr-only"
-                  id={surface === "agent" ? "agent-page-title" : "home-title"}
-                >
-                  {surface === "agent" ? "Your Nanocodex agents" : "Chat with Nanocodex"}
-                </h1>
+                <h1 className="sr-only" id="agent-page-title">Your Nanocodex agents</h1>
                 <section className="home-demo" id="agent-demo">
                   <AgentExperience
                     theme={theme}
                     onThemeChange={setTheme}
                     agentId={routeAgentId}
-                    landing={agentExperienceSurface === "home"}
-                    mode={
-                      surface === "agent"
-                        ? "full"
-                        : surface === "home"
-                          ? "preview"
-                          : "hidden"
-                    }
+                    landing={false}
+                    mode={surface === "agent" ? "full" : "hidden"}
                     onAgentChange={handleAgentChange}
                   />
                 </section>
@@ -1417,7 +1395,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           ) : null}
           </RouteErrorBoundary>
 
-          {surface === "home" || surface === "agent" ? null : (
+          {surface === "agent" ? null : (
           <RouteErrorBoundary
             key={surface}
             failure={
@@ -1428,7 +1406,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             surface={surface}
           >
           <Suspense fallback={<p role="status">Loading {surface}…</p>}>
-          {surface === "connect" ? (
+          {surface === "home" ? (
+            <HomeLanding theme={theme} onThemeChange={setTheme} />
+          ) : surface === "connect" ? (
             <DeviceConnect theme={theme} onThemeChange={setTheme} />
           ) : surface === "chief-of-staff" ? (
             <ChiefOfStaffDemo />

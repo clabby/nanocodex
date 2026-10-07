@@ -121,3 +121,20 @@
 .cloudflare-connection-form a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
 .account-hub [data-provider="cloudflare"] .connector-logo svg { fill: none; }
 @media (max-width: 540px) { .cloudflare-connection-form :is(input, select) { font-size: 16px; } }
+
+/* Connections overview: scannable two-column cards with clear status. */
+.account-hub .account-inline .account-connection-group > h2 { display: flex; align-items: center; gap: 10px; color: var(--workspace-muted); font-size: 12px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; }
+.account-hub .account-inline .account-connection-group > h2::after { content: ""; flex: 1; height: 1px; background: var(--workspace-line); }
+.account-hub .account-inline :is(.wizard-connector-card, .account-service-row, .whatsapp-connection, .mcp-connector-row) { transition: border-color .15s ease, box-shadow .15s ease; }
+.account-hub .account-inline :is(.wizard-connector-card, .account-service-row, .whatsapp-connection, .mcp-connector-row):hover { border-color: var(--border-strong); box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 7%, transparent); }
+.account-hub .account-inline .account-service-summary .connector-logo,
+.account-hub .account-inline .connection-card .connector-logo { display: inline-grid; place-items: center; width: 34px; height: 34px; flex: 0 0 34px; padding: 6px; border-radius: 9px; background: var(--workspace-soft); box-sizing: border-box; }
+.account-hub .account-inline .account-service-row[data-connected] .account-service-copy > span { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
+.account-hub .account-inline .account-service-row[data-connected] .account-service-copy > span::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #5fae7f; flex-shrink: 0; }
+.account-hub .account-inline .account-service-identity { padding-left: 60px; }
+@media (min-width: 900px) {
+  .account-hub .account-inline .account-connection-group .wizard-connectors { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; }
+}
+@media (max-width: 540px) {
+  .account-hub .account-inline .account-service-identity { padding-left: 12px; }
+}
