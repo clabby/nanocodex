@@ -5,11 +5,39 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+## [0.6.7](https://github.com/gakonst/nanocodex/releases/tag/v0.6.7) - 2026-10-07
+
+### Bug Fixes
+
+- [hand] Discard paused input and reject unverified recording storage
+- [hand] Require native video and coordinate OS-owned updates
+
+### Dependencies
+
+- Merge pull request [#682](https://github.com/gakonst/nanocodex/issues/682) from gakonst/speedups-combined
+
+### Features
+
+- [hand] Add native scoped workflow recording and evidence controls
 
 ### Miscellaneous Tasks
 
+- Release 0.6.6
 - Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
+
+### Other
+
+- Merge pull request [#713](https://github.com/gakonst/nanocodex/issues/713) from gakonst/feat/hand-recording-20261001
+- Merge master into native Hand recording preserving screen and ownership contracts
+- Merge master into personal storage without dropping current routes or test suites
+- Merge current master and retain steering through shared WASM harness builder
+- Bring native Claude integration up to date with master
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-final
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-api
+- Provision required native video and gate Hand setup on its video desktop
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr673-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr674-20260930
+- Make check:fast pass on macOS hosts
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 

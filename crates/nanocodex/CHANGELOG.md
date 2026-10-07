@@ -5,17 +5,40 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/gakonst/nanocodex/compare/v0.6.6...HEAD)
+## [0.6.7](https://github.com/gakonst/nanocodex/releases/tag/v0.6.7) - 2026-10-07
+
+### Bug Fixes
+
+- [cli] Select Claude before the first prompt ([#826](https://github.com/gakonst/nanocodex/issues/826))
+- [oai-api] Estimate audio tokens exactly like codex-rs
+- [release] Include unchanged crates in 0.6.6 changelogs
+
+### Dependencies
+
+- Merge pull request [#682](https://github.com/gakonst/nanocodex/issues/682) from gakonst/speedups-combined
+- Split nanocodex-tools features and trim unused JS dependencies
+
+### Features
+
+- [agent] Route native Codex and Claude harnesses
 
 ### Miscellaneous Tasks
 
 - Release 0.6.6
 
-## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+### Other
 
-### Miscellaneous Tasks
-
-- Release 0.6.6
+- Merge master into native Hand recording preserving screen and ownership contracts
+- Merge master into personal storage without dropping current routes or test suites
+- Merge remote-tracking branch 'origin/master' into merge-agent2/pr715-20261002
+- Merge current master and retain steering through shared WASM harness builder
+- Merge pull request [#657](https://github.com/gakonst/nanocodex/issues/657) from gakonst/codex/nanoclaude
+- Split provider tool crates and integrate managed Claude subscriptions
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-final
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-api
+- Add durable Claude subscription OAuth and public facade integration
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr673-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr674-20260930
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 

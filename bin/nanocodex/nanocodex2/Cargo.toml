@@ -20,9 +20,9 @@ chrono.workspace = true
 vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 
 [dependencies]
-nanocodex-tui-control = { path = "../tui-control", version = "0.6.6" }
-nanocodex-remote = { path = "../../../crates/nanocodex-remote", version = "0.6.6" }
-nanocodex-hand = { version = "0.6.6", path = "../../../crates/nanocodex-hand" }
+nanocodex-tui-control = { path = "../tui-control", version = "0.6.7" }
+nanocodex-remote = { path = "../../../crates/nanocodex-remote", version = "0.6.7" }
+nanocodex-hand = { version = "0.6.7", path = "../../../crates/nanocodex-hand" }
 anyhow.workspace = true
 async-trait.workspace = true
 nanocodex-computer.workspace = true
@@ -36,14 +36,14 @@ dotenvy.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 image.workspace = true
-nanocodex = { path = "../../../crates/nanocodex", version = "0.6.6", default-features = false }
-nanocodex-agent = { path = "../../../crates/nanocodex-agent", version = "0.6.6", default-features = false }
-nanocodex-managed = { path = "../../../crates/nanocodex-managed", version = "0.6.6", default-features = false, features = ["tools", "voice"] }
+nanocodex = { path = "../../../crates/nanocodex", version = "0.6.7", default-features = false }
+nanocodex-agent = { path = "../../../crates/nanocodex-agent", version = "0.6.7", default-features = false }
+nanocodex-managed = { path = "../../../crates/nanocodex-managed", version = "0.6.7", default-features = false, features = ["tools", "voice"] }
 nanocodex-voice-native.workspace = true
 nanocodex-voice-protocol.workspace = true
 nanocodex-cli-auth.workspace = true
 nanocodex-observability = { workspace = true, features = ["cli"] }
-nanocodex-oai-tools = { path = "../../../crates/nanocodex-oai-tools", version = "0.6.6", default-features = false, features = ["attachment", "workspace-runtime", "mcp"] }
+nanocodex-oai-tools = { path = "../../../crates/nanocodex-oai-tools", version = "0.6.7", default-features = false, features = ["attachment", "workspace-runtime", "mcp"] }
 png = "0.18.1"
 percent-encoding.workspace = true
 pulldown-cmark = { version = "0.13.4", default-features = false }
@@ -61,7 +61,7 @@ shlex.workspace = true
 sha2.workspace = true
 syntect.workspace = true
 sysinfo.workspace = true
-nanocodex-subagents = { path = "../../../crates/nanocodex-subagents", version = "0.6.6" }
+nanocodex-subagents = { path = "../../../crates/nanocodex-subagents", version = "0.6.7" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

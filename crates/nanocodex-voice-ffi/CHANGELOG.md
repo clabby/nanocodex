@@ -5,17 +5,21 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/gakonst/nanocodex/compare/v0.6.6...HEAD)
+## [0.6.7](https://github.com/gakonst/nanocodex/releases/tag/v0.6.7) - 2026-10-07
+
+### Bug Fixes
+
+- [release] Include unchanged crates in 0.6.6 changelogs
 
 ### Miscellaneous Tasks
 
 - Release 0.6.6
 
-## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+### Other
 
-### Miscellaneous Tasks
-
-- Release 0.6.6
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-api
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr673-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr674-20260930
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 

@@ -37,9 +37,9 @@ hkdf = "0.12.4"
 p256 = { version = "0.13.2", features = ["ecdh"] }
 futures-util.workspace = true
 nanocodex-voice-protocol = { workspace = true, optional = true }
-nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.6", default-features = false }
-nanocodex-oai-api = { path = "../nanocodex-oai-api", version = "0.6.6", default-features = false, features = ["events", "native-tls"] }
-nanocodex-oai-tools = { path = "../nanocodex-oai-tools", version = "0.6.6", default-features = false, features = ["attachment"], optional = true }
+nanocodex-agent = { path = "../nanocodex-agent", version = "0.6.7", default-features = false }
+nanocodex-oai-api = { path = "../nanocodex-oai-api", version = "0.6.7", default-features = false, features = ["events", "native-tls"] }
+nanocodex-oai-tools = { path = "../nanocodex-oai-tools", version = "0.6.7", default-features = false, features = ["attachment"], optional = true }
 reqwest = { workspace = true, features = ["stream"] }
 rustls.workspace = true
 serde.workspace = true

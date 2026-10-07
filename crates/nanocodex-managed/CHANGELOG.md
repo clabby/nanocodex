@@ -5,22 +5,81 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+## [0.6.7](https://github.com/gakonst/nanocodex/releases/tag/v0.6.7) - 2026-10-07
+
+### Bug Fixes
+
+- Fix managed Claude recovery and cover Codex-to-Opus delegation ([#840](https://github.com/gakonst/nanocodex/issues/840))
+- [managed] Carry model through combined and resumed lifecycle startup
+- [claude] Strictly decode SSE and finish managed media and voice coverage
+- [claude] Share streamed/final message identity; admit attachments and live voice routing for Claude
+- Fix gateway model selection in the terminal picker ([#802](https://github.com/gakonst/nanocodex/issues/802))
+- Satisfy private-input lint and master spelling checks
+- [sessions] Keep Done HTTP journey lint-clean
+
+### Dependencies
+
+- Add protected Linux Hand sudo approval and private TUI input ([#693](https://github.com/gakonst/nanocodex/issues/693))
+- Merge pull request [#682](https://github.com/gakonst/nanocodex/issues/682) from gakonst/speedups-combined
+- Select CI jobs from the crate graph and add a draft fast lane
 
 ### Features
 
+- [tui] Cache recent prompts across sessions and copy replies ([#806](https://github.com/gakonst/nanocodex/issues/806))
+- Add private TUI input with default Vault saving and reuse
+- [sessions] Continue recent mobile threads in tmux and mark sessions done
 - [models] Migrate Sol to GPT-6.1 ([#679](https://github.com/gakonst/nanocodex/issues/679))
 - Fork committed agent boundaries and add side conversations
 
 ### Miscellaneous Tasks
 
+- Release 0.6.6
 - Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
 
 ### Other
 
+- Expose connector and Vault services through REST, hosted forms, JavaScript and Rust ([#757](https://github.com/gakonst/nanocodex/issues/757))
+- Merge remote-tracking branch 'origin/master' into fix/hand-retirement-final-20261006
+- Merge remote-tracking branch 'origin/master' into fix/hand-menu-compact-20261006
+- Merge master into account workspace redesign
+- Merge pull request [#791](https://github.com/gakonst/nanocodex/issues/791) from gakonst/fix/claude-backend-voice-attachments
+- Merge master into Claude fix; preserve prepared Vault journeys and loopback CI
+- Merge master into Claude fixes; preserve model-aware admission and origin enrichment
+- Manage connectors and Vault through native account APIs ([#817](https://github.com/gakonst/nanocodex/issues/817))
+- Prefer submitting Hands and add brokered SSH recovery ([#801](https://github.com/gakonst/nanocodex/issues/801))
+- Defer optional thread startup work and batch SDK first prompts ([#797](https://github.com/gakonst/nanocodex/issues/797))
+- Merge pull request [#780](https://github.com/gakonst/nanocodex/issues/780) from gakonst/feat/tui-private-input-vault-20261005
+- Add brokered Vault requests and private signing for agents and CLI ([#747](https://github.com/gakonst/nanocodex/issues/747))
+- Merge master into native Hand recording preserving screen and ownership contracts
+- Merge pull request [#706](https://github.com/gakonst/nanocodex/issues/706) from gakonst/codex/notable-capabilities-20260930
+- Merge master into personal storage without dropping current routes or test suites
+- Merge remote-tracking branch 'origin/master' into merge-agent2/pr715-20261002
+- Merge current master and retain steering through shared WASM harness builder
+- Merge pull request [#657](https://github.com/gakonst/nanocodex/issues/657) from gakonst/codex/nanoclaude
+- Merge current master into Nanoclaude provider integration
+- Split provider tool crates and integrate managed Claude subscriptions
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-final
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-api
+- Add opt-in observer steering, image contracts, and receipt-time retries
+- Merge commit 'refs/audit/merge-master-20260930' into audit/pr697-20260930
+- Merge commit 'refs/audit/merge-master-20260930' into audit/pr674-20260930
+- Merge commit 'refs/audit/merge-master-20260930' into audit/pr673-20260930
+- Merge pull request [#688](https://github.com/gakonst/nanocodex/issues/688) from gakonst/feat/continue-tmux-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr692-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr673-20260930
+- Validate Done acknowledgements before CLI success and offline cache mutation
+- Merge pinned integration base preserving continuation and secure input state
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr674-20260930
 - Shared links as multiplayer Chat turns with live web UI ([#669](https://github.com/gakonst/nanocodex/issues/669))
 - Revocable sharing for managed threads and TUI ([#660](https://github.com/gakonst/nanocodex/issues/660))
 - Expose owner Hand call aggregates in nanocodex2 CLI ([#630](https://github.com/gakonst/nanocodex/issues/630))
+
+### Performance
+
+- Create fresh CLI runs with one managed request ([#843](https://github.com/gakonst/nanocodex/issues/843))
+- Reduce direct Hand preparation and terminal flush overhead ([#838](https://github.com/gakonst/nanocodex/issues/838))
+- [cli] Overlap optional tool preparation with cloud admission ([#839](https://github.com/gakonst/nanocodex/issues/839))
+- Pipeline fresh CLI creation and first prompt ([#830](https://github.com/gakonst/nanocodex/issues/830))
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 

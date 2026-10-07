@@ -5,17 +5,51 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased](https://github.com/gakonst/nanocodex/compare/v0.6.6...HEAD)
+## [0.6.7](https://github.com/gakonst/nanocodex/releases/tag/v0.6.7) - 2026-10-07
+
+### Bug Fixes
+
+- Fix CUA verification cache and remove inactive integration configuration ([#755](https://github.com/gakonst/nanocodex/issues/755))
+- [release] Include unchanged crates in 0.6.6 changelogs
+
+### Dependencies
+
+- Merge pull request [#698](https://github.com/gakonst/nanocodex/issues/698) from gakonst/codex/direct-cua-retry
+- Merge pull request [#682](https://github.com/gakonst/nanocodex/issues/682) from gakonst/speedups-combined
+- Select CI jobs from the crate graph and add a draft fast lane
+
+### Features
+
+- [computer] Supercharged CUA — strip upstream confirmation policies by default ([#730](https://github.com/gakonst/nanocodex/issues/730))
 
 ### Miscellaneous Tasks
 
 - Release 0.6.6
 
-## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+### Other
 
-### Miscellaneous Tasks
-
-- Release 0.6.6
+- Merge remote-tracking branch 'origin/master' into fix/hand-menu-compact-20261006
+- Merge master into account workspace redesign
+- Restore upstream Sky browser sessions without Codex app-server ([#809](https://github.com/gakonst/nanocodex/issues/809))
+- Install the Mac Hand automatically and connect it on CLI sign-in ([#786](https://github.com/gakonst/nanocodex/issues/786))
+- Merge master into PR preview branch
+- Merge pull request [#737](https://github.com/gakonst/nanocodex/issues/737) from gakonst/whatsapp-workers-20261004
+- Apply rustfmt to inherited computer policy changes
+- Merge remote-tracking branch 'origin/master' into whatsapp-workers-20261004
+- Merge current master into Nanoclaude provider integration
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-final
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-api
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr692-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr673-20260930
+- Merge pinned integration base preserving continuation and secure input state
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr674-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr697-20260930
+- Complete no-Codex Linux CUA host and refuse unverified managed paths
+- Merge pull request [#694](https://github.com/gakonst/nanocodex/issues/694) from gakonst/codex/direct-cua-mcp
+- Preserve host policy-source paths without exposing them to CUA JavaScript
+- Replace managed macOS app-server bridge with direct CUA MCP host
+- Make macOS direct CUA packaging native-computer-only
+- Provision direct CUA hosts without bundled Codex CLI
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 

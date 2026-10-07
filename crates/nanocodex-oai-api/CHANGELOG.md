@@ -5,11 +5,21 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+## [0.6.7](https://github.com/gakonst/nanocodex/releases/tag/v0.6.7) - 2026-10-07
 
 ### Bug Fixes
 
+- [claude] Share streamed/final message identity; admit attachments and live voice routing for Claude
+- Report the runtime-selected model identity ([#808](https://github.com/gakonst/nanocodex/issues/808))
+- Fix image-file exhaustiveness and crate rename after integration
+- [oai-api] Estimate audio tokens exactly like codex-rs
 - [voice] Align ChatGPT voice with Codex app-server lifecycle ([#648](https://github.com/gakonst/nanocodex/issues/648))
+
+### Dependencies
+
+- Merge pull request [#682](https://github.com/gakonst/nanocodex/issues/682) from gakonst/speedups-combined
+- Trim WASM cache discovery, CI selection docs, and webrtc-sys prepare
+- Split nanocodex-tools features and trim unused JS dependencies
 
 ### Features
 
@@ -17,10 +27,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- Release 0.6.6
 - Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
 
 ### Other
 
+- Merge remote-tracking branch 'origin/master' into fix/hand-menu-compact-20261006
+- Merge master into account workspace redesign
+- Restore upstream Sky browser sessions without Codex app-server ([#809](https://github.com/gakonst/nanocodex/issues/809))
+- Merge pull request [#791](https://github.com/gakonst/nanocodex/issues/791) from gakonst/fix/claude-backend-voice-attachments
+- Merge master into Claude fixes; preserve model-aware admission and origin enrichment
+- Preserve prompt caches when changing reasoning effort ([#805](https://github.com/gakonst/nanocodex/issues/805))
+- Merge master into native Hand recording preserving screen and ownership contracts
+- Merge pull request [#706](https://github.com/gakonst/nanocodex/issues/706) from gakonst/codex/notable-capabilities-20260930
+- Update observer test call sites and terminal retry lint checks
+- Merge master into personal storage without dropping current routes or test suites
+- Merge remote-tracking branch 'origin/master' into merge-agent2/pr715-20261002
+- Merge current master and retain steering through shared WASM harness builder
+- Merge pull request [#657](https://github.com/gakonst/nanocodex/issues/657) from gakonst/codex/nanoclaude
+- Merge current master into Nanoclaude provider integration
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-final
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-api
+- Add opt-in observer steering, image contracts, and receipt-time retries
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr673-20260930
+- Merge remote-tracking branch 'origin/master' into feat/continue-tmux-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr674-20260930
+- [durability] Remove checkpoint and store changes from [#682](https://github.com/gakonst/nanocodex/issues/682)
+- Trim incremental checkpoints to the essential change
+- Persist model boundaries incrementally and move SQLite off the executor
+- Share session step transitions between Session and ModelRun
 - Use default Mercator MCP with the funded account wallet ([#659](https://github.com/gakonst/nanocodex/issues/659))
 - Enforce strict typed subagent spawn contracts and verify live child completion ([#666](https://github.com/gakonst/nanocodex/issues/666))
 

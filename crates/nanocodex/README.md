@@ -57,7 +57,7 @@ agent lifecycle and durability extension:
 
 ```toml
 [dependencies]
-nanocodex = { version = "0.6.6", features = ["claude"] }
+nanocodex = { version = "0.6.7", features = ["claude"] }
 reqwest = "0.13"
 ```
 

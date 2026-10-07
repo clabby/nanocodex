@@ -5,11 +5,24 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.6](https://github.com/gakonst/nanocodex/releases/tag/v0.6.6) - 2026-09-29
+## [0.6.7](https://github.com/gakonst/nanocodex/releases/tag/v0.6.7) - 2026-10-07
 
 ### Miscellaneous Tasks
 
+- Release 0.6.6
 - Remove obsolete docs, artifacts, and low-signal tests ([#568](https://github.com/gakonst/nanocodex/issues/568))
+
+### Other
+
+- Merge master into native Hand recording preserving screen and ownership contracts
+- Merge master into personal storage without dropping current routes or test suites
+- Merge remote-tracking branch 'origin/master' into merge-agent2/pr715-20261002
+- Merge current master and retain steering through shared WASM harness builder
+- Merge pull request [#657](https://github.com/gakonst/nanocodex/issues/657) from gakonst/codex/nanoclaude
+- Split provider tool crates and integrate managed Claude subscriptions
+- Merge remote-tracking branch 'origin/master' into codex/nanoclaude-api
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr673-20260930
+- Merge commit 'refs/audit/integration-base-20260930' into audit/pr674-20260930
 
 ## [0.6.5](https://github.com/gakonst/nanocodex/releases/tag/v0.6.5) - 2026-09-24
 
