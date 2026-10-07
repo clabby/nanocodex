@@ -41,6 +41,8 @@ rusqlite = { workspace = true, optional = true }
 tokio-postgres = { workspace = true, optional = true }
 
 [dev-dependencies]
+base64.workspace = true
+image.workspace = true
 nanocodex-claude-tools.workspace = true
 futures-util.workspace = true
 nanocodex-claude = { workspace = true, features = ["tools"] }

@@ -150,7 +150,7 @@ async fn retained_tool_suffix_survives_compaction_failed_followup_and_recovery()
     let receipt = json!({"type":"text","text":"receipt".repeat(500)});
     let returned = vec![
         receipt,
-        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}),
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC"}}),
     ];
     let results = returned.clone();
     let (agent, _) = Nanocodex::builder(Claude::latest(client))
@@ -195,7 +195,7 @@ async fn retained_tool_suffix_survives_compaction_failed_followup_and_recovery()
     );
     let continuation = log[2]["messages"].as_array().unwrap();
     assert_eq!(continuation.len(), 3);
-    assert_eq!(continuation[1]["content"], json!(pending_round()));
+    assert_eq!(continuation[1]["content"], json!(&pending_round()[1..]));
     assert_eq!(continuation[2]["content"][0]["tool_use_id"], "effect-a");
     assert_eq!(continuation[2]["content"][1]["tool_use_id"], "effect-b");
     assert_eq!(continuation[2]["content"][0]["content"], json!(returned));
@@ -442,7 +442,10 @@ async fn rejected_tool_summary_keeps_completed_effects_for_manual_recovery() {
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 4);
     assert_eq!(log[1]["messages"], log[2]["messages"]);
-    assert_eq!(log[3]["messages"][1]["content"], json!(pending_round()));
+    assert_eq!(
+        log[3]["messages"][1]["content"],
+        json!(&pending_round()[1..])
+    );
     assert_eq!(log[3]["messages"][2]["content"][1]["content"], "committed");
     assert_eq!(
         effects.load(Ordering::SeqCst),
@@ -682,8 +685,9 @@ async fn incremental_server_pauses_retain_the_whole_turn_during_compaction() {
     let log = requests.lock().unwrap();
     assert_eq!(log.len(), 4);
     assert!(!log[2]["messages"].to_string().contains("incremental-fetch"));
-    assert_eq!(log[3]["messages"][1]["content"], json!(first));
-    assert_eq!(log[3]["messages"][2]["content"], json!(second));
+    assert_eq!(log[1]["messages"][1]["content"], json!(first));
+    assert_eq!(log[3]["messages"][1]["content"], json!(&first[1..]));
+    assert_eq!(log[3]["messages"][2]["content"], json!(&second[..1]));
     assert_eq!(log[3]["messages"].as_array().unwrap().len(), 3);
     server.abort();
 }
@@ -876,7 +880,7 @@ async fn end_turn_without_prior_server_result_fails_and_recovers_as_data() {
 }
 
 #[tokio::test]
-async fn context_exhaustion_retains_signed_output_and_completed_effects() {
+async fn context_exhaustion_retains_output_and_completed_effects() {
     let exhausted = vec![
         json!({"type":"thinking","thinking":"partial reasoning","signature":"signed-exhaustion"}),
         json!({"type":"server_tool_use","id":"completed-fetch","name":"web_fetch","input":{"url":"https://example.org"}}),
@@ -945,12 +949,15 @@ async fn context_exhaustion_retains_signed_output_and_completed_effects() {
     assert_eq!(log[3]["thinking"], json!({"type":"disabled"}));
     assert_eq!(log[3]["max_tokens"], 4096);
     assert!(!log[3]["messages"].to_string().contains("completed-fetch"));
-    assert_eq!(log[4]["messages"][1]["content"], json!(pending_round()));
+    assert_eq!(
+        log[4]["messages"][1]["content"],
+        json!(&pending_round()[1..])
+    );
     assert_eq!(
         log[4]["messages"][2]["content"][0]["content"],
         "committed receipt"
     );
-    assert_eq!(log[4]["messages"][3]["content"], json!(exhausted));
+    assert_eq!(log[4]["messages"][3]["content"], json!(&exhausted[1..]));
     assert_eq!(log[4]["messages"][4]["role"], "user");
     assert_eq!(log[4]["max_tokens"], 128_000);
     assert_eq!(log[4]["thinking"], log[0]["thinking"]);
@@ -1045,6 +1052,61 @@ async fn context_exhaustion_summary_failure_preserves_received_output() {
             .to_string()
             .contains("incomplete summary")
     );
+    task.abort();
+}
+
+#[tokio::test]
+async fn summary_omits_invalidated_thinking_and_replays_new_reasoning() {
+    let fresh = vec![
+        json!({"type":"thinking","thinking":"fresh reasoning","signature":"fresh-signature"}),
+        json!({"type":"redacted_thinking","data":"fresh-redacted"}),
+        json!({"type":"text","text":"completed"}),
+    ];
+    let answer = fresh.clone();
+    let (client, requests, task) = server(
+        move |index, _| match index {
+            1 => (
+                vec![
+                    json!({"type":"thinking","thinking":"","signature":"stale-signature"}),
+                    json!({"type":"redacted_thinking","data":"stale-redacted"}),
+                ],
+                "model_context_window_exceeded",
+                10,
+            ),
+            2 | 4 => (text("Preserve the task"), "end_turn", 10),
+            3 => (text("incomplete"), "max_tokens", 10),
+            5 => (answer.clone(), "end_turn", 10),
+            _ => (text("reviewed"), "end_turn", 10),
+        },
+        None,
+    )
+    .await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .adaptive_thinking()
+        .keep_thinking()
+        .build()
+        .unwrap();
+    let error = agent
+        .prompt("finish task")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("MaxTokens"), "{error}");
+    // The thinking-only response leaves no assistant content once the prior
+    // summary is packed, so manual compaction summarizes user context alone.
+    agent.compact().await.unwrap();
+    for (prompt, expected) in [("continue", "completed"), ("review", "reviewed")] {
+        let result = agent.prompt(prompt).await.unwrap().result().await.unwrap();
+        assert_eq!(result.final_message(), expected);
+    }
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 6);
+    for request in &log[2..5] {
+        assert!(!request["messages"].to_string().contains("stale-"));
+    }
+    assert_eq!(log[5]["messages"][2]["content"], json!(fresh));
     task.abort();
 }
 

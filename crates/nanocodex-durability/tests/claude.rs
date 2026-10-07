@@ -2,16 +2,21 @@
 //! Failure cases defined before implementation: terminal receipt replay after
 //! restart; completed tool receipts after a failed provider continuation; live
 //! cancellation after an effect starts (unknown outcome, never dispatched again);
-//! signed/opaque compaction suffixes and container/discovery state across reopen.
+//! opaque compaction suffixes and container/discovery state across reopen.
 //! Pending effects after a process crash follow the store's at-least-once policy.
 #![cfg(all(feature = "claude", feature = "sqlite"))]
 
 use axum::{Json, Router, response::IntoResponse, routing::post};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use image::{DynamicImage, ImageFormat};
 use nanocodex_agent::{Nanocodex, PromptRequest};
 use nanocodex_claude::{Claude, ClaudeClient, ToolDefinition};
-use nanocodex_durability::{DurableAgentExt, DurableSession, SqliteStore};
+use nanocodex_durability::{DurableAgentExt, DurableSession, SqliteStore, StepStatus};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::{
+    io::Cursor,
+    sync::{Arc, Mutex},
+};
 
 fn sse(blocks: Vec<Value>, stop: &str, input: u64) -> String {
     let mut frames = vec![
@@ -121,6 +126,13 @@ fn tool() -> ToolDefinition {
         defer_loading: false,
     }
 }
+fn png_block(width: u32, height: u32) -> Value {
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::new_rgb8(width, height)
+        .write_to(&mut bytes, ImageFormat::Png)
+        .unwrap();
+    json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":STANDARD.encode(bytes.into_inner())}})
+}
 
 #[tokio::test]
 async fn completed_request_receipt_replays_after_sqlite_reopen() {
@@ -225,22 +237,32 @@ async fn retried_model_call_receipt_replays_after_sqlite_reopen() {
 }
 
 #[tokio::test]
-async fn completed_effect_and_signed_compaction_suffix_survive_reopen() {
+async fn completed_effect_and_opaque_compaction_suffix_survive_reopen() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite");
-    let (client, requests, server) = server(|index, _| match index {
+    let fresh = vec![
+        json!({"type":"thinking","thinking":"reconcile receipt","signature":"replacement-prefix"}),
+        json!({"type":"text","text":"recovered"}),
+    ];
+    let recovered = fresh.clone();
+    let (client, requests, server) = server(move |index, _| match index {
         1 => sse(signed_round(), "tool_use", 70_000),
         2 => sse(text("Preserve the original task."), "end_turn", 10),
         3 => "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"synthetic followup failure\"}}\n\n".into(),
-        _ => sse(text("recovered"), "end_turn", 10),
+        4 => sse(recovered.clone(), "end_turn", 10),
+        _ => sse(text("reviewed"), "end_turn", 10),
     }).await;
     let effects = Arc::new(AtomicUsize::new(0));
     let receipt = vec![
         json!({"type":"text","text":"effect committed"}),
-        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}}),
+        png_block(1, 1),
     ];
-    for recovery in [false, true] {
+    for (prompt, expected) in [
+        ("perform effect once", None),
+        ("reconcile existing receipt", Some("recovered")),
+        ("review after restart", Some("reviewed")),
+    ] {
         let counter = effects.clone();
         let returned = receipt.clone();
         let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
@@ -256,34 +278,29 @@ async fn completed_effect_and_signed_compaction_suffix_survive_reopen() {
             .build()
             .unwrap();
         let result = agent
-            .prompt(
-                PromptRequest::new(if recovery {
-                    "reconcile existing receipt"
-                } else {
-                    "perform effect once"
-                })
-                .request_id(if recovery { "recovery" } else { "first" }),
-            )
+            .prompt(PromptRequest::new(prompt).request_id(prompt))
             .await
             .unwrap()
             .result()
             .await;
-        if recovery {
-            assert_eq!(result.unwrap().final_message(), "recovered");
-        } else {
-            assert!(result.is_err());
+        match expected {
+            Some(expected) => assert_eq!(result.unwrap().final_message(), expected),
+            None => assert!(result.is_err()),
         }
         agent.shutdown().await.unwrap();
         drop((agent, events));
     }
     let log = requests.lock().unwrap();
-    assert_eq!(log.len(), 4);
+    assert_eq!(log.len(), 5);
     assert_eq!(
         effects.load(Ordering::SeqCst),
         1,
         "completed effects must not repeat after reopen"
     );
-    assert_eq!(log[2]["messages"][1]["content"], json!(signed_round()));
+    assert_eq!(
+        log[2]["messages"][1]["content"],
+        json!(&signed_round()[2..])
+    );
     assert_eq!(
         log[2]["messages"][2]["content"][0]["content"],
         json!(receipt)
@@ -291,6 +308,11 @@ async fn completed_effect_and_signed_compaction_suffix_survive_reopen() {
     assert_eq!(
         &log[3]["messages"].as_array().unwrap()[..3],
         log[2]["messages"].as_array().unwrap()
+    );
+    assert_eq!(
+        log[4]["messages"][4]["content"],
+        json!(fresh),
+        "reasoning received after compaction remains replayable after reopen"
     );
     assert_eq!(log[3]["container"], "stable-container");
     assert_eq!(log[0]["tools"], log[3]["tools"]);
@@ -359,7 +381,10 @@ async fn live_interrupted_effect_is_unknown_after_compaction_and_reopen() {
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     let log = requests.lock().unwrap().clone();
     assert_eq!(log.len(), 3);
-    assert_eq!(log[2]["messages"][1]["content"], json!(signed_round()));
+    assert_eq!(
+        log[2]["messages"][1]["content"],
+        json!(&signed_round()[2..])
+    );
     let unknown = &log[2]["messages"][2]["content"][0];
     assert_eq!(unknown["tool_use_id"], "effect-once");
     assert_eq!(unknown["is_error"], true);
@@ -659,7 +684,7 @@ async fn transaction_recovery(
             .any(|block| block["type"] == "tool_result");
         if context_exhaustion
             && has_receipt
-            && !request["messages"].to_string().contains("signed-exhaustion")
+            && !request["messages"].to_string().contains("completed-fetch")
         {
             sse(
                 vec![
@@ -830,7 +855,7 @@ async fn transaction_recovery(
     if context_exhaustion {
         let log = requests.lock().unwrap();
         let continuation = log.last().unwrap()["messages"].to_string();
-        assert!(continuation.contains("signed-exhaustion"));
+        assert!(!continuation.contains("signed-exhaustion"));
         assert!(continuation.contains("completed-fetch"));
         if after_commit || fail_at.is_none() {
             assert_eq!(log.len(), 4, "committed model responses must not repeat");
@@ -890,6 +915,107 @@ async fn context_exhaustion_recovers_across_every_sqlite_write() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn image_receipt_stays_original_while_replayed_history_is_bounded() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let (client, requests, server) = server(|index, _| match index {
+        1 => sse(signed_round(), "tool_use", 10),
+        _ => sse(text("image receipt restored"), "end_turn", 10),
+    })
+    .await;
+    let request = || PromptRequest::new("capture a synthetic image once").request_id("capture");
+    let receipt = vec![
+        json!({"type":"text","text":"capture committed"}),
+        png_block(9001, 1),
+    ];
+    let lost_ack = Arc::new(AtomicBool::new(false));
+    let effects = Arc::new(AtomicUsize::new(0));
+    let state = DurableSession::open(
+        FaultStore {
+            inner: SqliteStore::open(&path).unwrap(),
+            writes: Arc::new(AtomicUsize::new(0)),
+            fail_at: None,
+            after_commit: true,
+            fail_when_armed: Some(lost_ack.clone()),
+        },
+        "claude-synthetic",
+    )
+    .await
+    .unwrap();
+    let build = |state| {
+        let arm = lost_ack.clone();
+        let counter = effects.clone();
+        let returned = receipt.clone();
+        Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .tool_blocks(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // The next durability write records this completed receipt.
+                // Commit it, then lose its acknowledgement before batch advance.
+                arm.store(true, Ordering::SeqCst);
+                let returned = returned.clone();
+                async move { Ok(returned) }
+            })
+            .durability(state)
+    };
+    let (agent, events) = build(state).await.unwrap().build().unwrap();
+    assert!(
+        agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .is_err()
+    );
+    let _ = agent.shutdown().await;
+    drop((agent, events));
+
+    let state = reopen(&path).await;
+    let retained = state.state().await.unwrap();
+    let StepStatus::Completed(output) =
+        &retained.operation("capture").unwrap().steps["tool-0-effect-once"].status
+    else {
+        panic!("the image receipt must commit before the lost acknowledgement");
+    };
+    let stored: Value = state.resolve(output).await.unwrap().decode().unwrap();
+    assert_eq!(
+        stored["result"]["content"],
+        json!(receipt),
+        "the durable receipt keeps the handler's exact output"
+    );
+    let (agent, events) = build(state).await.unwrap().build().unwrap();
+    assert_eq!(
+        agent
+            .prompt(request())
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "image receipt restored"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    let log = requests.lock().unwrap().clone();
+    assert_eq!(log.len(), 2);
+    let replayed = &log[1]["messages"][2]["content"][0]["content"];
+    assert_eq!(replayed[0], receipt[0]);
+    let prepared = STANDARD
+        .decode(replayed[1]["source"]["data"].as_str().unwrap())
+        .unwrap();
+    let prepared = image::load_from_memory(&prepared).unwrap();
+    assert_eq!(
+        (prepared.width(), prepared.height()),
+        (3000, 1),
+        "replayed provider history carries the bounded image"
+    );
+    agent.shutdown().await.unwrap();
+    drop((agent, events));
+    server.abort();
 }
 
 #[tokio::test]
@@ -1806,7 +1932,10 @@ async fn manual_compaction_cancels_active_tool_then_preserves_safe_context_on_re
         .unwrap();
     let log = requests.lock().unwrap().clone();
     assert_eq!(log.len(), 3);
-    assert_eq!(log[2]["messages"][1]["content"], json!(signed_round()));
+    assert_eq!(
+        log[2]["messages"][1]["content"],
+        json!(&signed_round()[2..])
+    );
     let receipt = &log[2]["messages"][2]["content"][0];
     assert_eq!(receipt["tool_use_id"], "effect-once");
     assert_eq!(receipt["is_error"], true);
@@ -2028,7 +2157,7 @@ async fn uncertain_paused_server_turn_survives_compaction_cancellation_and_sqlit
             1,
             "uncertain effects must not repeat"
         );
-        assert_eq!(log[2]["messages"][1]["content"][1]["id"], "paused-mutation");
+        assert_eq!(log[2]["messages"][1]["content"][0]["id"], "paused-mutation");
         assert!(!log[1]["messages"].to_string().contains("paused-mutation"));
         for request in &log[3..] {
             assert!(
@@ -2048,7 +2177,7 @@ async fn uncertain_paused_server_turn_survives_compaction_cancellation_and_sqlit
                 .find(|text| text.contains("paused-mutation"))
                 .expect("prior server evidence");
             assert!(evidence.contains("outcome unknown"));
-            assert!(evidence.contains("opaque-paused-signature"));
+            assert!(!evidence.contains("opaque-paused-signature"));
             assert!(evidence.contains("retain-evidence"));
             assert!(evidence.contains("provider transcript truncated"));
             assert!(evidence.len() <= 66_000, "bounded UTF-8 evidence");

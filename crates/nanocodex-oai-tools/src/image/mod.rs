@@ -291,6 +291,7 @@ pub async fn prepare_user_input(input: &PromptInput) -> Vec<ContentItem> {
     }
 }
 
+#[cfg(feature = "code-mode")]
 pub(crate) fn prepare_embedded_output_images(output: &mut ToolOutputBody) {
     if let ToolOutputBody::Content(content) = output {
         *content = prepare_content(std::mem::take(content));
@@ -298,6 +299,7 @@ pub(crate) fn prepare_embedded_output_images(output: &mut ToolOutputBody) {
     output.replace_invalid_image_envelopes();
 }
 
+#[cfg(feature = "code-mode")]
 pub(crate) fn prepare_embedded_user_input(input: &PromptInput) -> Vec<ContentItem> {
     let input = match input {
         PromptInput::Text(text) => vec![UserInput::Text { text: text.clone() }],
@@ -458,6 +460,64 @@ fn prepare_image(image_url: &mut String, detail: ImageDetail) -> Result<(), Imag
     Ok(())
 }
 
+/// Prepares inline base64 image payloads at original detail, additionally
+/// bounded by `max_dimension` on either edge.
+///
+/// Each result is the prepared base64 data with its detected MIME type, or a
+/// model-visible omission message for an image that could not be processed.
+/// Decode budgets and the cache are shared with prompt and tool images. CPU
+/// image work runs on the blocking pool on native targets and inline on WASM.
+#[allow(
+    clippy::unused_async,
+    reason = "WASM prepares images inline without a blocking pool"
+)]
+pub async fn prepare_base64_images(
+    images: Vec<String>,
+    max_dimension: u32,
+) -> Vec<Result<(String, &'static str), &'static str>> {
+    if images.is_empty() {
+        return Vec::new();
+    }
+    let prepare = move |images: Vec<String>| {
+        images
+            .iter()
+            .map(|data| prepare_base64_image(data, max_dimension))
+            .collect()
+    };
+    #[cfg(target_family = "wasm")]
+    {
+        prepare(images)
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let count = images.len();
+        match tokio::task::spawn_blocking(move || prepare(images)).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(%error, "failed to join base64 image preparation task");
+                vec![Err(IMAGE_PROCESSING_ERROR_PLACEHOLDER); count]
+            }
+        }
+    }
+}
+
+fn prepare_base64_image(
+    data: &str,
+    max_dimension: u32,
+) -> Result<(String, &'static str), &'static str> {
+    let limits = PromptImageResizeLimits {
+        max_dimension: ORIGINAL_DETAIL_LIMITS.max_dimension.min(max_dimension),
+        ..ORIGINAL_DETAIL_LIMITS
+    };
+    decode_base64(data, MAX_PROMPT_IMAGE_INPUT_BYTES)
+        .and_then(|bytes| load_for_prompt_bytes(Path::new("<base64-image>"), bytes, limits))
+        .map(|image| (BASE64_STANDARD.encode(image.bytes), image.mime))
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to prepare base64 image");
+            error.placeholder()
+        })
+}
+
 fn is_remote_image_url(image_url: &str) -> bool {
     image_url.split_once(':').is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
@@ -490,6 +550,10 @@ fn decode_data_url(
             "only base64 data URLs are supported".to_owned(),
         ));
     }
+    decode_base64(encoded, max_input_bytes)
+}
+
+fn decode_base64(encoded: &str, max_input_bytes: usize) -> Result<Vec<u8>, ImagePreparationError> {
     if encoded.len() > max_input_bytes {
         return Err(ImagePreparationError::ImageTooLarge {
             representation: "base64 payload",
@@ -602,7 +666,7 @@ fn load_for_prompt_bytes(
     Ok(image)
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(not(target_family = "wasm"), feature = "code-mode"))]
 pub(super) fn load_for_prompt_data_url(
     path: &Path,
     file_bytes: Vec<u8>,

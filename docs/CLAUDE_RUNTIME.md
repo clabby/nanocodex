@@ -107,6 +107,18 @@ They exercise native request ordering, invalid-input rejection, queued image
 freezing and replay after local file changes. These are transport/storage checks,
 not a measurement of model vision quality.
 
+Base64 images in client tool results are decoded with bounded memory and scaled
+so neither edge exceeds 3000 pixels before the result joins request history. The
+direct Messages API applies that limit once a request carries more than twenty
+images; preparing each image when it first arrives keeps earlier request bytes
+stable as the conversation grows. An image that cannot be decoded becomes a text
+omission inside the same result, which keeps its success status. URL and file
+sources pass through unchanged. Durable tool receipts keep the handler's original
+output, and a replayed receipt is prepared the same way. The low-level
+`ClaudeClient` sends caller-supplied images as given. Reproduce these journeys
+with `cargo test -p nanocodex-claude --test agent_loop tool_images` and
+`cargo test -p nanocodex-durability --features claude,sqlite --test claude image_receipt`.
+
 ## Native harness composition
 
 The facade's `Harness::builder().register(family, recipe).build()` is a reusable
@@ -522,7 +534,9 @@ These checkpoints currently encode whole provider-native JSON snapshots and cont
 
 The active estimate starts from the latest reported input, cache-read, cache-write and output usage. Newly queued text and tool receipts add a UTF-16 text estimate until the next provider response supplies an updated usage anchor. The configured automatic window is a trigger, not a guarantee that the preserved payload fits that size. The current reserve remains 20k output plus 13k headroom for supported coding models.
 
-Compaction summarizes the earlier prefix while preserving a pending assistant/tool round, including its signed thinking, opaque fields and complete tool results. Paused server-tool content retains the whole current assistant turn, including earlier calls whose results arrive in a later pause; no client results are fabricated. If this is the first tool round, the original user task is the summary prefix. A prior summary participates in later compaction, including repeated manual compaction with no intervening turn.
+Compaction summarizes the earlier prefix while preserving a pending assistant/tool round's tool calls, opaque fields and complete tool results. A summary changes the prefix that retained `thinking` and `redacted_thinking` blocks are bound to, so requests packed with a summary omit those blocks and any messages they leave empty, including requests from sessions restored from compacted checkpoints. Reasoning received after compaction is replayed on later turns: committing that response stores the packed history and clears the summary. See Claude's [preserved-thinking contract](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
+
+Paused server-tool content retains calls and results across the whole current assistant turn, including earlier calls whose results arrive in a later pause; no client results are fabricated. If this is the first tool round, the original user task is the summary prefix. A prior summary participates in later compaction, including repeated manual compaction with no intervening turn.
 
 The summary contract requests current task scope, latest user corrections,
 authorization boundaries, verified work, unresolved actions with available IDs,
@@ -563,7 +577,7 @@ Bash requires an injected sandbox executor; web tools require explicit provider/
 
 ## Coverage and limits
 
-The [SQLite integration suite](../crates/nanocodex-durability/tests/claude.rs) runs the public builder and localhost Messages/SSE journey through real store reopen. Its fault matrix learns the write boundaries of a model/tool/automatic-compaction operation, then fails every observed write both before commit and after commit with a lost acknowledgement. It checks frozen request configuration, terminal replay, committed-effect reuse and task-board reconstruction, while allowing an uncommitted external effect to run again. Other scenarios cover signed compaction suffixes, discovery/container recovery, sticky interruption notices, detached clients, owner fencing, cancellation during recovery, missing task boards and aborted admission/compaction callers.
+The [SQLite integration suite](../crates/nanocodex-durability/tests/claude.rs) runs the public builder and localhost Messages/SSE journey through real store reopen. Its fault matrix learns the write boundaries of a model/tool/automatic-compaction operation, then fails every observed write both before commit and after commit with a lost acknowledgement. It checks frozen request configuration, terminal replay, committed-effect reuse and task-board reconstruction, while allowing an uncommitted external effect to run again. Other scenarios cover reasoning invalidation at compaction, retained opaque tool receipts, discovery/container recovery, sticky interruption notices, detached clients, owner fencing, cancellation during recovery, missing task boards and aborted admission/compaction callers.
 
 Reproduce that coverage with `cargo test -p nanocodex-durability --features claude,sqlite --test claude`. The separate [host adapter tests](../crates/nanocodex-claude-tools/src/host_tests.rs) cover pending questions, host-owned background task identity/stop, and denied or unsupported input. The [native caller MCP journey](../crates/nanocodex-claude/tests/mcp_native.rs) uses actual loopback JSON-RPC HTTP to exercise intact input/context, live schema refresh/removal, error status, structured results, metadata and ordered media. The caller owns discovery/transport; the library journey does not establish the shipped CLI configuration or full MCP transport parity. The [builder-level host integration tests](../crates/nanocodex-claude/tests/host_tools.rs) also exercise real Messages continuations: answers stay pending until the host responds, host failures remain error results, structured results and metadata survive on tool events, image output becomes Claude image content, and unsupported audio returns an explicit error. These synthetic journeys establish boundary behavior, not a deployed product's host services or live provider parity.
 
