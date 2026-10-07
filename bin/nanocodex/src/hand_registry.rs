@@ -92,7 +92,7 @@ pub(crate) async fn list() -> Result<()> {
         println!("No Hands are registered on this account.");
         return Ok(());
     }
-    println!("{:<42}  {:<24}  {:<10}  {}", "ID", "NAME", "KIND", "HEALTH");
+    println!("{:<42}  {:<24}  {:<10}  HEALTH", "ID", "NAME", "KIND");
     for hand in &hands {
         let field = |key: &str| {
             hand.get(key)

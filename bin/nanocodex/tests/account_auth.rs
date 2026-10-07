@@ -19,10 +19,14 @@ fn cli_binary() -> PathBuf {
         std::env::var_os("NANOCODEX2_TEST_BINARY")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(binary))
+    } else if let Some(binary) = option_env!("CARGO_BIN_EXE_nanocodex") {
+        std::env::var_os("NANOCODEX_TEST_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(binary))
     } else {
         std::env::var_os("NANOCODEX_TEST_BINARY")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(option_env!("CARGO_BIN_EXE_nanocodex").unwrap()))
+            .expect("account_auth requires a Cargo-built CLI binary or NANOCODEX_TEST_BINARY")
     }
 }
 
