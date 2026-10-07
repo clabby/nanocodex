@@ -1238,3 +1238,167 @@ async fn context_exhaustion_rejects_partial_client_calls_and_unresolved_server_e
         task.abort();
     }
 }
+
+// Context recovery sends a real summarization request. The documented thinking
+// matrix rejects `thinking: disabled` on Opus 5.5, Sonnet 5.5 and Fable 5.1
+// (https://platform.claude.com/docs/en/about-claude/models/extended-thinking-models),
+// so Opus 5.5/Fable 5.1 use adaptive thinking at low effort and Sonnet 5.5 its
+// lowest setting, between_tools; older models keep the text-only disabled request. No signed pre-summary reasoning may be replayed.
+#[tokio::test]
+async fn context_recovery_summary_uses_thinking_mode_each_model_accepts() {
+    const REJECTS_DISABLED: [&str; 3] =
+        ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"];
+    const ACCEPTS_DISABLED: [&str; 3] =
+        ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
+    for model in REJECTS_DISABLED.into_iter().chain(ACCEPTS_DISABLED) {
+        let exhausted = vec![
+            json!({"type":"thinking","thinking":"","signature":"stale-signature"}),
+            json!({"type":"text","text":"partial answer"}),
+        ];
+        let (client, requests, task) = server(
+            move |index, _| match index {
+                1 => (pending_round(), "tool_use", 10),
+                2 => (exhausted.clone(), "model_context_window_exceeded", 10),
+                3 => (text("Preserve the task"), "end_turn", 10),
+                _ => (text("completed after recovery"), "end_turn", 10),
+            },
+            None,
+        )
+        .await;
+        let mut builder = Nanocodex::builder(Claude::new(client, model));
+        if model != "claude-haiku-4-5" {
+            builder = builder.adaptive_thinking();
+        }
+        let effects = Arc::new(AtomicUsize::new(0));
+        let counter = effects.clone();
+        let (agent, _) = builder
+            .tool(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("receipt".into()) }
+            })
+            .build()
+            .unwrap();
+        let result = agent
+            .prompt("perform effects once")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        assert_eq!(
+            result.final_message(),
+            "completed after recovery",
+            "{model}"
+        );
+        // Both calls in the pending round ran once; recovery never repeats them.
+        assert_eq!(effects.load(Ordering::SeqCst), 2, "{model}");
+        let log = requests.lock().unwrap();
+        assert_eq!(log.len(), 4, "{model}");
+        let summary = &log[2];
+        assert_eq!(summary["model"], model);
+        assert_eq!(summary["tool_choice"], json!({"type":"none"}), "{model}");
+        assert!(
+            !summary["messages"].to_string().contains("stale-"),
+            "{model}"
+        );
+        // Bounded summary behavior is unchanged: no output budget increase.
+        assert_eq!(summary["max_tokens"], 4096, "{model}");
+        match model {
+            "claude-opus-5-5" | "claude-fable-5-1" => {
+                assert_eq!(summary["thinking"], json!({"type":"adaptive"}), "{model}");
+                assert_eq!(summary["output_config"], json!({"effort":"low"}), "{model}");
+            }
+            "claude-sonnet-5-5" => {
+                assert_eq!(
+                    summary["thinking"],
+                    json!({"type":"between_tools"}),
+                    "{model}"
+                );
+                assert_eq!(summary["output_config"], json!({"effort":"low"}), "{model}");
+            }
+            _ => {
+                assert_eq!(summary["thinking"], json!({"type":"disabled"}), "{model}");
+                assert!(summary.get("output_config").is_none(), "{model}");
+            }
+        }
+        // The recovered task returns to the session's configured policy.
+        assert_eq!(log[3]["thinking"], log[0]["thinking"], "{model}");
+        assert_eq!(log[3]["output_config"], log[0]["output_config"], "{model}");
+        assert!(
+            !log[3]["messages"].to_string().contains("stale-"),
+            "{model}"
+        );
+        task.abort();
+    }
+}
+
+// If a thinking-capable model spends the unchanged 4096-token summary budget on
+// reasoning, the truncated summary is rejected atomically and the failure leaves
+// the retained work available; a later manual compaction can still recover.
+#[tokio::test]
+async fn context_recovery_summary_truncated_by_max_tokens_fails_without_losing_state() {
+    let (client, requests, task) = server(
+        |index, _| match index {
+            1 => (pending_round(), "tool_use", 10),
+            2 => (
+                vec![json!({"type":"text","text":"partial answer"})],
+                "model_context_window_exceeded",
+                10,
+            ),
+            3 => (
+                vec![json!({"type":"thinking","thinking":"","signature":"summary-reasoning"})],
+                "max_tokens",
+                10,
+            ),
+            4 => (text("Preserve the task"), "end_turn", 10),
+            _ => (text("recovered"), "end_turn", 10),
+        },
+        None,
+    )
+    .await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "claude-opus-5-5"))
+        .adaptive_thinking()
+        .tool(tool(), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok("receipt".into()) }
+        })
+        .build()
+        .unwrap();
+    let error = agent
+        .prompt("perform effects once")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("did not end normally"),
+        "{error}"
+    );
+    {
+        let log = requests.lock().unwrap();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[2]["max_tokens"], 4096);
+    }
+    // pending_round() has two tool calls; each ran exactly once before the
+    // summary was rejected.
+    assert_eq!(effects.load(Ordering::SeqCst), 2);
+    agent.compact().await.unwrap();
+    let result = agent
+        .prompt("continue without repeating effects")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    assert_eq!(result.final_message(), "recovered");
+    let log = requests.lock().unwrap();
+    assert!(!log[4]["messages"].to_string().contains("summary-reasoning"));
+    // The rejected summary did not drop completed effects: their receipts are
+    // still the input to the later manual summary, and no tool ran again.
+    assert!(log[3]["messages"].to_string().contains("receipt"));
+    assert_eq!(effects.load(Ordering::SeqCst), 2);
+    task.abort();
+}
