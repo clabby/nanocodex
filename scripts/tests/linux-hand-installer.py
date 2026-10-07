@@ -56,6 +56,16 @@ try:
     inside('systemd-run','--unit=fixture-account','/usr/bin/node','/fixture/cloud.cjs')
     wait(lambda: fetch('/evidence',ok=False).returncode==0)
     assert inside('test','-e','/opt/nanocodex/account.env',ok=False).returncode != 0
+    # Public bootstrap schedules updates before Hand preparation. A headless
+    # login has no session bus; that must not prevent the actual install flow.
+    updater=['env','-u','DBUS_SESSION_BUS_ADDRESS','-u','XDG_RUNTIME_DIR',
+             '/fixture/bin/nanocodex','update','--auto']
+    automatic=user(*updater,'enable','--nightly')
+    assert 'timer not started' in automatic.stdout, automatic.stdout
+    updater_status=user(*updater,'status').stdout
+    assert 'enabled=true' in updater_status and 'unavailable' in updater_status, updater_status
+    user(*updater,'disable')
+    assert 'configured=false' in user(*updater,'status').stdout
     prepared=user('/fixture/bin/nanocodex','hand','install','--prepare','--executable','/fixture/bin/nanocodex2')
     record=json.loads(inside('cat','/opt/nanocodex/installation.json').stdout)
     assert record['pending_login'] is True and record['service_uid']==1000, record
@@ -102,7 +112,7 @@ try:
     assert not [e for e in final['events'] if e['type']=='rejected'], final
     summary={'result':'PASS','machine_id':machine['id'],'daemon_pid':original_pid,'account_publishers':len(publishers),
              'screen_catalogs':len(screens),'service_uid':record['service_uid'],'observers':2,
-             'logged_out_background_components':True,'initial_components_state':preparation_state,
+             'logged_out_background_components':True,'logged_out_updater_without_session_bus':True,'initial_components_state':preparation_state,
              'missing_desktop_packages_installed':True,'private_credentials':True,'ambient_key_ignored':True,
              'daemon_survives_clients':True,'idempotent_setup':True}
     (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')

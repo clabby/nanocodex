@@ -51,6 +51,7 @@ fn entry_exists(path: &Path) -> Result<bool> {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn should_install_default(root: &Path, schedule: &Path) -> Result<bool> {
     // Even a dangling link counts as an existing entry: never replace it implicitly.
     Ok(!entry_exists(&opt_out_path(root))? && !entry_exists(schedule)?)
