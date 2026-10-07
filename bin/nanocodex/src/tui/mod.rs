@@ -259,6 +259,7 @@ enum WorkerEvent {
     TurnFinished {
         target: PaneId,
         main_branch_id: Option<u64>,
+        turn_id: Option<String>,
         error: Option<String>,
     },
     SteerAdmitted {
@@ -1569,9 +1570,10 @@ fn handle_worker_update(
         WorkerEvent::TurnFinished {
             target,
             main_branch_id,
+            turn_id,
             error,
         } => {
-            app.turn_finished(target, main_branch_id, error);
+            app.turn_finished(target, main_branch_id, turn_id.as_deref(), error);
             request_navigated_branch_switch(app, commands)?;
         }
         WorkerEvent::TurnTraceStarted { .. } | WorkerEvent::TurnTraceRejected { .. } => {}
@@ -2327,6 +2329,7 @@ impl AgentWorker {
                     drop(self.updates.send(WorkerEvent::TurnFinished {
                         target,
                         main_branch_id: None,
+                        turn_id: None,
                         error: Some("BTW branch is not available".to_owned()),
                     }));
                     return false;
@@ -2493,6 +2496,7 @@ impl AgentWorker {
                 drop(self.updates.send(WorkerEvent::TurnFinished {
                     target: PaneId::Main,
                     main_branch_id: Some(self.main.id),
+                    turn_id: None,
                     error: Some(error),
                 }));
             }
@@ -2957,6 +2961,7 @@ impl AgentWorker {
         drop(self.updates.send(WorkerEvent::TurnFinished {
             target: finished.target,
             main_branch_id,
+            turn_id: Some(finished.canonical_id),
             error: finished.error,
         }));
     }
@@ -2983,6 +2988,7 @@ async fn start_turn(
                 let _ = updates.send(WorkerEvent::TurnFinished {
                     target: target.pane,
                     main_branch_id: target.main_branch_id,
+                    turn_id: None,
                     error: Some(error),
                 });
                 return None;
@@ -2999,6 +3005,7 @@ async fn start_turn(
                 let _ = updates.send(WorkerEvent::TurnFinished {
                     target: target.pane,
                     main_branch_id: target.main_branch_id,
+                    turn_id: None,
                     error: Some(error),
                 });
                 return None;
@@ -3034,6 +3041,7 @@ async fn start_turn(
         Ok(turn) => {
             *next_turn_id = next_turn_id.saturating_add(1);
             let canonical_id = turn.id().to_owned();
+            let finished_turn_id = canonical_id.clone();
             let control = turn.control();
             let finished = finished.clone();
             let agent = agent.clone();
@@ -3072,6 +3080,7 @@ async fn start_turn(
                         telemetry::elapsed_ns(started_at, Instant::now()),
                     );
                     drop(finished.send(FinishedTurn {
+                        canonical_id: finished_turn_id,
                         persistence_succeeded,
                         id,
                         target: target.pane,
@@ -3108,6 +3117,7 @@ async fn start_turn(
             drop(updates.send(WorkerEvent::TurnFinished {
                 target: target.pane,
                 main_branch_id: target.main_branch_id,
+                turn_id: None,
                 error: Some(error.to_string()),
             }));
             None
@@ -3272,6 +3282,7 @@ fn report_cancel_outcome(
 }
 
 struct FinishedTurn {
+    canonical_id: String,
     persistence_succeeded: bool,
     id: u64,
     target: PaneId,
@@ -5360,6 +5371,7 @@ mod tests {
             UiAction::Worker(WorkerEvent::TurnFinished {
                 target: PaneId::Main,
                 main_branch_id: Some(0),
+                turn_id: None,
                 error: None,
             }),
             &commands,
@@ -5382,6 +5394,7 @@ mod tests {
             UiAction::Worker(WorkerEvent::TurnFinished {
                 target: PaneId::Main,
                 main_branch_id: Some(0),
+                turn_id: None,
                 error: None,
             }),
             &commands,
@@ -5532,6 +5545,7 @@ mod tests {
                         target: PaneId::Main,
                         main_branch_id: Some(0),
                         error: Some(error),
+                        ..
                     } = update
                     {
                         assert!(error.contains("agent stopped"));
@@ -5769,6 +5783,7 @@ mod tests {
                         target: PaneId::Main,
                         main_branch_id: Some(0),
                         error: None,
+                        ..
                     })
                 ) {
                     break;
@@ -5830,11 +5845,13 @@ mod tests {
                         target: PaneId::Main,
                         main_branch_id: Some(0),
                         error: None,
+                        ..
                     }) => parent_finished = true,
                     Some(WorkerEvent::TurnFinished {
                         target: PaneId::Main,
                         main_branch_id: Some(1),
                         error: None,
+                        ..
                     }) => branch_finished = true,
                     _ => {}
                 }

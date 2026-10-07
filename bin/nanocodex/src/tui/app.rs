@@ -275,7 +275,8 @@ pub(super) struct Conversation {
     streamed_this_turn: bool,
     first_response_pending: bool,
     first_response_redraw_pending: bool,
-    pending_run_error: Option<String>,
+    pending_run_error: Option<(Option<String>, String)>,
+    displayed_turn_errors: HashSet<(String, String)>,
     run_started_at: Option<Instant>,
     pending_code_execs: HashMap<String, PendingCodeExec>,
     hidden_terminal_calls: HashMap<String, i64>,
@@ -311,6 +312,7 @@ impl Conversation {
             first_response_pending: false,
             first_response_redraw_pending: false,
             pending_run_error: None,
+            displayed_turn_errors: HashSet::new(),
             run_started_at: None,
             pending_code_execs: HashMap::new(),
             hidden_terminal_calls: HashMap::new(),
@@ -401,11 +403,27 @@ impl Conversation {
         };
     }
 
-    fn turn_finished(&mut self, error: Option<String>) {
+    fn turn_finished(&mut self, turn_id: Option<&str>, error: Option<String>) {
         self.pending_turns = self.pending_turns.saturating_sub(1);
         if let Some(error) = error {
-            self.push_output(TranscriptItem::Error(error));
+            self.push_turn_error(turn_id, error);
         }
+    }
+
+    fn push_turn_error(&mut self, turn_id: Option<&str>, error: String) {
+        if let Some(turn_id) = turn_id {
+            // The lifecycle stream and result callback can describe the same failure
+            // in either order. Unidentified errors and other turns remain independent.
+            let duplicate = !self
+                .displayed_turn_errors
+                .insert((turn_id.to_owned(), error.clone()));
+            tracing::trace!(target: "nanocodex", turn_id = %turn_id, duplicate = duplicate,
+                "TUI turn error presentation");
+            if duplicate {
+                return;
+            }
+        }
+        self.push_output(TranscriptItem::Error(error));
     }
 
     fn on_agent_event(&mut self, event: &AgentEvent) -> bool {
@@ -475,13 +493,17 @@ impl Conversation {
             }
             AgentEventKind::RunError => {
                 if let Ok(AgentEventData::Run(RunEvent::Error(payload))) = event.data() {
-                    self.pending_run_error = Some(payload.message);
+                    let turn_id = event
+                        .decode_payload::<serde_json::Value>()
+                        .ok()
+                        .and_then(|payload| payload["turn_id"].as_str().map(str::to_owned));
+                    self.pending_run_error = Some((turn_id, payload.message));
                 }
             }
             AgentEventKind::RunCompleted => {
                 self.capture_terminal_cost(event);
-                if let Some(error) = self.pending_run_error.take() {
-                    self.push_output(TranscriptItem::Error(error));
+                if let Some((turn_id, error)) = self.pending_run_error.take() {
+                    self.push_turn_error(turn_id.as_deref(), error);
                 }
                 self.running = false;
                 self.run_started_at = None;
@@ -855,8 +877,8 @@ impl Conversation {
             self.pending_run_error = None;
             "Cancelled".clone_into(&mut self.status);
         } else {
-            if let Some(error) = self.pending_run_error.take() {
-                self.push_output(TranscriptItem::Error(error));
+            if let Some((turn_id, error)) = self.pending_run_error.take() {
+                self.push_turn_error(turn_id.as_deref(), error);
             }
             "Turn failed".clone_into(&mut self.status);
         }
@@ -2702,6 +2724,7 @@ impl App {
         &mut self,
         target: PaneId,
         main_branch_id: Option<u64>,
+        turn_id: Option<&str>,
         error: Option<String>,
     ) {
         match target {
@@ -2716,12 +2739,12 @@ impl App {
                         .map(|branch| &mut branch.conversation)
                 };
                 if let Some(conversation) = conversation {
-                    conversation.turn_finished(error);
+                    conversation.turn_finished(turn_id, error);
                 }
             }
             PaneId::Btw(_) => {
                 if let Some(conversation) = self.conversation_mut(target) {
-                    conversation.turn_finished(error);
+                    conversation.turn_finished(turn_id, error);
                 }
             }
         }
@@ -4450,7 +4473,7 @@ mod tests {
         app.toggle_focus();
         assert_eq!(app.focus, PaneId::Btw(id));
         assert!(app.btw_busy());
-        app.turn_finished(PaneId::Btw(id), None, None);
+        app.turn_finished(PaneId::Btw(id), None, None, None);
         assert!(!app.btw_busy());
         app.close_btw(id);
         assert_eq!(app.focus, PaneId::Main);
@@ -5075,7 +5098,7 @@ mod tests {
         assert_eq!(source.status, "Thinking");
 
         app.main.pending_turns = 1;
-        app.turn_finished(PaneId::Main, Some(0), None);
+        app.turn_finished(PaneId::Main, Some(0), None, None);
         assert_eq!(app.main.pending_turns, 1);
         assert_eq!(app.main_branches[0].conversation.pending_turns, 0);
     }
