@@ -7,7 +7,8 @@ macOS path has a small Nanocodex MCP/lifecycle host for application consent and
 native policy compatibility; it does not bundle or run the official Codex CLI
 or app server. It enables upstream `browser,computer` surfaces and TinySky through an own
 native-message relay. Setup registers per-user manifests for supported installed
-browsers and preserves conflicting registrations. The compatible extension must
+browsers and preserves conflicting registrations. A conflict is reported in the
+browser bridge receipt without blocking the native computer-use runtime. The compatible extension must
 be installed separately; setup does not open browsers or modify profiles. Automatic Windows upstream setup is disabled pending native-helper verification.
 The opt-in Linux Sky host runs without the Codex CLI; it requires a compatible
 upstream runtime and an X11/Xwayland desktop. Native protected-target

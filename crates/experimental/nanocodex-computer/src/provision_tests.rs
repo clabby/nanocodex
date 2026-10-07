@@ -804,7 +804,6 @@ fn full_setup_registers_browser_bridge_and_preserves_conflicts() {
         provision(&root, &home, &browsers, false, &mut commands).unwrap(),
         receipt
     );
-    let previous_receipt = fs::read(root.join("provider.json")).unwrap();
     let first_manifest = PathBuf::from(paths[0].as_str().unwrap());
     let conflicting_manifest = PathBuf::from(paths[1].as_str().unwrap());
     // Even if the first browser needs repair, preflight protects it when another
@@ -813,13 +812,20 @@ fn full_setup_registers_browser_bridge_and_preserves_conflicts() {
     let external =
         br#"{"name":"com.openai.codexextension","path":"/Applications/Codex.app/official-host"}"#;
     fs::write(&conflicting_manifest, external).unwrap();
-    let error = provision(&root, &home, &browsers, false, &mut commands).unwrap_err();
-    assert!(error.contains("manifest conflict"), "{error}");
+    let conflict = provision(&root, &home, &browsers, false, &mut commands).unwrap();
+    assert_eq!(conflict["status"], "installed");
+    assert_eq!(conflict["build"], receipt["build"]);
+    assert_eq!(conflict["browser_bridge"]["status"], "conflict");
+    assert_eq!(
+        conflict["browser_bridge"]["conflicts"],
+        serde_json::json!([conflicting_manifest])
+    );
     assert!(!first_manifest.exists());
     assert_eq!(fs::read(&conflicting_manifest).unwrap(), external);
     assert_eq!(
-        fs::read(root.join("provider.json")).unwrap(),
-        previous_receipt
+        serde_json::from_slice::<serde_json::Value>(&fs::read(root.join("provider.json")).unwrap())
+            .unwrap(),
+        conflict
     );
     assert_eq!(
         fs::read_link(root.join("current")).unwrap(),
@@ -829,7 +835,7 @@ fn full_setup_registers_browser_bridge_and_preserves_conflicts() {
     let recovered = provision(&root, &home, &browsers, false, &mut commands).unwrap();
     assert_eq!(recovered, receipt);
     eprintln!(
-        "fixture setup: installed 2 browser manifests; cached rerun unchanged; official registration conflict preserved receipt and all other browser paths; recovery succeeded"
+        "fixture setup: installed 2 browser manifests; cached rerun unchanged; official registration conflict preserved all browser paths while native CUA remained installed; recovery succeeded"
     );
 }
 

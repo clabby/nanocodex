@@ -78,8 +78,10 @@ and input. VNC is not required. Wayland remains the Linux compositor/input backe
 
 ## Agent control and human takeover
 
-Agents use a Hand's attached `cua_repl` provider through Code Mode. Call
-`tools.mcp__cua_repl__js({workdir:"/laptop"})` to discover its contract, then add
+Agents share a Hand's attached `cua_repl` provider. Codex calls
+`tools.mcp__cua_repl__js({workdir:"/laptop"})` inside Code Mode; Claude calls the
+declared `mcp__cua_repl__js` tool directly with `{workdir:"/laptop"}`.
+Discover its contract first, then add
 the provider arguments alongside `workdir` on each invocation. Nanocodex strips
 only `workdir` and forwards the remaining arguments unchanged. There is no
 `select_computer` or global desktop selection. Calls to different Hands can run

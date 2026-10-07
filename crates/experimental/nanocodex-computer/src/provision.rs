@@ -1140,6 +1140,7 @@ mod mac {
         let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
         let support = home.join("Library/Application Support");
         let mut planned = Vec::new();
+        let mut conflicts = Vec::new();
         for (app, directory) in BROWSERS {
             if !applications.iter().any(|base| base.join(app).is_dir()) {
                 continue;
@@ -1174,16 +1175,23 @@ mod mac {
                     .ok()
                     .is_some_and(|value| owned_browser_manifest(root, &value));
                 if !owned {
-                    return Err(format!(
-                        "Browser native-messaging manifest conflict at {}. Existing registration was preserved; resolve ownership explicitly before rerunning setup",
-                        path.display()
-                    ));
+                    conflicts.push(path.clone());
                 }
             }
             planned.push((path, previous));
         }
         // Preflight every browser before publishing any manifest. A conflicting
-        // official Codex registration never causes a partial takeover.
+        // official Codex registration never causes a partial takeover or blocks
+        // the independent native computer-use runtime.
+        if !conflicts.is_empty() {
+            return Ok(serde_json::json!({
+                "status": "conflict",
+                "manifest_name": BROWSER_HOST_NAME,
+                "manifests": [],
+                "conflicts": conflicts,
+                "message": "Existing browser registrations were preserved; resolve ownership explicitly to enable the Nanocodex browser bridge",
+            }));
+        }
         for (path, previous) in &planned {
             if previous.as_deref() == Some(bytes.as_slice()) {
                 continue;
@@ -1449,8 +1457,12 @@ mod mac {
             .zip(ranges)
             .map(|((output, headers), &(start, end))| {
                 commands.check_cancelled()?;
-                if io(fs::metadata(&output))?.len() != end - start + 1 {
-                    return Err("OpenAI archive returned the wrong byte count".into());
+                let received = io(fs::metadata(&output))?.len();
+                let expected = end - start + 1;
+                if received != expected {
+                    return Err(format!(
+                        "OpenAI archive returned the wrong byte count for range {start}-{end}: expected {expected}, received {received}. The upstream appcast and archive may be inconsistent; no new runtime was selected"
+                    ));
                 }
                 let total = content_range(&io(fs::read(headers))?, start, end)?;
                 if total <= end {
