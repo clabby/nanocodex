@@ -8056,6 +8056,8 @@ export class DurableAgentSession extends DurableComputerObject {
         input = promptInputText(this.#startupContext.enrich(id, input));
         assertActive();
       }
+      await this.#resolveTurnOriginHand(id, authorization, { sessionId: agent.sessionId });
+      assertActive();
       input = promptInputText(this.#startupContext.enrichTurnOrigin(id, input,
         this.#accountMachines(authorization, { sessionId: agent.sessionId })));
       // Claude receives queued voice lifecycle/transcript context inline.
@@ -8893,6 +8895,9 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#eventTurnQueue.push(row.id);
         return agent;
       });
+      const originReady = dispatchInputJson !== undefined || row.state === "cancelling"
+        ? Promise.resolve() : agentReady.then(agent => this.#resolveTurnOriginHand(row.id,
+          parseTurnAuthorization(row.authorization_json), { sessionId: agent.sessionId }));
       let runtimeReadyAt = admissionStartedAt;
       void agentReady.then(() => { runtimeReadyAt = performance.now(); }, () => {});
       const bootstrap = dispatchInputJson !== undefined || row.state === "cancelling"
@@ -8904,6 +8909,7 @@ export class DurableAgentSession extends DurableComputerObject {
             const [account, agent] = await Promise.all([
               this.#startupAccountInfo(session, authorization),
               agentReady,
+              originReady,
             ]);
             assertActive();
             return {
@@ -8923,7 +8929,7 @@ export class DurableAgentSession extends DurableComputerObject {
         );
       // Drain construction even if bootstrap fails, so its admission-queue
       // publication cannot race the failure cleanup below.
-      const [runtimeResult, bootstrapResult] = await Promise.allSettled([agentReady, bootstrap]);
+      const [runtimeResult, bootstrapResult] = await Promise.allSettled([agentReady, Promise.all([bootstrap, originReady])]);
       const bootstrapReadyAt = performance.now();
       if (runtimeResult.status === "rejected") throw runtimeResult.reason;
       if (bootstrapResult.status === "rejected") throw bootstrapResult.reason;
@@ -9841,6 +9847,25 @@ export class DurableAgentSession extends DurableComputerObject {
       console.warn({ type: "managed.superseded_agent_shutdown_failed", error_kind: errorKind(error) });
     }));
     return shutdown;
+  }
+
+  async #resolveTurnOriginHand(turnId: string, authorization: TurnAuthorization | undefined,
+    context: Pick<ToolContext, "sessionId" | "subagent">): Promise<void> {
+    const hand = this.#startupContext.reportedTurnHand(turnId);
+    if (!hand?.startsWith("user:") || !this.#hasFullAccountAuthority(authorization)
+      || !this.#canUseExecutionNamespace(authorization) || !this.#accountHostedTools
+      || this.#accountMachines(authorization, context).some(machine => machine.id === hand)) return;
+    // This account-scoped selected lookup has its own deadline and never joins
+    // the background inventory. Unknown/foreign claims remain unattributed.
+    const lookup = this.#accountHostedTools.refreshMachine(hand.slice("user:".length), context).catch(() => {});
+    // Attribution gets a shorter admission budget than an explicit Hand tool.
+    // A late authorized catalog update may serve environment(), but cannot
+    // rewrite the startup snapshot or frozen dispatch input. The provider
+    // checks its authorization generation again before publishing that update.
+    this.ctx.waitUntil(lookup);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([lookup, new Promise<void>(resolve => { timer = setTimeout(resolve, 1_500); })]); }
+    finally { clearTimeout(timer); }
   }
 
   #refreshAccountHostedTools(session: SessionRow): void {

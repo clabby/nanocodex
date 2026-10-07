@@ -111,6 +111,12 @@ export class ManagedStartupContext {
     return { transport: row?.transport ?? "unknown", ...projectCaller(row ? JSON.parse(row.context_json) as CallerContext : {}, hands) };
   }
 
+  /** Raw attribution is only a lookup hint; account discovery must authorize it. */
+  reportedTurnHand(turnId: string): string | undefined {
+    const snapshot = this.originSnapshot(turnId);
+    return snapshot ? (JSON.parse(snapshot.context_json) as CallerContext).reported?.hand : undefined;
+  }
+
   /** Capture before routing yields: archival may remove a temporary source row. */
   originSnapshot(turnId: string) {
     return this.storage.sql.exec<{ transport: StartupTransport; context_json: string }>(

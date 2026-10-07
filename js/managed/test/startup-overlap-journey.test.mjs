@@ -8,6 +8,8 @@ import { test } from "node:test";
 import { build } from "esbuild";
 import { Miniflare } from "miniflare";
 import WebSocket from "ws";
+import { createTools } from "nanocodex/tools";
+import { createAttachment } from "nanocodex-tools/attachment";
 
 // Actual account HTTP proxy/authentication, Managed Session, SQLite, R2,
 // Just Bash, SDK and WASM. Only the external account metadata/model/HTTP target
@@ -25,6 +27,30 @@ import worker, { DurableAgentSession, AccountHostedTools } from './src/index.ts'
 import { UserAccount as RealUserAccount, Organization, ApiKeyRecord, NonceStorage, ensureAccount, createApiKey, revokeApiKey } from './src/account-auth.ts';
 import { routeManaged } from '../account/worker/managedProxy.ts';
 export { DurableAgentSession, AccountHostedTools, Organization, ApiKeyRecord, NonceStorage };
+export class OriginAgentSession extends DurableAgentSession {
+  async fetch(request) {
+    const url=new URL(request.url);
+    if(url.pathname==='/fixture-origin-state') {
+      const turn=url.searchParams.get('turn');
+      return Response.json({
+        dispatch:this.ctx.storage.sql.exec('SELECT input_json FROM managed_turn_dispatch_chunks WHERE turn_id = ? ORDER BY chunk_index',turn).toArray().map(row=>row.input_json).join(''),
+        startup:this.ctx.storage.sql.exec('SELECT environment_json FROM managed_startup_environment WHERE turn_id = ?',turn).toArray(),
+        context:this.ctx.storage.sql.exec('SELECT content FROM managed_startup_context WHERE turn_id = ?',turn).toArray(),
+      });
+    }
+    return super.fetch(request);
+  }
+}
+export class OriginAccountHostedTools extends AccountHostedTools {
+  async fetch(request) {
+    if(new URL(request.url).pathname==='/snapshot') {
+      const body=await request.clone().json();
+      if(body.machine_id) await this.env.MODEL.getByName('startup').fetch('https://fixture.internal/origin-selected?machine='+encodeURIComponent(body.machine_id));
+      if(!body.machine_id) await this.env.MODEL.getByName('startup').fetch('https://fixture.internal/origin-inventory');
+    }
+    return super.fetch(request);
+  }
+}
 export class UserAccount extends RealUserAccount {
   constructor(state,env) { super(state,env); this.fixture=env.MODEL; }
   async fetch(request) {
@@ -62,6 +88,7 @@ export class FixtureSandbox extends DurableObject {
 }
 const codeCall = (name, callId, args) => ({type:'custom_tool_call',name:'exec',call_id:callId,input:'text(await tools.'+name+'('+JSON.stringify(args)+'));'});
 export class FixtureModel extends DurableObject {
+  originInventoryReleased=false; releaseOriginInventory; selectedReleased=false; releaseSelected;
   voiceHoldSent=false; voiceEnvironmentSent=false; voiceNewEnvironmentSent=false; originEnvironmentSent=false; walletEnvironmentSent=false; releaseVoice;
   holdPublication=true; releaseRegistration;
   walletEnabled=false; releaseWallet; holdVault=true; releaseVault; vaultReady=false; holdSetup=true; releaseSetup;
@@ -69,6 +96,11 @@ export class FixtureModel extends DurableObject {
   record(event,extra={}) { const row={type:'fixture.startup',event,at:Date.now(),...extra};this.events.push(row);console.info(row); }
   async fetch(request) {
     const url=new URL(request.url);
+    if(url.pathname==='/origin-selected') { const machine=url.searchParams.get('machine');this.record('origin.selected',{machine});if(machine==='stalled-origin-hand' && !this.selectedReleased) await new Promise(resolve=>{this.releaseSelected=resolve;});this.record('origin.selected.released',{machine});return new Response(null,{status:204}); }
+    if(url.pathname==='/release-selected') {this.selectedReleased=true;this.releaseSelected?.();this.originEnvironmentSent=false;return new Response(null,{status:204});}
+    if(url.pathname==='/hold-origin-inventory') {this.originInventoryReleased=false;return new Response(null,{status:204});}
+    if(url.pathname==='/origin-inventory') { if(!this.originInventoryReleased) await new Promise(resolve=>{this.releaseOriginInventory=resolve;}); return new Response(null,{status:204}); }
+    if(url.pathname==='/release-origin-inventory') {this.originInventoryReleased=true;this.releaseOriginInventory?.();return new Response(null,{status:204});}
     if(url.pathname==='/trace') return Response.json(this.events);
     if(url.pathname==='/release-voice') { this.releaseVoice?.();return new Response(null,{status:204}); }
     if(url.pathname==='/key-lookup') { this.record('key.lookup');return new Response(null,{status:204}); }
@@ -168,6 +200,8 @@ export class FixtureModel extends DurableObject {
 }
 export default {async fetch(request,env,ctx) {
   const url=new URL(request.url);
+  if(url.pathname==='/__origin-state') return env.NANOCODEX_SESSIONS.getByName(url.searchParams.get('agent')).fetch('https://session.internal/fixture-origin-state?turn='+url.searchParams.get('turn'));
+  if(url.pathname==='/__fixture-hand') return env.NANOCODEX_ACCOUNT_TOOLS.getByName(url.searchParams.get('owner')).fetch(new Request('https://account-tools.internal/tool-host',request));
   if(env.EDGE) {
     if(request.headers.get('x-fixture-direct-run')==='required') env={...env,NANOCODEX_BACKEND:{fetch(){throw Error('managed Worker hop is held');}}};
     return await routeManaged(request,env,url)??new Response(null,{status:404});
@@ -179,6 +213,8 @@ export default {async fetch(request,env,ctx) {
       subjectId:'api_key:'+user,credentialId:'fixture',capabilities:auth.grant.capabilities},'synthetic startup')});
   }
   if(url.pathname==='/__revoke-key') {const {user,id}=await request.json();return Response.json(await revokeApiKey(env,user,id));}
+  if(url.pathname==='/__release-selected' || url.pathname==='/__hold-origin-inventory') return env.MODEL.getByName('startup').fetch('https://fixture.internal/'+url.pathname.slice(3));
+  if(url.pathname==='/__release-origin-inventory') return env.MODEL.getByName('startup').fetch('https://fixture.internal/release-origin-inventory');
   if(url.pathname==='/__release-publication') return env.MODEL.getByName('startup').fetch('https://fixture.internal/release-publication');
   if(url.pathname==='/__trace') return env.MODEL.getByName('startup').fetch('https://fixture.internal/trace');
   if(url.pathname==='/__release-voice') return env.MODEL.getByName('startup').fetch('https://fixture.internal/release-voice');
@@ -187,7 +223,8 @@ export default {async fetch(request,env,ctx) {
 }};
 `;
 
-test("public HTTP and WebSocket startup omit wallet I/O while explicit environment remains live", { timeout: 90_000 }, async () => {
+const originOnly = process.env.NANOCODEX_STARTUP_ORIGIN_ONLY === "1";
+test(originOnly ? "cold authorized Hand origin and admission replay through account HTTP and WebSocket" : "public HTTP and WebSocket startup omit wallet I/O while explicit environment remains live", { timeout: 90_000 }, async () => {
   await mkdir(output, { recursive: true });
   const runtime = [], records = [], http = [];
   const capture = line => { runtime.push(line); const offset=line.indexOf('{"type":');if(offset>=0)try{records.push(JSON.parse(line.slice(offset)));}catch{} };
@@ -207,18 +244,29 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
     durableObjectsPersist:join(output,"sqlite"),r2Persist:join(output,"r2"),workers:[
       {...common,name:"edge",bindings:{EDGE:true},serviceBindings:{NANOCODEX_BACKEND:"managed"},
         durableObjects:{NANOCODEX_LIVE_API_KEYS:{className:"ApiKeyRecord",scriptName:"managed",useSQLite:true},
-          NANOCODEX_LIVE_SESSIONS:{className:"DurableAgentSession",scriptName:"managed",useSQLite:true}}},
+          NANOCODEX_LIVE_SESSIONS:{className:"OriginAgentSession",scriptName:"managed",useSQLite:true}}},
       {...common,name:"managed",bindings:{NANOCODEX_PERFORMANCE_TRACE:"true",MANAGED_AGENT_DIRECT_CREDENTIALS:"true",AGENT_IDLE_TIMEOUT_MS:"60000"},
-        durableObjects:{NANOCODEX_SESSIONS:{className:"DurableAgentSession",useSQLite:true},NANOCODEX_USERS:{className:"UserAccount",useSQLite:true},NANOCODEX_ORGANIZATIONS:{className:"Organization",useSQLite:true},
-          NANOCODEX_API_KEYS:{className:"ApiKeyRecord",useSQLite:true},NANOCODEX_AUTH:{className:"NonceStorage",useSQLite:true},NANOCODEX_ACCOUNT_TOOLS:{className:"AccountHostedTools",useSQLite:true},
+        durableObjects:{NANOCODEX_SESSIONS:{className:"OriginAgentSession",useSQLite:true},NANOCODEX_USERS:{className:"UserAccount",useSQLite:true},NANOCODEX_ORGANIZATIONS:{className:"Organization",useSQLite:true},
+          NANOCODEX_API_KEYS:{className:"ApiKeyRecord",useSQLite:true},NANOCODEX_AUTH:{className:"NonceStorage",useSQLite:true},NANOCODEX_ACCOUNT_TOOLS:{className:"OriginAccountHostedTools",useSQLite:true},
           MODEL:{className:"FixtureModel",useSQLite:true},NANOCODEX_MEMORY:{className:"FixtureModel",useSQLite:true},NANOCODEX_SANDBOXES:{className:"FixtureSandbox",useSQLite:true}},
         serviceBindings:{NANOCODEX:{name:"managed",entrypoint:"FixtureEgress"}},r2Buckets:["NANOCODEX_HISTORY","NANOCODEX_WORKSPACES"]},
     ]});
-  let failure, live, evidence={};
+  let failure, live, handAttachment, foreignAttachment, stalledAttachment, evidence={};
   try {
     const base=await mf.ready,backend=await mf.getWorker("managed");
     const fixture=async()=>{const response=await backend.fetch("https://fixture.internal/__fixture",{method:"POST",body:JSON.stringify({user:crypto.randomUUID()})});assert.equal(response.status,200);return response.json();};
-    const {token}=await fixture(),other=(await fixture()).token;
+    const {token,user}=await fixture(),foreign=await fixture(),other=foreign.token;
+    const handId="synthetic-origin-hand";
+    const handTools=await createTools({tools:{}});
+    const attachHand=async(owner,id)=>{
+      const attachment=createAttachment(handTools,{endpoint:"wss://fixture.internal/tool-host",transport:{async connect(){
+        const response=await backend.fetch("https://fixture.internal/__fixture-hand?owner="+owner,{headers:{upgrade:"websocket","x-nanocodex-owner-id":owner}});
+        const socket=response.webSocket; socket.accept(); return socket;
+      }}},{machines:[{id,name:"Synthetic Origin Hand",workspace:"/fixture",capabilities:["shell"]}],attachmentId:id});
+      assert.equal((await attachment.connect()).connected,true); return attachment;
+    };
+    handAttachment=await attachHand(user,handId);
+    foreignAttachment=await attachHand(foreign.user,"foreign-origin-hand");
     const call=async(path,method="GET",body,expected=200,credential=token,extra={})=>{
       const started=performance.now(),response=await fetch(new URL(path,base),{method,headers:{authorization:"Bearer "+credential,"content-type":"application/json",...extra},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(20000)});
       const raw=await response.text(),value=raw?JSON.parse(raw):null;http.push({path,method,status:response.status,elapsed_ms:performance.now()-started,value});assert.equal(response.status,expected,JSON.stringify(value));return value;
@@ -228,7 +276,7 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
     await call("/v1/agent-runs","POST",{input:null,settings},400);
     assert.equal((await (await backend.fetch("https://fixture.internal/__trace")).json()).length,0,"invalid input starts no metadata or model work");
     const started=performance.now();
-    const run=await call("/v1/agent-runs","POST",{input:"Reply STARTUP_OK",settings,configuration},201,token,{"idempotency-key":"startup-overlap", "x-nanocodex-client-context":JSON.stringify({client:"nanocodex2",timezone:"Europe/Athens"})});
+    const run=await call("/v1/agent-runs","POST",{input:"Reply STARTUP_OK",settings,configuration},201,token,{"idempotency-key":"startup-overlap", "x-nanocodex-client-context":JSON.stringify({client:"nanocodex2",timezone:"Europe/Athens",hand:"user:"+handId,native_cwd:"/fixture/project"})});
     const waitTurn=async (id,agentId=run.agent_id,credential=token)=>{
       for(let i=0;i<1000;i++){const value=await call(`/v1/agents/${agentId}/turns/${id}`,"GET",undefined,200,credential);assert.ok(!["failed","cancelled"].includes(value.state),JSON.stringify(value));if(value.state==="completed")return value;await delay(10);}
       throw Error("turn did not finish");
@@ -236,6 +284,7 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
     const cold=await waitTurn(run.turn_id),coldMs=performance.now()-started;assert.match(JSON.stringify(cold),/STARTUP_OK/);
     const coldTrace=await(await backend.fetch("https://fixture.internal/__trace")).json();
     assert.equal(coldTrace.some(row=>row.event==="publication.committed"),false,"first answer precedes held registry publication");
+    await backend.fetch("https://fixture.internal/__release-origin-inventory");
     await backend.fetch("https://fixture.internal/__release-publication");
     for(let i=0;;i++) {
       const trace=await(await backend.fetch("https://fixture.internal/__trace")).json();
@@ -374,20 +423,31 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
         .find(value=>value?.request_origin);
     };
     assert.equal(currentOrigins(requests[0]).at(-1).client.name,"nanocodex2");
+    assert.equal(currentOrigins(requests[0]).at(-1).hand?.key,"user:"+handId,"cold admission resolves the authorized reported Hand while full inventory is held");
+    assert.equal(currentOrigins(requests[0]).at(-1).native_cwd,"/fixture/project");
+    const firstContext=requests[0].input.flatMap(item=>item.content??[]).map(part=>part.text??"").join("\n");
+    const startupBlock=firstContext.match(/<startup_context>([\s\S]*?)<\/startup_context>/)?.[1];
+    assert.ok(startupBlock,"startup snapshot reaches provider before environment is called");
+    const startupOrigin=JSON.parse(startupBlock.match(/<request_origin>\s*([\s\S]*?)\s*<\/request_origin>/)[1]);
+    assert.deepEqual(startupOrigin,currentOrigins(requests[0]).at(-1),"startup and first current origin agree before environment");
     assert.equal(currentOrigins(requests[1]).at(-1).client.name,"iphone","retry from another device cannot replace admitted origin");
+    const selectedBefore=(await(await backend.fetch("https://fixture.internal/__trace")).json()).filter(row=>row.event==="origin.selected" && row.machine===handId).length;
+    assert.equal(selectedBefore,1,"cold attribution performs exactly one selected lookup");
     const originRequestOffset=inspectedRequests.length;
-    const envTurn=await call(`/v1/agents/${run.agent_id}/turns`,"POST",{id:crypto.randomUUID(),input:"Inspect current environment origin"},202,token,originHeaders("linux-cli"));
+    const envTurn=await call(`/v1/agents/${run.agent_id}/turns`,"POST",{id:crypto.randomUUID(),input:"Inspect current environment origin"},202,token,{"x-nanocodex-client-context":JSON.stringify({client:"linux-cli",hand:"user:"+handId,native_cwd:"/fixture/project",timezone:"UTC"})});
     await waitTurn(envTurn.turn_id);
     const envTrace=await(await backend.fetch("https://fixture.internal/__trace")).json();
+    assert.equal(envTrace.filter(row=>row.event==="origin.selected" && row.machine===handId).length,selectedBefore,"cached authorized origin adds no selected RPC");
     const envRequests=envTrace.filter(row=>row.event==="provider.request");
     assert.equal(currentOrigins(envRequests[originRequestOffset]).at(-1).client.name,"linux-cli");
     const liveEnvironment=environmentOutput(envRequests[originRequestOffset+1]);
     assert.equal(liveEnvironment.request_origin.client.name,"linux-cli","live environment reports this tool call's turn origin");
     assert.equal(liveEnvironment.request_origin.transport,"http");
     assert.equal(liveEnvironment.execution_preferences.advisory,true);
-    assert.equal(liveEnvironment.execution_preferences.origin_hand,null);
+    assert.equal(liveEnvironment.request_origin.hand.key,"user:"+handId);
+    assert.deepEqual(liveEnvironment.request_origin,currentOrigins(envRequests[originRequestOffset]).at(-1));
     const pending=await Promise.all(["web",undefined,"desktop"].map((client,index)=>call(`/v1/agents/${run.agent_id}/turns`,"POST",
-      {id:crypto.randomUUID(),input:"QUEUED_ORIGIN_"+index},202,token,originHeaders(client))));
+      {id:crypto.randomUUID(),input:"QUEUED_ORIGIN_"+index},202,token,client?{"x-nanocodex-client-context":JSON.stringify({client,hand:index===0?"user:unknown-origin-hand":"user:foreign-origin-hand",native_cwd:"/must-not-appear"})}:{})));
     for(const turn of pending) await waitTurn(turn.turn_id);
     const queuedTrace=await(await backend.fetch("https://fixture.internal/__trace")).json();
     const queuedRequests=queuedTrace.filter(row=>row.event==="provider.request").slice(originRequestOffset+2);
@@ -396,7 +456,7 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
       assert.ok(request,"queued request reaches real provider boundary");
       const origin=currentOrigins(request).at(-1);
       assert.equal(origin.client?.name??null,["web",null,"desktop"][index]);
-      assert.equal(origin.transport,"http");assert.equal(origin.hand,null);
+      assert.equal(origin.transport,"http");assert.equal(origin.hand,null);assert.equal(origin.native_cwd,undefined);
     }
     const socket=new WebSocket(new URL(`/v1/agents/${run.agent_id}/ws`,base).href.replace(/^http/,"ws"),
       {headers:{authorization:"Bearer "+token,...originHeaders("terminal-websocket")}});
@@ -416,7 +476,7 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
     const originRequests=originTrace.filter(row=>row.event==="provider.request");
     const wsOrigin=currentOrigins(originRequests.at(-1)).at(-1);
     assert.equal(wsOrigin.transport,"websocket");assert.equal(wsOrigin.client.name,"terminal-websocket");
-    evidence={...evidence,per_turn_origin:true,idempotent_origin:true,queued_origin_isolation:true,unknown_caller_cleared:true,websocket_origin:true,live_environment_origin:true};
+    evidence={...evidence,cold_authorized_hand:true,unknown_and_foreign_hand_rejected:true,per_turn_origin:true,idempotent_origin:true,queued_origin_isolation:true,unknown_caller_cleared:true,websocket_origin:true,live_environment_origin:true};
     // Keep a real typed run inside an admitted tool while two voice requests
     // steer it. Replaying the earlier receipt must not restore its older origin.
     const voice=crypto.randomUUID();
@@ -460,6 +520,52 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
     assert.equal(environmentOutput(newVoiceResult,"call_voice_new_origin").request_origin.client.name,"new-voice-device");
     await call(`/v1/agents/${run.agent_id}/realtime/stop`,"POST",{voice_session_id:voice,operation_id:crypto.randomUUID()});
     evidence={...evidence,voice_effective_origin:true,voice_origin_receipt_replay:true,voice_adopted_origin:true};
+    // A held account-authorized selected lookup must not consume its 10s tool
+    // deadline on admission. Keep full inventory gated as well, then release
+    // the selected result and inspect actual continued model history.
+    const stalledOwner=await fixture();
+    stalledAttachment=await attachHand(stalledOwner.user,"stalled-origin-hand");
+    await backend.fetch("https://fixture.internal/__hold-origin-inventory");
+    const stalledHeaders={"idempotency-key":"stalled-origin","x-nanocodex-client-context":JSON.stringify({client:"nanocodex2",hand:"user:stalled-origin-hand",native_cwd:"/fixture/stalled"})};
+    const stalledBody={input:"STALLED_ORIGIN_FIRST",settings};
+    const stalledStarted=performance.now();
+    const stalledRun=await call("/v1/agent-runs","POST",stalledBody,201,stalledOwner.token,stalledHeaders);
+    await waitTurn(stalledRun.turn_id,stalledRun.agent_id,stalledOwner.token);
+    const stalledMs=performance.now()-stalledStarted;
+    const stalledTrace=await(await backend.fetch("https://fixture.internal/__trace")).json();
+    const selectedStart=stalledTrace.find(row=>row.event==="origin.selected" && row.machine==="stalled-origin-hand");
+    assert.ok(selectedStart,"stalled case actually enters the selected RPC");
+    assert.equal(stalledTrace.some(row=>row.event==="origin.selected.released" && row.machine==="stalled-origin-hand"),false,"first answer precedes selected lookup release");
+    const stalledPrompt=stalledTrace.filter(row=>row.event==="provider.request").at(-1);
+    assert.ok(stalledPrompt.at-selectedStart.at>=1400,"admission gives lookup its 1.5s budget");
+    assert.ok(stalledMs<5000,"stalled selected RPC must not block admission for its 10s deadline: "+stalledMs);
+    assert.equal(currentOrigins(stalledPrompt).at(-1).hand,null);
+    assert.equal(currentOrigins(stalledPrompt).at(-1).native_cwd,undefined);
+    const frozenState=async()=>await(await backend.fetch("https://fixture.internal/__origin-state?agent="+stalledRun.agent_id+"&turn="+stalledRun.turn_id)).json();
+    const frozenFirst=await frozenState();
+    assert.match(frozenFirst.dispatch,/STALLED_ORIGIN_FIRST/);
+    assert.equal(JSON.parse(frozenFirst.startup[0].environment_json).request_origin.hand,null);
+    assert.ok(frozenFirst.context.length,"startup context is retained");
+    await backend.fetch("https://fixture.internal/__release-selected");
+    await backend.fetch("https://fixture.internal/__release-origin-inventory");
+    // Drain the authorized response before observing the cached origin on a
+    // subsequent admission; the previous enriched prompt must remain frozen.
+    await delay(100);
+    const stalledReplay=await call("/v1/agent-runs","POST",stalledBody,200,stalledOwner.token,stalledHeaders);
+    assert.equal(stalledReplay.turn_id,stalledRun.turn_id);
+    const lateTurn=await call(`/v1/agents/${stalledRun.agent_id}/turns`,"POST",{id:crypto.randomUUID(),input:"Inspect current environment origin"},202,stalledOwner.token,{"x-nanocodex-client-context":stalledHeaders["x-nanocodex-client-context"]});
+    await waitTurn(lateTurn.turn_id,stalledRun.agent_id,stalledOwner.token);
+    const lateTrace=await(await backend.fetch("https://fixture.internal/__trace")).json();
+    const latePrompt=lateTrace.filter(row=>row.event==="provider.request").at(-1);
+    assert.equal(environmentOutput(latePrompt).request_origin.hand.key,"user:stalled-origin-hand");
+    assert.deepEqual(await frozenState(),frozenFirst,"late catalog cannot rewrite retained frozen startup or dispatch prompt");
+    assert.equal(lateTrace.filter(row=>row.event==="origin.selected" && row.machine==="stalled-origin-hand").length,1,"replay and cached admission add no selected RPC");
+    evidence={...evidence,selected_lookup_budget_ms:1500,stalled_first_answer_ms:stalledMs,late_catalog_preserves_frozen_prompt:true,cached_origin_no_extra_rpc:true};
+    if(originOnly) {
+      console.log("STARTUP_ORIGIN_EVIDENCE",JSON.stringify({...evidence,trace:undefined,wire:undefined,output}));
+      return;
+    }
+
     // Hold a fresh owner's bootstrap after public acceptance, then change
     // defaults. The accepted turn must retain its original inference settings.
     const raceToken=(await fixture()).token;
@@ -590,8 +696,11 @@ test("public HTTP and WebSocket startup omit wallet I/O while explicit environme
   } catch(error) {failure=error;throw error;}
   finally {
     live?.terminate();
+    await handAttachment?.close();
+    await foreignAttachment?.close();
+    await stalledAttachment?.close();
     await mf.dispose();
-    await Promise.all([writeFile(join(output,"evidence.json"),JSON.stringify({command:"node --test test/startup-overlap-journey.test.mjs",status:failure?"FAIL":"PASS",error:failure?.stack,...evidence,http,records},null,2)),
+    await Promise.all([writeFile(join(output,"evidence.json"),JSON.stringify({command:(originOnly?"NANOCODEX_STARTUP_ORIGIN_ONLY=1 ":"")+"node --test test/startup-overlap-journey.test.mjs",status:failure?"FAIL":"PASS",error:failure?.stack,...evidence,http,records},null,2)),
       writeFile(join(output,"runtime.log"),runtime.join("\n")),writeFile(join(output,"fixture-source.mjs"),source),writeFile(join(output,"source-resolution.json"),JSON.stringify(bundle.metafile.inputs,null,2))]);
   }
 });
