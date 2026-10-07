@@ -178,6 +178,53 @@ fn signed_round() -> Vec<Value> {
 }
 
 #[tokio::test]
+async fn retried_model_call_receipt_replays_after_sqlite_reopen() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let (client, requests, server) = server(|index, request| {
+        if index == 1 {
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".into()
+        } else if request["messages"].to_string().contains("tool_result") {
+            sse(text("completed after retry"), "end_turn", 10)
+        } else {
+            sse(signed_round(), "tool_use", 10)
+        }
+    })
+    .await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    for _ in 0..2 {
+        let counter = effects.clone();
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .tool(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("committed once".into()) }
+            })
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let result = agent
+            .prompt(PromptRequest::new("perform effect once").request_id("retried-request"))
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        assert_eq!(result.final_message(), "completed after retry");
+        assert_eq!(result.usage().unwrap().total_tokens(), 30);
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+    }
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 3, "replay must not call the provider");
+    assert_eq!(log[0], log[1], "a retry resends the admitted request");
+    server.abort();
+}
+
+#[tokio::test]
 async fn completed_effect_and_signed_compaction_suffix_survive_reopen() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
