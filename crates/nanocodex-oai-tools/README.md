@@ -243,6 +243,10 @@ identities, and their shared contracts without linking OpenAI transports, Code
 Mode/QuickJS, MCP, or HTTP clients. This is artifact separation, not a second
 tool implementation or an alternate mode for normal native applications.
 
+The `image-processing` feature exposes the shared bounded image decoder in
+[`image`] without a tool runtime, for provider adapters that prepare images
+outside Code Mode.
+
 Both runtimes retain yielded shell sessions until their exit is collected or
 the owner cancels or shuts down the runtime. Opening another command never
 evicts an existing process, and there is no application-level process-count

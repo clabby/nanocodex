@@ -107,6 +107,18 @@ They exercise native request ordering, invalid-input rejection, queued image
 freezing and replay after local file changes. These are transport/storage checks,
 not a measurement of model vision quality.
 
+Base64 images in client tool results are decoded with bounded memory and scaled
+so neither edge exceeds 3000 pixels before the result joins request history. The
+direct Messages API applies that limit once a request carries more than twenty
+images; preparing each image when it first arrives keeps earlier request bytes
+stable as the conversation grows. An image that cannot be decoded becomes a text
+omission inside the same result, which keeps its success status. URL and file
+sources pass through unchanged. Durable tool receipts keep the handler's original
+output, and a replayed receipt is prepared the same way. The low-level
+`ClaudeClient` sends caller-supplied images as given. Reproduce these journeys
+with `cargo test -p nanocodex-claude --test agent_loop tool_images` and
+`cargo test -p nanocodex-durability --features claude,sqlite --test claude image_receipt`.
+
 ## Native harness composition
 
 The facade's `Harness::builder().register(family, recipe).build()` is a reusable
