@@ -19,6 +19,7 @@ use nanocodex_agent::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 mod durable;
+mod images;
 use crate::execution::{Admission, ClaudeExecutionPolicy, Step};
 pub use durable::rewind_checkpoint;
 use durable::{Cursor, Effect, Snapshot};
@@ -603,6 +604,9 @@ impl ClaudeBuilder {
     }
     /// Register a Claude client tool that returns text, image, or document
     /// blocks in a single user tool_result. The caller owns capability checks.
+    /// Inline base64 images are bounded for the direct API before they join
+    /// request history, and unprocessable ones become text omissions. Durable
+    /// tool receipts retain the handler's original output.
     pub fn tool_blocks<F, Fut>(mut self, definition: ToolDefinition, function: F) -> Self
     where
         F: Fn(Value) -> Fut + Send + Sync + 'static,
@@ -3820,9 +3824,9 @@ impl State {
                 content: response.content,
             });
             if has_tool_calls {
-                pending.push(Message::tool_results(
-                    results.into_iter().map(Option::unwrap).collect(),
-                ));
+                let mut results: Vec<_> = results.into_iter().map(Option::unwrap).collect();
+                images::prepare_tool_images(&mut results).await;
+                pending.push(Message::tool_results(results));
                 // Commit completed effects and explicit unknown-outcome receipts
                 // before returning cancellation or making another provider call.
                 // Process-restart durability still belongs to the embedding host.

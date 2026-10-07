@@ -1,12 +1,17 @@
 //! End-to-end behavioral contract against a synthetic loopback Messages API.
 use axum::{Json, Router, response::IntoResponse, routing::post};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
+use image::{DynamicImage, ImageFormat};
 use nanocodex_agent::{Nanocodex, events::AgentEventKind};
 use nanocodex_claude::{Claude, ClaudeClient, Effort, ToolDefinition};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    io::Cursor,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 fn stream(blocks: Vec<Value>, stop: &str) -> String {
@@ -35,6 +40,20 @@ fn stream(blocks: Vec<Value>, stop: &str) -> String {
     emit(json!({"type":"message_delta","delta":{"stop_reason":stop},"usage":{"output_tokens":5}}));
     emit(json!({"type":"message_stop"}));
     out
+}
+
+fn png(width: u32, height: u32) -> String {
+    let mut bytes = Cursor::new(Vec::new());
+    DynamicImage::new_rgb8(width, height)
+        .write_to(&mut bytes, ImageFormat::Png)
+        .unwrap();
+    STANDARD.encode(bytes.into_inner())
+}
+
+fn image_dimensions(block: &Value) -> Option<(u32, u32)> {
+    let bytes = STANDARD.decode(block["source"]["data"].as_str()?).ok()?;
+    let image = image::load_from_memory(&bytes).ok()?;
+    Some((image.width(), image.height()))
 }
 
 #[tokio::test]
@@ -685,7 +704,7 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
     );
     let (agent,_)=Nanocodex::builder(Claude::new(client,"test"))
         .tool_blocks(ToolDefinition { name:"ReadImage".into(), description:"Test image".into(), input_schema:json!({"type":"object"}),strict:None,defer_loading:false }, |_| async {
-            Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"cG5n"}})])
+            Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":png(1, 1)}})])
         }).build().unwrap();
     assert_eq!(
         agent
@@ -701,9 +720,120 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
     let log = requests.lock().unwrap();
     assert_eq!(
         log[1]["messages"][2]["content"][0]["content"][1]["source"]["data"],
-        "cG5n"
+        png(1, 1)
     );
     assert_eq!(log[1]["messages"][2]["content"][0]["type"], "tool_result");
+    server.abort();
+}
+
+#[tokio::test]
+async fn tool_images_fit_many_image_limit_before_history_crosses_twenty() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let log = log.clone();
+            async move {
+                // Mirror the Messages API: every image must decode, and a request
+                // with more than twenty images applies a stricter dimension limit.
+                let images: Vec<Value> = body["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|message| message["content"].as_array().unwrap())
+                    .flat_map(|block| block["content"].as_array().into_iter().flatten())
+                    .filter(|block| block["type"] == "image")
+                    .cloned()
+                    .collect();
+                let limit = if images.len() > 20 { 3000 } else { 8000 };
+                let index = {
+                    let mut log = log.lock().unwrap();
+                    log.push(body);
+                    log.len()
+                };
+                if !images.iter().all(|image| {
+                    image_dimensions(image).is_some_and(|(width, height)| width.max(height) <= limit)
+                }) {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "invalid or oversized image",
+                    )
+                        .into_response();
+                }
+                let (blocks, reason) = if index < 3 {
+                    (
+                        vec![json!({"type":"tool_use","id":format!("capture-{index}"),"name":"Capture","input":{"batch":index}})],
+                        "tool_use",
+                    )
+                } else {
+                    (vec![json!({"type":"text","text":"seen all"})], "end_turn")
+                };
+                ([("content-type", "text/event-stream")], stream(blocks, reason)).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let capture = ToolDefinition {
+        name: "Capture".into(),
+        description: "Capture synthetic screenshots".into(),
+        input_schema: json!({"type":"object"}),
+        strict: None,
+        defer_loading: false,
+    };
+    let image = |data: String| json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":data}});
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .tool_blocks(capture, move |input| {
+            let blocks = if input["batch"] == 1 {
+                vec![
+                    json!({"type":"text","text":"captured"}),
+                    image(png(4000, 200)),
+                    image("cG5n".into()),
+                ]
+            } else {
+                vec![image(png(16, 16)); 20]
+            };
+            async move { Ok(blocks) }
+        })
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("capture twice")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "seen all"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 3);
+    let first = &log[1]["messages"][2];
+    let receipt = &first["content"][0];
+    assert_ne!(
+        receipt["is_error"], true,
+        "the completed effect is not an error"
+    );
+    assert_eq!(receipt["content"][0]["text"], "captured");
+    assert_eq!(image_dimensions(&receipt["content"][1]), Some((3000, 150)));
+    assert_eq!(
+        receipt["content"][2]["type"], "text",
+        "unprocessable image is omitted"
+    );
+    assert_eq!(
+        log[2]["messages"][2], *first,
+        "earlier tool images stay byte-identical once history exceeds twenty images"
+    );
     server.abort();
 }
 

@@ -5944,9 +5944,11 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "httpdate",
+ "image",
  "libc",
  "nanocodex-agent",
  "nanocodex-claude-tools",
+ "nanocodex-oai-tools",
  "regex",
  "reqwest",
  "rustls",
@@ -6023,8 +6025,10 @@ name = "nanocodex-durability"
 version = "0.6.7"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "eyre",
  "futures-util",
+ "image",
  "nanocodex-agent",
  "nanocodex-claude",
  "nanocodex-claude-tools",
