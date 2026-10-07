@@ -460,7 +460,7 @@ async function check() {
   const snapshot: Actions.turn.getSnapshot.ReturnType = await Actions.turn.getSnapshot(completed);
   const usage: Actions.turn.getUsage.ReturnType = await Actions.turn.getUsage(completed);
   usage.estimated_cost?.usd;
-  const serviceTier: "standard" | "priority" | "fast" | undefined =
+  const serviceTier: "standard" | "priority" | "fast" | "ultrafast" | undefined =
     usage.estimated_cost?.service_tier;
   const costStatus: CostStatus = usage.cost_status;
   void message;

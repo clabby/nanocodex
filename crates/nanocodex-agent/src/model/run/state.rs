@@ -28,7 +28,7 @@ impl ModelSessionState {
 pub(super) struct ContinuationPolicy {
     pub(super) model: Model,
     pub(super) thinking: Thinking,
-    pub(super) fast_mode: bool,
+    pub(super) service_tier: ServiceTier,
     pub(super) reasoning_effort_updates: bool,
 }
 
@@ -182,7 +182,7 @@ impl ConversationState {
     pub(super) fn prepare_request_policy(&mut self, policy: ContinuationPolicy) {
         if self.continuation_policy.is_some_and(|previous| {
             previous.model != policy.model
-                || previous.fast_mode != policy.fast_mode
+                || previous.service_tier != policy.service_tier
                 || previous.reasoning_effort_updates != policy.reasoning_effort_updates
                 || (previous.thinking != policy.thinking && !policy.reasoning_effort_updates)
         }) {

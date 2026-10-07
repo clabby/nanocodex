@@ -428,7 +428,7 @@ async fn model_is_fixed_at_creation_while_runtime_reasoning_policy_can_change() 
 }
 
 #[tokio::test]
-async fn queued_prompts_retain_effort_captured_when_accepted() -> Result<()> {
+async fn queued_prompts_retain_tier_and_effort_captured_when_accepted() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let (first_started, first_started_rx) = tokio::sync::oneshot::channel();
@@ -493,7 +493,24 @@ async fn queued_prompts_retain_effort_captured_when_accepted() -> Result<()> {
         eprintln!(
             "policy-wire updated: effort=high tier=priority previous=absent; queued and first prompts replayed"
         );
-        send_final(&mut socket, "resp-updated").await
+        send_final(&mut socket, "resp-updated").await?;
+
+        let compact = next_json(&mut socket).await?;
+        assert_eq!(compact["input"], json!([{"type": "compaction_trigger"}]));
+        assert_eq!(compact["service_tier"], "priority");
+        send_json(
+            &mut socket,
+            json!({
+                "type": "response.output_item.done",
+                "item": { "id": "cmp-server-id", "type": "compaction", "encrypted_content": "summary" }
+            }),
+        )
+        .await?;
+        send_json(
+            &mut socket,
+            completed_response_with_usage("resp-compact", &[], 120),
+        )
+        .await
     });
 
     let workspace = temporary_workspace("queued-turn-policy")?;
@@ -513,7 +530,7 @@ async fn queued_prompts_retain_effort_captured_when_accepted() -> Result<()> {
         .map_err(|_| eyre!("first request was not observed"))?;
     let queued = agent.prompt("queued prompt").await?;
     agent.set_thinking(Thinking::High).await?;
-    agent.set_fast_mode(true).await?;
+    agent.set_service_tier(ServiceTier::Ultrafast).await?;
     release_first
         .send(())
         .map_err(|()| eyre!("first request release receiver dropped"))?;
@@ -527,6 +544,7 @@ async fn queued_prompts_retain_effort_captured_when_accepted() -> Result<()> {
         )?["model"],
         "gpt-6-luna"
     );
+    assert_eq!(estimated_tier(&queued)?, ServiceTier::Standard);
     let updated = agent.prompt("updated prompt").await?.result().await?;
     assert_eq!(
         serde_json::to_value(
@@ -535,6 +553,27 @@ async fn queued_prompts_retain_effort_captured_when_accepted() -> Result<()> {
                 .expect("local turns always retain a snapshot"),
         )?["model"],
         "gpt-6-luna"
+    );
+    assert_eq!(estimated_tier(&updated)?, ServiceTier::Fast);
+    agent.compact().await?;
+
+    let ChildSnapshot::Codex(runtime) = agent.runtime_snapshot().await? else {
+        return Err(eyre!("native agent returned a different checkpoint family"));
+    };
+    assert_eq!(runtime.service_tier, ServiceTier::Ultrafast);
+    let mut encoded = serde_json::to_value(&runtime)?;
+    assert_eq!(encoded["service_tier"], "ultrafast");
+    let fields = encoded
+        .as_object_mut()
+        .ok_or_else(|| eyre!("runtime snapshot was not an object"))?;
+    fields.remove("service_tier");
+    fields.insert("fast_mode".into(), json!(true));
+    let legacy: ChildRuntimeSnapshot = serde_json::from_value(encoded.clone())?;
+    assert_eq!(legacy.service_tier, ServiceTier::Fast);
+    encoded["service_tier"] = json!("ultrafast");
+    assert!(
+        serde_json::from_value::<ChildRuntimeSnapshot>(encoded).is_err(),
+        "conflicting tier fields must be rejected"
     );
 
     drop((agent, events));
@@ -755,4 +794,12 @@ async fn supported_reasoning_updates_preserve_socket_prefix_and_replay_after_fas
         std::fs::remove_dir_all(workspace)?;
     }
     Ok(())
+}
+
+fn estimated_tier(result: &TurnResult) -> Result<ServiceTier> {
+    Ok(result
+        .usage()
+        .and_then(|usage| usage.estimated_cost())
+        .ok_or_else(|| eyre!("reported usage must produce an estimate"))?
+        .service_tier())
 }

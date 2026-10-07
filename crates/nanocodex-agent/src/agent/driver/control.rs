@@ -136,7 +136,7 @@ pub(super) const fn queued_prompt(
     execution_operation: Option<ExecutionOperation>,
     cancel_on_admission: bool,
     thinking: Thinking,
-    fast_mode: bool,
+    service_tier: ServiceTier,
     parent: Option<tracing::Span>,
     events: EventSink,
     result: oneshot::Sender<Result<TurnResult>>,
@@ -148,7 +148,7 @@ pub(super) const fn queued_prompt(
             execution_operation,
             cancellation_committed: false,
             thinking,
-            fast_mode,
+            service_tier,
             parent,
             events,
             result,
@@ -159,7 +159,7 @@ pub(super) const fn queued_prompt(
             prompt,
             execution_operation,
             thinking,
-            fast_mode,
+            service_tier,
             parent,
             events,
             result,
@@ -186,7 +186,7 @@ pub(super) fn cancel_queued_turn(
         prompt,
         execution_operation,
         thinking,
-        fast_mode,
+        service_tier,
         parent,
         events,
         result,
@@ -203,7 +203,7 @@ pub(super) fn cancel_queued_turn(
             execution_operation,
             cancellation_committed,
             thinking,
-            fast_mode,
+            service_tier,
             parent,
             events,
             result,
@@ -220,7 +220,7 @@ pub(super) fn mark_all_queued_turns_cancelled(queued_turns: &mut VecDeque<Queued
             prompt,
             execution_operation,
             thinking,
-            fast_mode,
+            service_tier,
             parent,
             events,
             result,
@@ -231,7 +231,7 @@ pub(super) fn mark_all_queued_turns_cancelled(queued_turns: &mut VecDeque<Queued
             execution_operation,
             cancellation_committed: false,
             thinking,
-            fast_mode,
+            service_tier,
             parent,
             events,
             result,
@@ -244,7 +244,7 @@ pub(super) async fn begin_shutdown(
     commands: &mut mpsc::Receiver<Command>,
     queued_turns: &mut VecDeque<QueuedTurn>,
     default_thinking: Thinking,
-    default_fast_mode: bool,
+    default_service_tier: ServiceTier,
 ) {
     commands.close();
     while let Some(command) = commands.recv().await {
@@ -264,7 +264,7 @@ pub(super) async fn begin_shutdown(
                 accepted: None,
                 cancel_on_admission,
                 thinking,
-                fast_mode,
+                service_tier,
                 parent,
                 events,
                 result,
@@ -275,7 +275,7 @@ pub(super) async fn begin_shutdown(
                     execution_operation,
                     cancel_on_admission,
                     thinking.unwrap_or(default_thinking),
-                    fast_mode.unwrap_or(default_fast_mode),
+                    service_tier.unwrap_or(default_service_tier),
                     parent,
                     events,
                     result,
@@ -318,7 +318,7 @@ pub(super) async fn begin_shutdown(
             | Command::Cancel { result, .. }
             | Command::SetModel { result, .. }
             | Command::SetThinking { result, .. }
-            | Command::SetFastMode { result, .. }
+            | Command::SetServiceTier { result, .. }
             | Command::Compact { result, .. } => {
                 drop(result.send(Err(NanocodexError::AgentStopped)));
             }
@@ -332,7 +332,7 @@ pub(super) async fn begin_shutdown(
 pub(super) struct TurnDefaults {
     pub(super) model: Model,
     pub(super) thinking: Thinking,
-    pub(super) fast_mode: bool,
+    pub(super) service_tier: ServiceTier,
 }
 
 pub(super) fn handle_idle_command<S>(
@@ -362,7 +362,7 @@ pub(super) fn handle_idle_command<S>(
                 session_id: session_id.to_owned(),
                 model: defaults.model,
                 thinking: defaults.thinking,
-                fast_mode: defaults.fast_mode,
+                service_tier: defaults.service_tier,
                 stateless_http: matches!(
                     spawner.config.responses_transport,
                     ResponsesTransport::Https
@@ -387,7 +387,7 @@ pub(super) fn handle_idle_command<S>(
                         session_id,
                         defaults.model,
                         defaults.thinking,
-                        defaults.fast_mode,
+                        defaults.service_tier,
                         spawner.host_context.as_ref().map(Arc::clone),
                         side_conversation,
                     )
@@ -438,7 +438,7 @@ pub(super) fn handle_idle_command<S>(
                         session_id,
                         model,
                         thinking,
-                        defaults.fast_mode,
+                        defaults.service_tier,
                         options.stateless_http,
                         host_context.or_else(|| spawner.host_context.as_ref().map(Arc::clone)),
                     )
@@ -478,7 +478,7 @@ pub(super) fn handle_idle_command<S>(
         Command::Cancel { result, .. } => {
             drop(result.send(Err(NanocodexError::TurnNotCancellable)));
         }
-        Command::SetThinking { result, .. } | Command::SetFastMode { result, .. } => {
+        Command::SetThinking { result, .. } | Command::SetServiceTier { result, .. } => {
             drop(result.send(Ok(())));
         }
         Command::SetModel { result, .. } => {

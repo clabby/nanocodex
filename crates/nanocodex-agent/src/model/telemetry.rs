@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use nanocodex_oai_api::{
-    __private::ModelConfig, Thinking, responses::Usage, transport::TransportStatsDelta,
+    __private::ModelConfig, Thinking, pricing::ServiceTier, responses::Usage,
+    transport::TransportStatsDelta,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
@@ -144,7 +145,12 @@ pub(super) struct UsageTotals {
 }
 
 impl UsageTotals {
-    pub(super) fn add(&mut self, usage: &Usage, model: nanocodex_oai_api::Model, fast_mode: bool) {
+    pub(super) fn add(
+        &mut self,
+        usage: &Usage,
+        model: nanocodex_oai_api::Model,
+        service_tier: ServiceTier,
+    ) {
         self.reported = true;
         self.input_tokens += usage.input_tokens;
         self.cached_input_tokens += usage
@@ -161,11 +167,7 @@ impl UsageTotals {
             .as_ref()
             .map_or(0, |details| details.reasoning_tokens);
         self.total_tokens += usage.total_tokens;
-        let estimate = nanocodex_oai_api::pricing::estimate_for_model(
-            usage,
-            model,
-            nanocodex_oai_api::pricing::ServiceTier::for_model(model, fast_mode),
-        );
+        let estimate = nanocodex_oai_api::pricing::estimate_for_model(usage, model, service_tier);
         self.estimated_cost = Some(
             self.estimated_cost
                 .take()
@@ -177,7 +179,7 @@ impl UsageTotals {
 #[cfg(test)]
 mod usage_tests {
     use super::RunStats;
-    use nanocodex_oai_api::{Model, responses::Usage};
+    use nanocodex_oai_api::{Model, pricing::ServiceTier, responses::Usage};
 
     #[test]
     fn turn_cost_preserves_per_request_long_context_thresholds() {
@@ -188,8 +190,8 @@ mod usage_tests {
             ..Usage::default()
         };
 
-        stats.usage.add(&usage, Model::Astra, false);
-        stats.usage.add(&usage, Model::Astra, false);
+        stats.usage.add(&usage, Model::Astra, ServiceTier::Standard);
+        stats.usage.add(&usage, Model::Astra, ServiceTier::Standard);
 
         let turn = stats.turn_usage();
         assert_eq!(turn.input_tokens(), 300_000);
