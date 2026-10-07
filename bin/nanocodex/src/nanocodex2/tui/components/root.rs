@@ -526,6 +526,10 @@ impl RootNode {
             "questions":{"supported":false}})
     }
 
+    pub(crate) fn subagent_overlay_open(&self) -> bool {
+        matches!(self.overlay, Some(Overlay::Subagents(_)))
+    }
+
     pub(crate) fn new(workspace: &Path, thinking: ReasoningEffort) -> Self {
         let mut transcript = Transcript::with_effort(thinking);
         transcript.set_workspace(workspace);
