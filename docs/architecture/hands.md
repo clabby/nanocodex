@@ -57,7 +57,7 @@ The publisher lock protects the host identity. Closing the last client leaves th
 
 Reattaching the same authenticated runtime and immutable catalog retains its ownership epoch (`lease_id`, `runtime_generation`) while physical connection IDs change. Recovery queries never execute commands. Lost acknowledgements replay the same receipt. The broker's SQLite ledger survives owner restarts; the Hand journal survives socket reconnects within one living daemon process. A daemon crash loses that execution proof and does not permit automatic shell replay.
 
-Native process sessions retain their exact broker route in the thread's durable namespace storage. Reconstructing the cloud runtime restores that route without inventory discovery. Current authorization and the original daemon runtime are still checked; an identical machine name or path cannot redirect saved stdin to a replacement. Process IDs created by older clients without a persisted route cannot be recovered after their cloud runtime is lost.
+Native process sessions retain their exact broker route in the thread's durable namespace storage. Reconstructing the cloud runtime restores that route without inventory discovery. Current authorization and the original daemon runtime are still checked; an identical machine name or path cannot redirect saved stdin to a replacement. Process IDs created by older server versions without a persisted route cannot be recovered after their cloud runtime is lost.
 
 The real SQLite/WebSocket/PTY recovery journey runs with `pnpm --filter nanocodex-managed-service test:native-process-recovery`. It reconstructs the namespace and provider, verifies continued input to the admitted process, and rejects revoked authority, another session, and a replacement runtime.
 
