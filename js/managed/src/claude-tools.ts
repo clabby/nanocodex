@@ -3,7 +3,14 @@ import type { Workspace } from "nanocodex-tools";
 import type { Tool } from "../../nanocodex/runtime/claude.mjs";
 import { createMcpRuntime } from "../../nanocodex/runtime/mcp-runtime.mjs";
 
-const forbidden = new Set(["exec", "wait", "tool_search", "exec_command", "write_stdin", "apply_patch", "view_image", "update_plan", "web__run", "image_gen__imagegen", "spawn_agent", "send_agent_message", "list_agents", "wait_agent", "interrupt_agent", "close_agent", "submit_result"]);
+// Codex interfaces are replaced by Claude's native tools. Shared subagents are
+// installed separately by the task-tree runtime, preserving its owned handlers.
+const forbidden = new Set([
+  "exec", "wait", "tool_search", "exec_command", "write_stdin", "apply_patch",
+  "view_image", "update_plan", "web__run", "image_gen__imagegen",
+  "spawn_agent", "send_agent_message", "list_agents", "wait_agent",
+  "interrupt_agent", "close_agent", "submit_result",
+]);
 const object = (properties: Record<string, unknown>, required: string[]) => ({ type: "object", properties, required, additionalProperties: false });
 const string = { type: "string" };
 const text = (content: string) => ({ content, isError: false });

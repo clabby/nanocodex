@@ -10,6 +10,10 @@ const TOOL_KEYS = new Set(['name', 'description', 'handler', 'inputSchema', 'par
 const CODEX_TOOL_NAMES = new Set([
   'exec', 'wait', 'tool_search', 'exec_command', 'write_stdin', 'apply_patch',
   'view_image', 'update_plan', 'web__run', 'image_gen__imagegen',
+]);
+// Shared platform operations are installed by the owned task-tree runtime.
+// Caller tools must not replace their lifecycle or authorization handlers.
+const PLATFORM_SUBAGENT_NAMES = new Set([
   'spawn_agent', 'send_agent_message', 'list_agents', 'wait_agent',
   'interrupt_agent', 'close_agent', 'submit_result',
 ]);
@@ -29,6 +33,7 @@ export function resolveClaudeTools(tools = []) {
     if (tool.deferLoading !== undefined && tool.defer_loading !== undefined) throw new TypeError('Claude tool deferLoading aliases are mutually exclusive');
     for (const key of ['strict', 'deferLoading', 'defer_loading']) if (tool[key] !== undefined && typeof tool[key] !== 'boolean') throw new TypeError('Claude tool flags must be boolean');
     if (CODEX_TOOL_NAMES.has(tool.name)) throw new TypeError('Codex tool definitions are not accepted by the Claude catalog');
+    if (PLATFORM_SUBAGENT_NAMES.has(tool.name)) throw new TypeError('Nanocodex subagent tools are installed by the shared runtime');
     if (handlers.has(tool.name)) throw new TypeError('duplicate Claude tool name');
     const schema = tool.inputSchema ?? tool.parameters ?? { type: 'object', properties: {} };
     if (!schema || typeof schema !== 'object' || Array.isArray(schema) || schema.type !== 'object') {

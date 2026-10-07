@@ -173,9 +173,10 @@ test('Claude tool abort signals are scoped to stable turn identities', async () 
 
 
 test('Claude refuses explicit Codex definitions rather than reinterpreting their contract', () => {
-  for (const name of ['exec', 'wait', 'web__run', 'tool_search', 'exec_command', 'write_stdin', 'apply_patch', 'image_gen__imagegen', 'spawn_agent']) {
+  for (const name of ['exec', 'wait', 'web__run', 'tool_search', 'exec_command', 'write_stdin', 'apply_patch', 'image_gen__imagegen']) {
     assert.throws(() => resolveClaudeTools([{ name, description: 'must not leak', handler() {} }]), /Codex tool definitions/);
   }
+  assert.throws(() => resolveClaudeTools([{ name: 'spawn_agent', description: 'must not override the platform', handler() {} }]), /shared runtime/);
   assert.deepEqual(resolveClaudeTools([{ name: 'Bash', description: 'native explicit host', handler() {} }]).definitions.map(tool => tool.name), ['Bash']);
 });
 
