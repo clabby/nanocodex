@@ -17,7 +17,7 @@ use web_time::Instant;
 use crate::{
     ContentItem, EventSink, MessageRole, ResponseEvent, ResponseItem, ResponsesAttempt,
     ResponsesAttemptFactory, ResponsesOutput, ResponsesServiceError, ResponsesServiceResponse,
-    Usage,
+    Usage, pricing::ServiceTier,
 };
 
 use super::{
@@ -167,8 +167,8 @@ impl CompletedResponse {
 
     /// Returns the automatic local USD estimate.
     ///
-    /// Nanocodex applies the selected model's built-in standard or priority
-    /// rates. `None` means the provider omitted usage; [`Self::cost_status`]
+    /// Nanocodex applies the selected model's built-in rates for the effective
+    /// service tier. `None` means the provider omitted usage; [`Self::cost_status`]
     /// distinguishes that from a genuine zero-token estimate.
     #[must_use]
     pub const fn estimated_cost(&self) -> Option<&crate::EstimatedUsdCost> {
@@ -569,7 +569,7 @@ where
         &request_history,
         session.model,
         session.thinking,
-        session.fast_mode,
+        session.service_tier,
     );
     let success = execute(session, request).await?;
     let server_reasoning_included = success.server_reasoning_included();
@@ -601,7 +601,7 @@ where
         .unwrap_or_else(|| output_text(&output))
         .into();
     let (estimated_cost, cost_status) =
-        estimate_cost(response.usage.as_ref(), session.model, session.fast_mode);
+        estimate_cost(response.usage.as_ref(), session.model, session.service_tier);
     let completed = CompletedResponse {
         output,
         output_text,
@@ -702,7 +702,7 @@ where
         compaction::trigger(),
         session.model,
         session.thinking,
-        session.fast_mode,
+        session.service_tier,
     );
     let success = execute(session, request).await?;
     let server_reasoning_included = success.server_reasoning_included();
@@ -725,7 +725,7 @@ where
     session.canonical_context_reinjection_pending = !mid_turn;
 
     let (estimated_cost, cost_status) =
-        estimate_cost(response.usage.as_ref(), session.model, session.fast_mode);
+        estimate_cost(response.usage.as_ref(), session.model, session.service_tier);
     Ok(CompletedCompaction {
         usage: response.usage,
         estimated_cost,
@@ -900,14 +900,14 @@ fn finish_response_span(span: &tracing::Span, started_at: Instant, error: Option
 pub(super) fn estimate_cost(
     usage: Option<&Usage>,
     model: crate::Model,
-    fast_mode: bool,
+    service_tier: ServiceTier,
 ) -> (Option<crate::EstimatedUsdCost>, crate::CostStatus) {
     match usage {
         Some(usage) => (
             Some(crate::pricing::estimate_for_model(
                 usage,
                 model,
-                crate::pricing::ServiceTier::for_model(model, fast_mode),
+                service_tier,
             )),
             crate::CostStatus::EstimatedFromUsage,
         ),

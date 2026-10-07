@@ -12,6 +12,7 @@ use ::tower::Service;
 use futures_util::TryStreamExt;
 
 use crate::{
+    pricing::ServiceTier,
     responses::{ContentItem, MessageRole},
     session::SessionId,
     tower::{
@@ -124,7 +125,7 @@ async fn response_stream_and_future_share_one_completed_operation() {
 
 #[test]
 fn missing_usage_never_becomes_a_zero_cost_estimate() {
-    let (estimate, status) = estimate_cost(None, crate::Model::Sol, false);
+    let (estimate, status) = estimate_cost(None, crate::Model::Sol, ServiceTier::Standard);
     assert!(estimate.is_none());
     assert_eq!(status, crate::CostStatus::UsageNotReported);
 }
@@ -137,7 +138,7 @@ fn luna_usage_receives_a_model_specific_estimate() {
         total_tokens: 2_000_000,
         ..crate::Usage::default()
     };
-    let (estimate, status) = estimate_cost(Some(&usage), crate::Model::Luna, false);
+    let (estimate, status) = estimate_cost(Some(&usage), crate::Model::Luna, ServiceTier::Standard);
 
     assert_eq!(estimate.unwrap().amount().decimal(), "0.95");
     assert_eq!(status, crate::CostStatus::EstimatedFromUsage);

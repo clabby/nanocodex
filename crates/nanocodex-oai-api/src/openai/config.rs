@@ -2,7 +2,7 @@ use std::{borrow::Cow, sync::Arc};
 
 use crate::{
     CONTEXT_WINDOW_TOKENS, Model, OpenAiAuth, ReasoningMode, ResponsesHistory, ResponsesTransport,
-    Thinking, responses::StrictJsonSchema,
+    Thinking, pricing::ServiceTier, responses::StrictJsonSchema,
 };
 
 const SOL_SYSTEM_PROMPT: &str = include_str!("../../prompts/sol.md");
@@ -35,8 +35,8 @@ pub struct ModelConfig {
     /// Whether an embedding selected an effort instead of model defaults.
     #[doc(hidden)]
     pub thinking_explicit: bool,
-    /// Whether requests use priority processing.
-    pub fast_mode: bool,
+    /// Requested processing tier, clamped per model when building requests.
+    pub service_tier: ServiceTier,
     /// Resolved context window used for accounting and automatic compaction.
     pub context_window_tokens: u64,
     /// Preferred initial streaming transport.
@@ -146,7 +146,7 @@ impl Default for ModelConfig {
             reasoning_mode: ReasoningMode::default(),
             thinking: Thinking::default(),
             thinking_explicit: false,
-            fast_mode: false,
+            service_tier: ServiceTier::Standard,
             context_window_tokens: CONTEXT_WINDOW_TOKENS,
             responses_transport: ResponsesTransport::default(),
             websocket_warmup: true,
