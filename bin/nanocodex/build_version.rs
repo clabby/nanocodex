@@ -4,6 +4,14 @@ use chrono::DateTime;
 use vergen::EmitBuilder;
 
 pub fn emit() -> Result<(), Box<dyn Error>> {
+    // Cargo can reuse this package's build-script output across worktrees that
+    // share a target directory. Its cached absolute Git paths then still refer
+    // to the previous worktree, and CARGO_MANIFEST_DIR is not a tracked input.
+    // Without a caller-supplied SHA, this absent file regenerates provenance
+    // for each invocation. Release builds already supply a tracked SHA.
+    if std::env::var_os("VERGEN_GIT_SHA").is_none() {
+        println!("cargo:rerun-if-changed=nanocodex-version-always-rerun");
+    }
     println!("cargo:rerun-if-changed=build.rs");
     emit_linked_worktree_ref_reruns();
 
