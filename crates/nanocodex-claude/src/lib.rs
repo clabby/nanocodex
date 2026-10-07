@@ -3,7 +3,13 @@
 //! Authentication uses an explicit Console API key, a host header provider, or
 //! the Rust subscription manager with private host storage and HTTP capabilities.
 //! The crate never reads Claude Code credentials.
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+//!
+//! Agent sessions retry transient model failures before publishing text or risking
+//! repeated server effects, with five attempts per model call and three per compaction.
+//! Cancellable backoff grows through 1, 2, 4, and 8 seconds with 90–110% jitter.
+//! `Retry-After` is a minimum delay; hints over 60 seconds end the call.
+//! Direct [`ClaudeClient`] calls leave transient retry policy to their caller.
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -33,7 +39,12 @@ const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 #[derive(Debug, Error)]
 pub enum ClaudeError {
     #[error("Messages HTTP {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+        /// Provider delay from a valid `Retry-After` header.
+        retry_after: Option<Duration>,
+    },
     #[error("Messages transport: {0}")]
     Transport(#[from] reqwest::Error),
     #[error("Messages JSON: {0}")]
@@ -46,6 +57,41 @@ pub enum ClaudeError {
     IncompleteStream,
     #[error("approved Claude authentication provider unavailable")]
     AuthUnavailable,
+}
+
+impl ClaudeError {
+    pub(crate) fn is_transient(&self) -> bool {
+        match self {
+            Self::Http { status, .. } => *status == 429 || (500..600).contains(status),
+            Self::Transport(error) => error.is_timeout() || error.is_request() || error.is_body(),
+            Self::StreamError { kind, .. } => matches!(
+                kind.as_str(),
+                "overloaded_error" | "api_error" | "rate_limit_error" | "timeout_error"
+            ),
+            Self::IncompleteStream => true,
+            Self::Json(_) | Self::Protocol(_) | Self::AuthUnavailable => false,
+        }
+    }
+}
+
+/// Parses delta-seconds or an HTTP-date; a past date means no extra delay.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+    }
+    let deadline = httpdate::parse_http_date(value)
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .ok()?;
+    Some(deadline.saturating_sub(now))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1138,9 +1184,9 @@ impl ClaudeClient {
                 .body(wire_body.clone())
                 .send()
                 .await?;
-            // Only an explicit HTTP authentication rejection is recoverable. Do
-            // not replay requests after transport errors, 403/429/5xx, or any
-            // accepted stream (including an error partway through that stream).
+            // Only an explicit HTTP authentication rejection is recovered here.
+            // Agent sessions own transient retries because they track published
+            // text and possible server effects.
             if response.status() == reqwest::StatusCode::UNAUTHORIZED
                 && !retried
                 && let (ClientAuth::Provider(provider), Some(headers)) =
@@ -1155,12 +1201,17 @@ impl ClaudeClient {
             }
             if !response.status().is_success() {
                 let status = response.status().as_u16();
+                let retry_after = retry_after(response.headers());
                 let mut body = response.text().await?;
                 credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
                 for credential in &credentials {
                     body = body.replace(credential, "[redacted]");
                 }
-                return Err(ClaudeError::Http { status, body });
+                return Err(ClaudeError::Http {
+                    status,
+                    body,
+                    retry_after,
+                });
             }
             credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
             return Ok((response, credentials));
