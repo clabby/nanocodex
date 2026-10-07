@@ -5,7 +5,9 @@ use std::sync::Arc;
 use nanocodex_agent::Result as AgentResult;
 use nanocodex_claude::{
     ClaudeBuilder,
-    execution::{Admission as ClaudeAdmission, ClaudeExecutionPolicy, PolicyFuture, Step},
+    execution::{
+        Admission as ClaudeAdmission, ClaudeExecutionPolicy, ClaudeSteer, PolicyFuture, Step,
+    },
 };
 use serde_json::Value;
 
@@ -64,6 +66,69 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
         Box::pin(async move { self.owner.begin_attempt(id).await.map_err(agent_error) })
     }
 
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    fn accept_steer(
+        &self,
+        id: String,
+        message_id: Option<String>,
+        after: u32,
+        input_json: String,
+        capacity: bool,
+    ) -> PolicyFuture<'_, Option<u32>> {
+        Box::pin(async move {
+            let input: Box<serde_json::value::RawValue> = serde_json::from_str(&input_json)
+                .map_err(|error| {
+                    nanocodex_agent::NanocodexError::InvalidRequest(error.to_string())
+                })?;
+            self.owner
+                .accept_steer(id, after, &input, message_id, capacity)
+                .await
+                .map_err(agent_error)
+        })
+    }
+    fn retained_steers(&self, id: String) -> PolicyFuture<'_, Vec<ClaudeSteer>> {
+        Box::pin(async move {
+            self.owner
+                .retained_steers(id)
+                .await
+                .and_then(|steers| {
+                    steers
+                        .into_iter()
+                        .map(|steer| {
+                            Ok(ClaudeSteer {
+                                message_id: steer.state.message_id,
+                                index: steer.index,
+                                accepted_after_model_call_index: steer
+                                    .state
+                                    .accepted_after_model_call_index,
+                                model_call_index: steer.state.model_call_index,
+                                input_json: steer.state.input.json()?.to_owned(),
+                            })
+                        })
+                        .collect()
+                })
+                .map_err(agent_error)
+        })
+    }
+    fn withdraw_steer(&self, id: String, index: u32) -> PolicyFuture<'_, ()> {
+        Box::pin(async move {
+            self.owner
+                .withdraw_steer(id, index)
+                .await
+                .map_err(agent_error)
+        })
+    }
+    fn bind_steer(&self, id: String, index: u32, boundary: u32) -> PolicyFuture<'_, ()> {
+        Box::pin(async move {
+            self.owner
+                .bind_steer(id, index, boundary)
+                .await
+                .map_err(agent_error)
+        })
+    }
     fn continuation(&self, id: String) -> PolicyFuture<'_, Option<Value>> {
         Box::pin(async move {
             self.owner

@@ -1839,8 +1839,21 @@ impl Drop for DispatchForkBoundary<'_> {
     }
 }
 
+struct PendingSteer {
+    prompt: Prompt,
+    message_id: Option<String>,
+    index: u32,
+    after: u32,
+    boundary: Option<u32>,
+    durable: bool,
+}
+
 struct TurnSteering {
-    pending: std::collections::VecDeque<Prompt>,
+    pending: std::collections::VecDeque<PendingSteer>,
+    receipts: HashMap<String, (String, bool)>,
+    operation: Option<String>,
+    model_call_index: u32,
+    next_index: u32,
     revision: Option<u64>,
     accepting: bool,
 }
@@ -2759,37 +2772,134 @@ impl State {
         }
     }
 
+    async fn accept_steer(
+        &self,
+        turn: &mut TurnSteering,
+        id: Option<String>,
+        prompt: Prompt,
+    ) -> Result<()> {
+        if id.as_ref().is_some_and(|id| id.is_empty()) {
+            return Err(NanocodexError::InvalidRequest(
+                "steer identity must not be empty".into(),
+            ));
+        }
+        let input_json = serde_json::to_string(&prompt).map_err(provider_error)?;
+        if self.policy.is_none()
+            && let Some(id) = &id
+            && let Some((input, withdrawn)) = turn.receipts.get(id)
+        {
+            if input != &input_json {
+                return Err(NanocodexError::InvalidRequest(
+                    "steer identity was reused with different input".into(),
+                ));
+            }
+            if *withdrawn {
+                return Err(NanocodexError::InvalidRequest("steer was withdrawn".into()));
+            }
+            return Ok(());
+        }
+        if !turn.accepting {
+            return Err(NanocodexError::TurnNotSteerable);
+        }
+        if self.policy.is_some()
+            && matches!(&prompt.instruction, nanocodex_agent::input::PromptInput::Content(items) if items.iter().any(|item| matches!(item, nanocodex_agent::input::UserInput::LocalImage { .. })))
+        {
+            return Err(NanocodexError::InvalidRequest("durable Claude steering requires inline images; local image paths cannot be retained safely".into()));
+        }
+        let frozen = crate::prompt::freeze(prompt)?;
+        let capacity = turn.pending.len() < 8;
+        let local_index = || {
+            turn.next_index
+                .checked_add(1)
+                .ok_or_else(|| unsupported("Claude steer counter exhausted"))
+        };
+        let (index, durable) = if let (Some(policy), Some(operation)) =
+            (&self.policy, &turn.operation)
+            && policy.supports_steering()
+        {
+            let Some(index) = policy
+                .accept_steer(
+                    operation.clone(),
+                    id.clone(),
+                    turn.model_call_index,
+                    input_json.clone(),
+                    capacity,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            (index, true)
+        } else {
+            if self.policy.is_some() && id.is_some() {
+                return Err(NanocodexError::InvalidRequest(
+                    "Claude execution policy does not support identified steering receipts".into(),
+                ));
+            }
+            if !capacity {
+                return Err(NanocodexError::SteerQueueFull);
+            }
+            (local_index()?, false)
+        };
+        turn.next_index = index;
+        if let Some(id) = &id {
+            turn.receipts.insert(id.clone(), (input_json, false));
+        }
+        turn.pending.push_back(PendingSteer {
+            prompt: frozen,
+            message_id: id,
+            index,
+            after: turn.model_call_index,
+            boundary: None,
+            durable,
+        });
+        Ok(())
+    }
+
     async fn consume_steering(
         &self,
         request: &BackendPrompt,
         cursor: &mut Cursor,
         pending: &mut Vec<Message>,
     ) -> Result<bool> {
-        let prompts = {
-            let mut turns = self.steering.lock().await;
-            let Some(turn) = turns.get_mut(&request.key) else {
-                return Ok(false);
-            };
-            let prompts = turn.pending.drain(..).collect::<Vec<_>>();
-            for prompt in &prompts {
-                if let Some(revision) = prompt.instruction_revision() {
-                    turn.revision = Some(revision);
-                }
-            }
-            if !prompts.is_empty() {
-                cursor.instruction_revision = turn.revision;
-            }
-            prompts
+        let mut turns = self.steering.lock().await;
+        let Some(turn) = turns.get_mut(&request.key) else {
+            return Ok(false);
         };
-        let consumed = !prompts.is_empty();
-        for prompt in prompts {
-            pending.extend(prompt_messages(&prompt)?);
-            cursor.steers = cursor.steers.saturating_add(1);
-            self.emit(
-                &request.events,
-                AgentEventKind::RunSteered,
-                json!({"steer_index": cursor.steers, "instruction_bytes": prompt.text_bytes()}),
-            );
+        let boundary = cursor.index.saturating_add(cursor.model_step_offset);
+        let mut consumed = false;
+        while turn
+            .pending
+            .front()
+            .is_some_and(|steer| steer.after < boundary)
+        {
+            let steer = turn.pending.front().expect("pending steer");
+            let messages = prompt_messages(&steer.prompt)?;
+            if steer.durable
+                && let (Some(policy), Some(operation)) = (&self.policy, &turn.operation)
+            {
+                policy
+                    .bind_steer(
+                        operation.clone(),
+                        steer.index,
+                        steer.boundary.unwrap_or(boundary),
+                    )
+                    .await?;
+            }
+            let steer = turn.pending.pop_front().expect("pending steer");
+            if let Some(revision) = steer.prompt.instruction_revision() {
+                turn.revision = Some(revision);
+            }
+            cursor.instruction_revision = turn.revision;
+            pending.extend(messages);
+            cursor.steers = cursor.steers.max(steer.index);
+            let mut data =
+                json!({"steer_index": steer.index, "instruction_bytes": steer.prompt.text_bytes()});
+            if let Some(id) = steer.message_id {
+                data["message_id"] = json!(id);
+            }
+            self.emit(&request.events, AgentEventKind::RunSteered, data);
+            consumed = true;
         }
         Ok(consumed)
     }
@@ -2937,6 +3047,37 @@ impl State {
                 Some(&request.prompt),
             )
             .await?;
+        if let (Some(policy), Some(operation)) = (&self.policy, &cursor.operation) {
+            let mut turns = self.steering.lock().await;
+            let turn = turns
+                .get_mut(&request.key)
+                .ok_or(NanocodexError::TurnStopped)?;
+            for steer in policy.retained_steers(operation.clone()).await? {
+                turn.next_index = turn.next_index.max(steer.index);
+                if steer.index <= cursor.steers
+                    || turn
+                        .pending
+                        .iter()
+                        .any(|pending| pending.index == steer.index)
+                {
+                    continue;
+                }
+                let prompt =
+                    serde_json::from_str(&steer.input_json).map_err(durable::recovery_error)?;
+                turn.pending.push_back(PendingSteer {
+                    prompt: crate::prompt::freeze(prompt)?,
+                    message_id: steer.message_id,
+                    index: steer.index,
+                    after: steer.accepted_after_model_call_index,
+                    boundary: steer.model_call_index,
+                    durable: true,
+                });
+            }
+            turn.pending
+                .make_contiguous()
+                .sort_by_key(|steer| steer.index);
+            turn.model_call_index = cursor.index.max(1);
+        }
         if cursor.prepared && conversation.lifecycle_started {
             *self.lifecycle_opened.lock().await = Some(
                 cursor
@@ -3112,6 +3253,9 @@ impl State {
                 .map(str::to_owned)
                 .collect::<HashSet<_>>();
             *self.discovered.lock().await = discovered.clone();
+            if let Some(turn) = self.steering.lock().await.get_mut(&request.key) {
+                turn.model_call_index = index.saturating_add(cursor.model_step_offset).max(1);
+            }
             let response = self
                 .response(
                     pending.clone(),
@@ -3125,7 +3269,10 @@ impl State {
                         previous_message_id: previous_message_id.as_deref(),
                         template: Some(&cursor.template),
                         wire_profile: cursor.wire_profile.as_ref(),
-                        effect: cursor.effect(self, &format!("model-{index}")),
+                        effect: cursor.effect(
+                            self,
+                            &format!("model-{}", index.saturating_add(cursor.model_step_offset)),
+                        ),
                     },
                 )
                 .await;
@@ -3158,6 +3305,12 @@ impl State {
                 conversation.recovery_notices.push(upgrade.notice);
             }
             let response = response.message;
+            if cursor.model_step_offset == 0 {
+                // The legacy in-flight effect has settled. Number the next
+                // model boundary positively before admitting its queued input.
+                cursor.model_step_offset = 1;
+                cursor.model_receipt_start = Some(index.saturating_add(2));
+            }
             previous_message_id = Some(response.id.clone());
             add_usage(&mut usage, &response.usage);
             let has_server_effects = response.content.iter().any(|block| {
@@ -3686,6 +3839,7 @@ impl State {
                 }
             };
             if more_instructions {
+                cursor.index = index + 1;
                 self.consume_steering(request, &mut cursor, &mut pending)
                     .await?;
                 conversation.messages = pending.clone();
@@ -3783,6 +3937,25 @@ fn server_discovered_tools<'a>(
 
 fn prompt_messages(prompt: &Prompt) -> Result<Vec<Message>> {
     crate::prompt::messages(prompt)
+}
+
+impl Driver {
+    fn steer_input(
+        &self,
+        key: BackendTurnKey,
+        id: Option<String>,
+        prompt: Prompt,
+    ) -> BackendFuture<Result<()>> {
+        let state = self.state.clone();
+        Box::pin(async move {
+            if state.stopped.load(Ordering::SeqCst) {
+                return Err(NanocodexError::AgentStopped);
+            }
+            let mut turns = state.steering.lock().await;
+            let turn = turns.get_mut(&key).ok_or(NanocodexError::TurnStopped)?;
+            state.accept_steer(turn, id, prompt).await
+        })
+    }
 }
 
 impl LifecycleBackend for Driver {
@@ -3960,6 +4133,10 @@ impl LifecycleBackend for Driver {
                         key,
                         TurnSteering {
                             pending: std::collections::VecDeque::new(),
+                            receipts: HashMap::new(),
+                            operation: request_id.clone(),
+                            model_call_index: 1,
+                            next_index: 0,
                             revision: request.prompt.instruction_revision(),
                             accepting: true,
                         },
@@ -4024,7 +4201,7 @@ impl LifecycleBackend for Driver {
                     if turn.pending.len() >= 8 {
                         return Err(unsupported("Claude steering queue is full"));
                     }
-                    turn.pending.push_back(crate::prompt::freeze(prompt)?);
+                    state.accept_steer(turn, None, prompt).await?;
                     return Ok(BackendPromptRoute::Steered);
                 }
             }
@@ -4032,22 +4209,38 @@ impl LifecycleBackend for Driver {
         })
     }
     fn steer(&self, key: BackendTurnKey, prompt: Prompt) -> BackendFuture<Result<()>> {
+        self.steer_input(key, None, prompt)
+    }
+    fn steer_with_id(
+        &self,
+        key: BackendTurnKey,
+        id: String,
+        prompt: Prompt,
+    ) -> BackendFuture<Result<()>> {
+        self.steer_input(key, Some(id), prompt)
+    }
+    fn withdraw_steer(&self, key: BackendTurnKey, id: String) -> BackendFuture<Result<bool>> {
         let state = self.state.clone();
         Box::pin(async move {
-            let prompt = crate::prompt::freeze(prompt)?;
-            if state.stopped.load(Ordering::SeqCst) {
-                return Err(NanocodexError::AgentStopped);
-            }
             let mut turns = state.steering.lock().await;
             let turn = turns.get_mut(&key).ok_or(NanocodexError::TurnStopped)?;
-            if !turn.accepting {
-                return Err(NanocodexError::TurnNotSteerable);
+            let Some(steer) = turn.pending.back().filter(|steer| {
+                steer.message_id.as_deref() == Some(&id) && steer.boundary.is_none()
+            }) else {
+                return Ok(false);
+            };
+            if let (Some(policy), Some(operation)) = (&state.policy, &turn.operation) {
+                policy
+                    .withdraw_steer(operation.clone(), steer.index)
+                    .await?;
             }
-            if turn.pending.len() >= 8 {
-                return Err(unsupported("Claude steering queue is full"));
+            turn.pending.pop_back();
+            if let Some(receipt) = turn.receipts.get_mut(&id) {
+                receipt.1 = true;
             }
-            turn.pending.push_back(prompt);
-            Ok(())
+            // The journal reuses the withdrawn tail's index.
+            turn.next_index = turn.next_index.saturating_sub(1);
+            Ok(true)
         })
     }
     fn cancel(&self, key: BackendTurnKey) -> BackendFuture<Result<()>> {

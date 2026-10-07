@@ -4,6 +4,7 @@
 // SessionModelEgress, broker vault and Rust OAuth state machine are production.
 // Only account bootstrap (synthetic identity) and external provider HTTP are fixtures.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -297,7 +298,7 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       const disabledChild = encodedHistory.includes('Try disabled canonical child');
       const use = (name, input) => sse({type:'tool_use',id:`canonical-${name}-${calls}`,name,input},'tool_use',`message-${calls}`);
       if (encodedHistory.includes('SHARED_PLATFORM_NATIVE_PROBE')) {
-        for (const name of ['environment','memories__write','memories__read','find_session','read_session','spawn_agent','wait_agent'])
+        for (const name of ['environment','memories__write','memories__read','find_session','read_session','spawn_agent','wait_agent','mcp__cua_repl__js','mcp__cua_repl__js_reset'])
           assert.ok(names.includes(name),`Claude retains shared platform tool ${name}`);
         const uses=body.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='tool_use').map(block=>block.name.replace(/^_/,'')):[]);
         if (!uses.length) return use('environment',{});
@@ -644,13 +645,20 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       for(let n=0;n<150&&!releaseActiveSteer;n++)await new Promise(r=>setTimeout(r,40));
       assert.equal(typeof releaseActiveSteer,'function','model request started and is held at the terminal boundary');
       const first='first managed steering correction', second='<realtime_delegation>\n<input>second managed é correction</input>\n</realtime_delegation>';
-      const unsupportedId=await call(`/v1/agents/${steered}/turns/journey-active-steer/steer`,'POST',{input:'identified correction must not be admitted',message_id:'unsupported-steer-id'},400);
-      assert.equal(unsupportedId.error,'invalid_request');
-      assert.match(unsupportedId.message,/identified steering is not supported by this backend/);
-      const unsupportedWithdrawal=await call(`/v1/agents/${steered}/turns/journey-active-steer/withdraw-steer`,'POST',{message_id:'unsupported-steer-id'},400);
-      assert.equal(unsupportedWithdrawal.error,'invalid_request');
-      assert.match(unsupportedWithdrawal.message,/steer withdrawal is not supported by this backend/);
-      await call(`/v1/agents/${steered}/turns/journey-active-steer/steer`,'POST',{input:first},202);
+      const steerPath=`/v1/agents/${steered}/turns/journey-active-steer`;
+      await call(`${steerPath}/steer`,'POST',{input:'WITHDRAWN_CORRECTION_MUST_NOT_REACH_MODEL',message_id:'withdrawn-steer'},202);
+      const withdrawal=await call(`${steerPath}/withdraw-steer`,'POST',{message_id:'withdrawn-steer'});
+      assert.equal(withdrawal.withdrawn,true,'pending identified Claude steering can be withdrawn');
+      assert.equal((await call(`${steerPath}/steer-receipt?message_id=withdrawn-steer`)).state,'withdrawn');
+      const correction={input:first,message_id:'tui-steer-first'};
+      await call(`${steerPath}/steer`,'POST',correction,202);
+      await call(`${steerPath}/steer`,'POST',correction,202);
+      const conflict=await call(`${steerPath}/steer`,'POST',{input:'different correction',message_id:correction.message_id},409);
+      assert.equal(conflict.error,'message_id_conflict','identified steering never reuses an ID for different input');
+      const pendingReceipt=await call(`${steerPath}/steer-receipt?message_id=${correction.message_id}`);
+      assert.equal(pendingReceipt.state,'accepted');
+      assert.equal(pendingReceipt.terminal,false);
+      assert.equal(pendingReceipt.input_key,createHash('sha256').update(JSON.stringify({instruction:first})).digest('hex'),'receipt fingerprints the exact browser input');
       const delegated=await call(`/v1/agents/${steered}/realtime/delegate`,'POST',{
         voice_session_id:activeVoice,operation_id:'active-voice-delegate',input:second},202);
       assert.equal(delegated.route,'steered',JSON.stringify(delegated));
@@ -668,18 +676,26 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       assert.match(JSON.stringify(result),/CLAUDE_TOOL_DONE_ACTIVE_STEER/);
       const consumed=await call(`/v1/agents/${steered}/events/history?after=0&limit=256`);
       const acknowledgements=consumed.data.filter(row=>row.event?.type==='run.steered');
-      assert.deepEqual(acknowledgements.map(row=>row.event.payload.steer_index),[1,2]);
+      assert.equal(acknowledgements.length,2,'duplicate admission and withdrawal never duplicate consumption');
+      assert.equal(acknowledgements[0].event.payload.message_id,correction.message_id,'native Claude consumption acknowledges the TUI identity');
       assert.equal(acknowledgements[0].event.payload.instruction_bytes,Buffer.byteLength(first));
       assert.ok(acknowledgements[1].event.payload.instruction_bytes>=Buffer.byteLength(second),'voice delegation retains its origin context');
       assert.ok(JSON.stringify(activeSteerRequests[1]).includes(JSON.stringify(second).slice(1,-1)),'voice steering preserves the complete instruction');
       assert.equal(activeSteerRequests.length,2,'one initial request and one ordered continuation');
+      assert.ok(!JSON.stringify(activeSteerRequests).includes('WITHDRAWN_CORRECTION_MUST_NOT_REACH_MODEL'));
+      const terminalReceipt=await call(`${steerPath}/steer-receipt?message_id=${correction.message_id}`);
+      assert.equal(terminalReceipt.state,'accepted');
+      assert.equal(terminalReceipt.input_key,pendingReceipt.input_key);
+      assert.equal(terminalReceipt.terminal,true);
+      await call(`${steerPath}/steer`,'POST',correction,202);
+      assert.equal((await call(`${steerPath}/withdraw-steer`,'POST',{message_id:correction.message_id})).withdrawn,false,'a consumed correction cannot be withdrawn');
       const terminalIndex=consumed.data.findIndex(row=>row.event?.type==='run.completed');
       assert.ok(terminalIndex>=0 && acknowledgements.every(row=>consumed.data.indexOf(row)<terminalIndex),'consumption precedes terminal completion');
       const stopped=await call(`/v1/agents/${steered}/realtime/stop`,'POST',{
         voice_session_id:activeVoice,operation_id:'active-voice-stop',transcript:[{role:'user',text:'ACTIVE_VOICE_TRANSCRIPT_PROOF'}]});
       assert.equal(stopped.stopped,true);
       assert.match(JSON.stringify(activeSteerRequests[0]),/Realtime conversation started/);
-      trace.push({scenario:'active Claude steering',requests:activeSteerRequests.length,steer_indices:[1,2],ordered:true,voice_route:delegated.route,voice_stopped:stopped.stopped,identified_steering_denied:400,withdrawal_denied:400});
+      trace.push({scenario:'active Claude steering',requests:activeSteerRequests.length,steer_indices:acknowledgements.map(row=>row.event.payload.steer_index),ordered:true,voice_route:delegated.route,voice_stopped:stopped.stopped,identified_steering:true,pending_withdrawal:true,duplicate_consumption:false,terminal_receipt:true});
 
       // CR-only SSE frames are valid; EOF without message_stop is not completion.
       const frames=[];

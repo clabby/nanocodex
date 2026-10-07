@@ -36,6 +36,7 @@ pub(crate) enum TransientStatus {
 pub(crate) struct TranscriptEntry {
     pub(crate) id: EntryId,
     pub(crate) revision: u64,
+    pub(crate) tool_agent_id: Option<u64>,
     pub(crate) kind: EntryKind,
     pub(crate) hidden: bool,
     pub(crate) parent: Option<EntryId>,
@@ -245,6 +246,10 @@ impl ToolEntry {
         self.execution.qualifier()
     }
 
+    pub(crate) fn tool_family(name: &str) -> &str {
+        ToolIdentity::decode(name).family
+    }
+
     pub(crate) fn family(&self) -> &str {
         let family = ToolIdentity::decode(
             self.metadata
@@ -255,7 +260,7 @@ impl ToolEntry {
         .family;
         // Polls merge into the original command entry. Their latest host metadata
         // describes write_stdin, but the retained arguments still describe exec.
-        if self.name == "exec_command" && family == "write_stdin" {
+        if Self::tool_family(&self.name) == "exec_command" && family == "write_stdin" {
             "exec_command"
         } else {
             family
@@ -302,6 +307,11 @@ impl<'a> ToolIdentity<'a> {
             .and_then(|name| name.split_once("__"))
             .filter(|(server, family)| !server.is_empty() && !family.is_empty())
             .map_or((None, qualified), |(server, family)| (Some(server), family));
+        let family = match family {
+            "Bash" => "exec_command",
+            "BashOutput" => "write_stdin",
+            family => family,
+        };
         Self {
             family,
             machine,

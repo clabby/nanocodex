@@ -2233,3 +2233,451 @@ async fn tool_only_policies_preserve_default_wire_and_durable_write_count() {
     eprintln!("default lifecycle journal evidence: {}", artifact.display());
     server.abort();
 }
+
+/// Public turn API + actual Messages HTTP + reopened SQLite receipt journey.
+#[tokio::test]
+async fn identified_steering_receipts_withdrawal_and_recovery() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("steering.sqlite");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let recovered_started = Arc::new(tokio::sync::Notify::new());
+    let recovered_release = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new().route("/v1/messages", post({
+        let recovered_started = recovered_started.clone();
+        let recovered_release = recovered_release.clone();
+        let started = started.clone(); let release = release.clone(); let requests = requests.clone();
+        move |Json(body): Json<Value>| {
+            let recovered_started = recovered_started.clone();
+            let recovered_release = recovered_release.clone();
+            let started = started.clone(); let release = release.clone(); let requests = requests.clone();
+            async move {
+                let index = { let mut log = requests.lock().unwrap(); log.push(body.clone()); log.len() };
+                eprintln!("{}", json!({"scenario":"identified-steering","request_index":index,"request":body}));
+                if index == 1 { started.notify_one(); release.notified().await; }
+                if index == 2 { recovered_started.notify_one(); recovered_release.notified().await; }
+                ([("content-type", "text/event-stream")], sse(text("steering completed"), "end_turn", 10)).into_response()
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic");
+    let state = reopen(&path).await;
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+        .durability(state.clone())
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    let turn = agent
+        .prompt(PromptRequest::new("original").request_id("identified-turn"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    turn.steer_with_id("keep".into(), "keep constraint")
+        .await
+        .unwrap();
+    turn.steer_with_id("keep".into(), "keep constraint")
+        .await
+        .unwrap();
+    assert!(
+        turn.steer_with_id("keep".into(), "conflicting constraint")
+            .await
+            .is_err()
+    );
+    turn.steer_with_id("remove".into(), "withdraw constraint")
+        .await
+        .unwrap();
+    assert!(!turn.withdraw_steer("keep".into()).await.unwrap());
+    assert!(turn.withdraw_steer("remove".into()).await.unwrap());
+    assert!(
+        turn.steer_with_id("remove".into(), "withdraw constraint")
+            .await
+            .is_err()
+    );
+    // Fence the blocked owner and replay the unfinished operation with a real reopened store.
+    let recovered_state = reopen(&path).await;
+    let (recovered, mut recovered_events) = Nanocodex::builder(Claude::new(client, "test"))
+        .durability(recovered_state.clone())
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        turn.steer_with_id("fenced-new".into(), "must not be accepted")
+            .await
+            .is_err(),
+        "fenced owner cannot accept fresh input"
+    );
+    let recovered_turn = recovered
+        .prompt(PromptRequest::new("original").request_id("identified-turn"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), recovered_started.notified())
+        .await
+        .unwrap();
+    recovered_turn
+        .steer_with_id("keep".into(), "keep constraint")
+        .await
+        .unwrap();
+    assert!(
+        recovered_turn
+            .steer_with_id("keep".into(), "different after restart")
+            .await
+            .is_err()
+    );
+    assert!(
+        recovered_turn
+            .steer_with_id("remove".into(), "withdraw constraint")
+            .await
+            .is_err()
+    );
+    recovered_release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), recovered_turn.result())
+            .await
+            .unwrap()
+            .unwrap()
+            .final_message(),
+        "steering completed"
+    );
+    let journal = recovered_state.state().await.unwrap();
+    let operation = journal.operation("identified-turn").unwrap();
+    assert_eq!(operation.steer_receipts.len(), 2);
+    assert!(!operation.steer_receipts["keep"].withdrawn);
+    assert!(operation.steer_receipts["remove"].withdrawn);
+    let transcript = requests.lock().unwrap().clone();
+    assert_eq!(transcript.len(), 3);
+    let final_request = transcript.last().unwrap()["messages"].to_string();
+    assert_eq!(final_request.matches("keep constraint").count(), 1);
+    assert!(!final_request.contains("withdraw constraint"));
+    let mut markers = Vec::new();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(50), recovered_events.next()).await
+    {
+        if event.kind == nanocodex_agent::events::AgentEventKind::RunSteered {
+            markers.push(serde_json::from_str::<Value>(event.payload.get()).unwrap());
+        }
+    }
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0]["message_id"], "keep");
+    eprintln!(
+        "{}",
+        json!({"scenario":"identified-steering","receipts":operation.steer_receipts,"consumed_markers":markers,"outcome":"dedup conflict withdrawal reopen all passed"})
+    );
+    release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), turn.result())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    recovered.shutdown().await.unwrap();
+    let _ = agent.shutdown().await;
+    while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(10), events.next()).await {}
+    server.abort();
+}
+
+/// The native CLI uses this same public turn API without a durability policy.
+#[tokio::test]
+async fn native_identified_steering_without_durability_policy() {
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    let (client, requests, server) = server(|index, _| {
+        if index == 1 {
+            sse(signed_round(), "tool_use", 10)
+        } else {
+            sse(text("native steer completed"), "end_turn", 10)
+        }
+    })
+    .await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+        .tool(tool(), {
+            let started = started.clone();
+            let release = release.clone();
+            move |_| {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok("native effect completed".into())
+                }
+            }
+        })
+        .build()
+        .unwrap();
+    let turn = agent.prompt("native original prompt").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    turn.steer_with_id("native-keep".into(), "native keep constraint")
+        .await
+        .unwrap();
+    turn.steer_with_id("native-keep".into(), "native keep constraint")
+        .await
+        .unwrap();
+    assert!(
+        turn.steer_with_id("native-keep".into(), "native conflicting input")
+            .await
+            .is_err()
+    );
+    turn.steer_with_id("native-remove".into(), "native withdraw constraint")
+        .await
+        .unwrap();
+    assert!(!turn.withdraw_steer("native-keep".into()).await.unwrap());
+    assert!(turn.withdraw_steer("native-remove".into()).await.unwrap());
+    assert!(
+        turn.steer_with_id("native-remove".into(), "native withdraw constraint")
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), turn.result())
+            .await
+            .unwrap()
+            .unwrap()
+            .final_message(),
+        "native steer completed"
+    );
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    let final_input = requests[1]["messages"].to_string();
+    assert_eq!(final_input.matches("native keep constraint").count(), 1);
+    assert!(!final_input.contains("native withdraw constraint"));
+    let mut markers = Vec::new();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(50), events.next()).await
+    {
+        if event.kind == nanocodex_agent::events::AgentEventKind::RunSteered {
+            markers.push(serde_json::from_str::<Value>(event.payload.get()).unwrap());
+        }
+    }
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0]["message_id"], "native-keep");
+    eprintln!(
+        "{}",
+        json!({"scenario":"native-identified-steering-no-policy","requests":requests,"consumed_markers":markers,"outcome":"identified admission dedup conflict withdrawal marker all passed"})
+    );
+    agent.shutdown().await.unwrap();
+    server.abort();
+}
+
+/// Synthetic legacy continuation in the actual SQLite store, recovered through HTTP.
+#[tokio::test]
+async fn legacy_model_zero_steer_reaches_first_new_boundary_without_repeating_write() {
+    use futures_util::StreamExt;
+    use nanocodex_durability::{OwnerId, StateStore, StoreRecord};
+    use sha2::{Digest, Sha256};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy-steering.sqlite");
+    let old_started = Arc::new(tokio::sync::Notify::new());
+    let old_release = Arc::new(tokio::sync::Notify::new());
+    let resumed_started = Arc::new(tokio::sync::Notify::new());
+    let resumed_release = Arc::new(tokio::sync::Notify::new());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new().route(
+        "/v1/messages",
+        post({
+            let old_started = old_started.clone();
+            let old_release = old_release.clone();
+            let resumed_started = resumed_started.clone();
+            let resumed_release = resumed_release.clone();
+            let requests = requests.clone();
+            move |Json(body): Json<Value>| {
+                let old_started = old_started.clone();
+                let old_release = old_release.clone();
+                let resumed_started = resumed_started.clone();
+                let resumed_release = resumed_release.clone();
+                let requests = requests.clone();
+                async move {
+                    let index = {
+                        let mut log = requests.lock().unwrap();
+                        log.push(body.clone());
+                        log.len()
+                    };
+                    eprintln!(
+                        "{}",
+                        json!({"scenario":"legacy-model-zero","request_index":index,"request":body})
+                    );
+                    if index == 3 {
+                        old_started.notify_one();
+                        old_release.notified().await;
+                    }
+                    if index == 4 {
+                        resumed_started.notify_one();
+                        resumed_release.notified().await;
+                    }
+                    let response = if index == 1 {
+                        sse(signed_round(), "tool_use", 10)
+                    } else {
+                        sse(text("legacy recovered"), "end_turn", 10)
+                    };
+                    ([("content-type", "text/event-stream")], response).into_response()
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic");
+    let writes = Arc::new(AtomicUsize::new(0));
+    let counter = writes.clone();
+    let (agent, _) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+        .tool(tool(), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok("prior Write completed".into()) }
+        })
+        .durability(reopen(&path).await)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    agent
+        .prompt(PromptRequest::new("perform prior Write").request_id("prior-write"))
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    let old_turn = agent
+        .prompt(PromptRequest::new("legacy active task").request_id("legacy-turn"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), old_started.notified())
+        .await
+        .unwrap();
+    // Convert only this fixture's current continuation and pending effect into
+    // the pre-receipt serialized format; prior completed Write history stays intact.
+    let mut store = SqliteStore::open(&path).unwrap();
+    let owned = store
+        .acquire("claude-synthetic", OwnerId::new())
+        .await
+        .unwrap();
+    let mut head: Value = serde_json::from_str(owned.state.payload.as_ref().unwrap()).unwrap();
+    let operation = &mut head["nanocodex_durable_state"]["operations"]["legacy-turn"];
+    let reference = operation["continuation"].as_str().unwrap();
+    let record = store
+        .read_record("claude-synthetic", reference)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut cursor: Value = serde_json::from_str(record.strip_prefix('=').unwrap()).unwrap();
+    cursor.as_object_mut().unwrap().remove("model_step_offset");
+    cursor
+        .as_object_mut()
+        .unwrap()
+        .remove("model_receipt_start");
+    let cursor_json = serde_json::to_string(&cursor).unwrap();
+    let key: String = Sha256::digest(cursor_json.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    operation["continuation"] = json!(key);
+    let mut pending = operation["steps"]
+        .as_object_mut()
+        .unwrap()
+        .remove("model-1")
+        .unwrap();
+    pending["kind"] = json!("model");
+    operation["steps"]["model-0"] = pending;
+    store
+        .replace(
+            "claude-synthetic",
+            &owned.owner,
+            owned.state.revision,
+            &serde_json::to_string(&head).unwrap(),
+            &[StoreRecord {
+                key,
+                value: format!("={cursor_json}"),
+            }],
+        )
+        .await
+        .unwrap();
+    drop(store);
+    let counter = writes.clone();
+    let (recovered, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+        .tool(tool(), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok("unexpected repeated Write".into()) }
+        })
+        .durability(reopen(&path).await)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    let turn = recovered
+        .prompt(PromptRequest::new("legacy active task").request_id("legacy-turn"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), resumed_started.notified())
+        .await
+        .unwrap();
+    turn.steer_with_id("legacy-correction".into(), "correct the legacy task now")
+        .await
+        .unwrap();
+    resumed_release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), turn.result())
+            .await
+            .unwrap()
+            .unwrap()
+            .final_message(),
+        "legacy recovered"
+    );
+    let transcript = requests.lock().unwrap().clone();
+    assert_eq!(
+        transcript.len(),
+        5,
+        "one replay and exactly one corrected model call"
+    );
+    assert!(
+        transcript[4]["messages"]
+            .to_string()
+            .contains("correct the legacy task now")
+    );
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        1,
+        "prior Write must not be repeated"
+    );
+    let mut markers = Vec::new();
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(50), events.next()).await
+    {
+        if event.kind == nanocodex_agent::events::AgentEventKind::RunSteered {
+            markers.push(serde_json::from_str::<Value>(event.payload.get()).unwrap());
+        }
+    }
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0]["message_id"], "legacy-correction");
+    eprintln!(
+        "{}",
+        json!({"scenario":"legacy-model-zero","model_requests":transcript.len(),"prior_write_count":writes.load(Ordering::SeqCst),"markers":markers,"outcome":"first new boundary corrected; prior Write retained"})
+    );
+    old_release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), old_turn.result())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    recovered.shutdown().await.unwrap();
+    let _ = agent.shutdown().await;
+    server.abort();
+}

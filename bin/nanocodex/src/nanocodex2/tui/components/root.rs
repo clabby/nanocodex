@@ -5763,7 +5763,7 @@ mod live_control_tests {
         assert!(root.transcript.component().activity().active);
         assert_eq!(
             root.transcript.component().activity().status.as_deref(),
-            Some("Running exec command…")
+            Some("Agent 7: Running exec command…")
         );
         assert!(!root.has_active_turns());
         let mut terminal =

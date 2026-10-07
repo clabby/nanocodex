@@ -19,6 +19,7 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
         .arguments
         .get("cmd")
         .and_then(Value::as_str)
+        .or_else(|| tool.arguments.get("command").and_then(Value::as_str))
         .unwrap_or("<command unavailable>");
     let mut presentation =
         Presentation::styled_subject("Shell", command_spans(command)).truncate_summary();

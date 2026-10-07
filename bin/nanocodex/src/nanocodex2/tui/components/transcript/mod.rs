@@ -572,14 +572,19 @@ impl Transcript {
     pub(super) fn activity(&self) -> TranscriptEffect {
         TranscriptEffect {
             active: self.model.is_active(),
-            status: self.model.transient().map(|status| match status {
-                TransientStatus::Retrying(delay_ns) => {
-                    let remaining_ns = self
-                        .retry_timer
-                        .map_or(*delay_ns, |timer| timer.remaining_ns);
-                    format!("Retrying in {}…", format_duration(remaining_ns))
-                }
-                status => transient_label(status),
+            status: self.model.transient().map(|status| {
+                let label = match status {
+                    TransientStatus::Retrying(delay_ns) => {
+                        let remaining_ns = self
+                            .retry_timer
+                            .map_or(*delay_ns, |timer| timer.remaining_ns);
+                        format!("Retrying in {}…", format_duration(remaining_ns))
+                    }
+                    status => transient_label(status),
+                };
+                self.model
+                    .transient_agent_id()
+                    .map_or_else(|| label.clone(), |id| format!("Agent {id}: {label}"))
             }),
         }
     }
@@ -1902,9 +1907,12 @@ fn render_entry(
         }
         EntryKind::Tool(tool) => {
             let indent = nested_tool_indent(depth, width);
-            let tool_width = width.saturating_sub(indent);
+            let tool_width = width
+                .saturating_sub(indent)
+                .saturating_sub(tool_agent_label_width(entry));
             let mut layout =
                 tool::render_layout(tool, live_duration_ns, tool_width, theme, expanded);
+            label_tool_agent(entry, &mut layout.lines, theme);
             indent_nested_tool(
                 indent,
                 &mut layout.lines,
@@ -2020,10 +2028,30 @@ fn render_live_tool_summary(
     expanded: bool,
 ) -> Vec<Line<'static>> {
     let indent = nested_tool_indent(depth, width);
-    let tool_width = width.saturating_sub(indent);
+    let tool_width = width
+        .saturating_sub(indent)
+        .saturating_sub(tool_agent_label_width(entry));
     let mut lines = tool::render_live_summary(tool, duration_ns, tool_width, theme, expanded);
+    label_tool_agent(entry, &mut lines, theme);
     indent_nested_tool(indent, &mut lines, theme, expanded, entry.trailing_spacer);
     lines
+}
+
+fn tool_agent_label_width(entry: &TranscriptEntry) -> u16 {
+    entry.tool_agent_id.map_or(0, |id| {
+        u16::try_from(format!(" · Agent {id}").chars().count()).unwrap_or(u16::MAX)
+    })
+}
+
+fn label_tool_agent(entry: &TranscriptEntry, lines: &mut [Line<'static>], theme: &Theme) {
+    if let Some(id) = entry.tool_agent_id
+        && let Some(line) = lines.first_mut()
+    {
+        line.spans.push(Span::styled(
+            format!(" · Agent {id}"),
+            Style::default().fg(theme.muted()),
+        ));
+    }
 }
 
 fn nested_tool_indent(depth: u16, width: u16) -> u16 {

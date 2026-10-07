@@ -128,12 +128,14 @@ enum SteerTarget {
 enum SteerResolution {
     Admitted,
     Failed,
+    Rejected(String),
     Unconfirmed { error: String, active: bool },
     Stale,
 }
 
 enum SteerFailure {
     Inactive,
+    Rejected(String),
     Other(String),
 }
 
@@ -143,9 +145,17 @@ impl SteerFailure {
             if status.as_u16() == 409 && matches!(code.as_str(), "turn_not_active" | "turn_not_steerable"))
         {
             Self::Inactive
+        } else if Self::known_rejection(&error) {
+            Self::Rejected(error.to_string())
         } else {
             Self::Other(error.to_string())
         }
+    }
+
+    fn known_rejection(error: &ManagedError) -> bool {
+        matches!(error, ManagedError::Configuration(_))
+            || matches!(error, ManagedError::Http { status, code, .. }
+                if status.is_client_error() && code != "command_delivery_unknown")
     }
 
     fn backend(error: NanocodexError) -> Self {
@@ -159,6 +169,12 @@ impl SteerFailure {
             && matches!(code.as_str(), "turn_not_active" | "turn_not_steerable")
         {
             return Self::Inactive;
+        }
+        if let NanocodexError::Backend { source, .. } = &error
+            && let Some(managed) = source.downcast_ref::<ManagedError>()
+            && Self::known_rejection(managed)
+        {
+            return Self::Rejected(error.to_string());
         }
         Self::Other(error.to_string())
     }
@@ -1334,6 +1350,7 @@ impl DriverRuntime {
                 active: self.steer_target_current(target),
             },
             Err(SteerFailure::Inactive) => SteerResolution::Failed,
+            Err(SteerFailure::Rejected(error)) => SteerResolution::Rejected(error),
         }
     }
 
@@ -3616,6 +3633,12 @@ async fn run_inner(
                             // Shared telemetry cannot correlate this request. Preserve it
                             // for explicit review even after the owning turn finishes.
                             app.update(AppEvent::SteerUnconfirmed { pane, id })
+                        }
+                        SteerResolution::Rejected(error) => {
+                            if let Some(cancellation) = runtime.unresolved_steers.remove(&(pane, id)) { cancellation.cancel(); }
+                            runtime.steer_receipts.remove(&(pane, id));
+                            request_render(app.update(AppEvent::NotifyError { pane, error: format!("Steering rejected: {error}") }), &mut scheduler);
+                            app.update(if withdraw { AppEvent::SteerWithdrawn { pane, id } } else { AppEvent::SteerFailed { pane, id } })
                         }
                         SteerResolution::Failed if withdraw => {
                             if let Some(cancellation) = runtime.unresolved_steers.remove(&(pane, id)) { cancellation.cancel(); }

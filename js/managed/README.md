@@ -21,6 +21,18 @@ platform capabilities are shared. They retain the same authorization and owned
 handlers, exposed through Code Mode for Codex and native tool calls for Claude.
 The public SDK retains its configurable tool modes for other embedders.
 
+| Tool ownership | Examples | Model invocation |
+| --- | --- | --- |
+| Codex | `exec`, `wait`, `exec_command`, `write_stdin`, `apply_patch`, `web__run` | Code Mode |
+| Claude | `Bash`, `BashOutput`, `Read`, `Write`, `Edit`, native task tools | Direct Messages tool calls |
+| Shared platform | Memories, session recall, canonical subagents, `environment`, CUA, connectors, Vault | Each backend's own tool interface |
+
+Claude steering accepts identified corrections with the same durable receipt,
+deduplication, and pending-withdrawal contract as Codex. Consumption emits
+`run.steered` with the caller's `message_id`; acknowledgement means the input is
+retained, and consumption happens at the next model boundary. Existing admitted
+tools finish without replaying their actions.
+
 Run `pnpm --filter nanocodex-managed-service test:code-mode-only` for the real
 Worker/WASM/QuickJS journey, including blocked direct calls and durable recovery.
 
