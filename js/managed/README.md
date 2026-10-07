@@ -209,8 +209,13 @@ would break already-created sessions.
 In production, the private `NANOCODEX_SESSION_MODEL_EGRESS` binding targets
 egress's `SessionModelEgress` entrypoint. New-strategy Sessions validate retained
 ownership locally for each model WebSocket connection, reconnect, and HTTPS request, avoiding
-a broker callback into the originating Session. This binding is not exposed to
-tools. Credential selection remains live in the broker. Without the optional
+a broker callback into the originating Session. Apart from the Session's own
+managed web search and image generation/editing tools, which use the same model
+credential and send exact `POST` `/v1/search`, `/v1/images/generations`, and
+`/v1/images/edits` requests through it with the same per-request owner check
+(and without placement), this binding is not exposed to tools. Roll that tool
+routing out only after egress whose `SessionModelEgress` accepts those routes is
+live; older egress rejects them with 403. Credential selection remains live in the broker. Without the optional
 binding, the transport retains the usual broker ownership lookup; legacy
 directory subjects retain their existing authority.
 

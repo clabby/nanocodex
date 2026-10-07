@@ -37,7 +37,9 @@ describe("Session-owned credential authority", () => {
     expect(() => scoped.fetch("https://nanocodex.internal/v1/responses", { method, headers })).toThrow(/ownership is unavailable/);
     expect(model.fetch).toHaveBeenCalledTimes(1);
     expect(owner).toHaveBeenCalledTimes(2);
-    await scoped.fetch("https://nanocodex.internal/v1/search", { method: "POST", headers });
+    // Session web search/image tools share the private path and fail closed too.
+    expect(() => scoped.fetch("https://nanocodex.internal/v1/search", { method: "POST", headers })).toThrow(/ownership is unavailable/);
+    await scoped.fetch("https://nanocodex.internal/v1/realtime/calls", { method: "POST", headers });
     expect(general.fetch).toHaveBeenCalledTimes(1);
     expect(model.fetch).toHaveBeenCalledTimes(1);
   });

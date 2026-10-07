@@ -123,7 +123,8 @@ import { createWorkspaceFilesystem, resolveNamespaceCwd } from "nanocodex-tools"
 import { SessionAttachments } from "./attachments";
 import { CLAUDE_INLINE_PREVIEW_MAX_BYTES, inlineClaudeAttachmentPreviews } from "./claude-attachments";
 import { CLAUDE_PENDING_CONTEXT_MAX_ENTRIES, CLAUDE_REALTIME_END, CLAUDE_REALTIME_START, claudeRealtimeContext, prependClaudeContext } from "./claude-realtime";
-import { createManagedImageFetch, managedImageReference } from "./managed-image-fetch";
+import { managedImageReference } from "./managed-image-fetch";
+import { managedImageFetch, managedWebFetch } from "./managed-tool-fetch";
 import { recentSessionImages, SESSION_IMAGE_REMEMBER_EVENT } from "./session-images";
 import { createR2ViewImage } from "./attachment-image";
 import { createBrainWorkspace } from "./brain-workspace";
@@ -10624,11 +10625,11 @@ export class DurableAgentSession extends DurableComputerObject {
       })] : []),
       web({
         url: "https://managed-tools.internal/web-search",
-        fetch: managedWebFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
+        fetch: managedWebFetch(this.#modelEgress(), this.ctx.id.toString()),
       }),
       imageGeneration({
         url: "https://managed-tools.internal/image-generation",
-        fetch: managedImageFetch(this.env, this.#credentialSubject(), configuration.chatgpt_account_id),
+        fetch: managedImageFetch(this.#modelEgress(), this.ctx.id.toString()),
         workspace: sharedBrainWorkspace,
         recentImages: async (sessionId, count) => {
           const rootSessionId = this.#imageSessionRoot(sessionId);
@@ -14703,53 +14704,6 @@ function canonicalJson(value: unknown): string {
   return `{${Object.keys(object).sort().map((key) => (
     `${JSON.stringify(key)}:${canonicalJson(object[key])}`
   )).join(",")}}`;
-}
-
-function managedWebFetch(env: Env, subject: string, accountId?: string): typeof fetch {
-  return async (input, init) => {
-    const incoming = new Request(input, init);
-    const value = await incoming.json<{
-      commands?: unknown;
-      model?: unknown;
-      session_id?: unknown;
-    }>();
-    if (!value.commands || typeof value.commands !== "object" || Array.isArray(value.commands)
-      || typeof value.session_id !== "string" || !value.session_id
-      || (value.model !== undefined && !isAgentModel(value.model))) {
-      return json({ error: "invalid managed web request" }, { status: 400 });
-    }
-    return fetchManagedTool(env, subject, "/v1/search", {
-      id: value.session_id,
-      model: value.model ?? DEFAULT_AGENT_SETTINGS.model,
-      commands: value.commands,
-      settings: { allowed_callers: ["direct"], external_web_access: true },
-      max_output_tokens: 10_000,
-    }, accountId);
-  };
-}
-
-function managedImageFetch(env: Env, subject: string, accountId?: string): typeof fetch {
-  return createManagedImageFetch((path, body) => fetchManagedTool(env, subject, path, body, accountId));
-}
-
-function fetchManagedTool(
-  env: Env,
-  subject: string,
-  path: "/v1/search" | "/v1/images/generations" | "/v1/images/edits",
-  body: unknown,
-  accountId?: string,
-): Promise<Response> {
-  return env.NANOCODEX.fetch(new Request(`https://nanocodex.internal${path}`, {
-    method: "POST",
-    headers: {
-      authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
-      "content-type": "application/json",
-      "user-agent": "nanocodex-managed/0.1.0",
-      "x-nanocodex-subject": subject,
-      ...(accountId ? { "x-nanocodex-chatgpt-account-id": accountId } : {}),
-    },
-    body: JSON.stringify(body),
-  }));
 }
 
 function authorized(request: Request, expected: string): boolean {

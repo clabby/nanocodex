@@ -25,7 +25,7 @@ describe("trusted initial Session ingress placement", () => {
     expect(() => scoped.fetch("https://nanocodex.internal/v1/responses", { method, headers })).toThrow(/ownership is unavailable/);
     expect(model.fetch).toHaveBeenCalledTimes(2);
     expect(ownerLookup).toHaveBeenCalledTimes(3);
-    await scoped.fetch("https://nanocodex.internal/v1/search", { method: "POST", headers });
+    await scoped.fetch("https://nanocodex.internal/v1/realtime/calls", { method: "POST", headers });
     expect(general.fetch.mock.calls[0]![0].headers.has(regionHeader)).toBe(false);
   });
   it("strips runtime placement on both legacy subjects and private bindings without a trusted callback", async () => {
