@@ -77,7 +77,7 @@ export class ObservedAccountHostedTools extends AccountHostedTools {
       const config=await this.ctx.storage.get('fixture')??{},started=Date.now(),selected=(await request.clone().json()).machine_id;
       console.info({type:'fixture.snapshot',stage:'start',at:started,selected:selected??null});
       await new Promise(resolve=>setTimeout(resolve,selected?0:(config.delay_ms??0)));
-      while((await this.ctx.storage.get('fixture'))?.hold) await new Promise(resolve=>setTimeout(resolve,10));
+      for(let held;(held=await this.ctx.storage.get('fixture'))?.hold||(selected&&held?.hold_selected===selected);) await new Promise(resolve=>setTimeout(resolve,10));
       const response=config.fail?new Response('fixture discovery failure',{status:503}):await super.fetch(request);
       console.info({type:'fixture.snapshot',stage:'end',at:Date.now(),status:response.status}); return response;
     }
@@ -138,7 +138,7 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
   await mkdir(workspace, { recursive: true });
   const records = [], wire = [], http = [], runtime = [], samples = [];
   const result = { command, label, inputs: { owner, thread, machine, scripts, mounts, snapshot_delay_ms: 120, vm_delay_ms: [160,40], warmups: 2 },
-    expected: { once_only_effects: 14, concurrent_cell_capture_count: 7, unavailable_vms_excluded: true, brain_bypasses_prepare: true, discovery_failure_predispatch: true, local_bypasses_failed_discovery: true, mixed_cell_routes: true, reconnect_keeps_pinned_generation: true, fresh_cell_recovers: true }, observed: {} };
+    expected: { once_only_effects: 14, concurrent_cell_capture_count: 7, unavailable_vms_excluded: true, brain_bypasses_prepare: true, discovery_failure_predispatch: true, thread_native_catalog_rejected: true, mixed_cell_routes: true, reconnect_keeps_pinned_generation: true, fresh_cell_recovers: true }, observed: {} };
   const capture = line => { runtime.push(line); const start=line.indexOf('{"type":'); if(start>=0) {try {records.push(JSON.parse(line.slice(start)));} catch {}} };
   let mf, native, tools, attachment, localAttachment, failure;
   const prepSource = process.env.NANOCODEX_NAMESPACE_PREP_SOURCE;
@@ -169,9 +169,16 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
     const endpoint=new URL("/tool-host",base);endpoint.protocol="ws:";
     attachment=createAttachment(tools,{endpoint:endpoint.href,transport:{connect(){const socket=new WebSocket(endpoint,{headers:{"x-nanocodex-owner-id":owner}}),send=socket.send.bind(socket);socket.send=(data,...args)=>{wire.push({direction:"host",frame:JSON.parse(String(data))});return send(data,...args);};socket.on("message",data=>wire.push({direction:"broker",frame:JSON.parse(String(data))}));return socket;}}},{machines:[{id:machine,name:"Synthetic Preparation Hand",workspace,capabilities:["shell"]}],attachmentId:machine});
     assert.equal((await attachment.connect()).connected,true);
-    const localEndpoint=new URL(`/v1/agents/${thread}/tool-host`,base);localEndpoint.protocol="ws:";
+    // Thread-scoped workspace Hands are retired: a native catalog on the thread
+    // tool host is refused with a migration error before it becomes routable.
+    const retiredEndpoint=new URL(`/v1/agents/${thread}/tool-host`,base);retiredEndpoint.protocol="ws:";
+    const retired=createAttachment(tools,{endpoint:retiredEndpoint.href,transport:{connect(){return new WebSocket(retiredEndpoint,{headers});}}},
+      {machines:[{id:localMachine,name:"Synthetic Session Hand",workspace,capabilities:["shell"]}],attachmentId:localMachine});
+    await assert.rejects(retired.connect(),/hand_migration_required/);await retired.close().catch(()=>{});
+    // The second computer attaches once at account scope, like every physical Hand.
+    const localEndpoint=new URL("/tool-host",base);localEndpoint.protocol="ws:";
     const connectLocal=()=>createAttachment(tools,{endpoint:localEndpoint.href,transport:{connect(){
-      const socket=new WebSocket(localEndpoint,{headers}),send=socket.send.bind(socket);
+      const socket=new WebSocket(localEndpoint,{headers:{"x-nanocodex-owner-id":owner}}),send=socket.send.bind(socket);
       socket.send=(data,...args)=>{wire.push({direction:"local-host",frame:JSON.parse(String(data))});return send(data,...args);};
       socket.on("message",data=>wire.push({direction:"local-broker",frame:JSON.parse(String(data))}));return socket;
     }}},{machines:[{id:localMachine,name:"Synthetic Session Hand",workspace,capabilities:["shell"]}],attachmentId:localMachine});
@@ -205,23 +212,36 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
       assert.ok(stage);
       const snapshots=rows.filter(row=>row.type==="fixture.snapshot"&&row.stage==="start").length;
       const pools=rows.filter(row=>row.type==="fixture.pool"&&row.stage==="start").length;
-      assert.equal(snapshots,0);assert.equal(pools,0);
+      // The second computer is an account Hand. Once discovered, each fresh
+      // cell performs one selected-Hand lookup and never prepares VM pools.
+      assert.equal(snapshots,1);
+      if(i>0) {assert.equal(pools,0);
+        assert.ok(rows.filter(row=>row.type==="fixture.snapshot"&&row.stage==="start").every(row=>row.selected===localMachine),"only the selected account Hand is looked up");}
       if(i>=2) localSamples.push({scenario,prepare_ms:stage.duration_ms,public_turn_ms:value.elapsed_ms,snapshots,pools});
     }
     const processStart=records.length;
     const processTurn=await runTurn("PROCESS");assert.match(JSON.stringify(processTurn.turn),/PROCESS_RESUMED/);
-    if(!prepSource) assert.equal(records.slice(processStart).filter(row=>row.type==="fixture.pool"||row.type==="fixture.snapshot").length,0,"retained process polling must resolve its original binding without inventory");
+    if(!prepSource) {
+      // Only the starting exec looks up its selected account Hand; retained
+      // process polling resolves its original binding without inventory.
+      const processRows=records.slice(processStart);
+      assert.equal(processRows.filter(row=>row.type==="fixture.pool").length,0);
+      assert.deepEqual(processRows.filter(row=>row.type==="fixture.snapshot"&&row.stage==="start").map(row=>row.selected),[localMachine],"retained process polling must resolve its original binding without inventory");
+    }
     const inventory=await runTurn("INVENTORY");
     for(const id of [machine,localMachine]) assert.match(JSON.stringify(inventory.turn),new RegExp(id));
     const mixed=await runTurn("MIXED");
     for(const marker of ["LOCAL_FIRST","ACCOUNT_SECOND","LOCAL_AGAIN","unknown"]) assert.match(JSON.stringify(mixed.turn),new RegExp(marker));
     if(!prepSource) {
-    assert.equal((await request("/account-tools/__fixture",{method:"POST",body:JSON.stringify({hold:true})})).status,204);
+    // Hold only the other Hand's selected lookup, after this cell pinned the
+    // local account Hand's first generation, then reconnect that Hand.
+    assert.equal((await request("/account-tools/__fixture",{method:"POST",body:JSON.stringify({hold_selected:machine})})).status,204);
     const reconnectStart=records.length;
     const reconnectTurn=runTurn("RECONNECT");
     void reconnectTurn.catch(()=>{});
-    for(let i=0;i<1000&&!records.slice(reconnectStart).some(row=>row.type==="fixture.snapshot"&&row.stage==="start");i++) await delay(5);
-    assert.ok(records.slice(reconnectStart).some(row=>row.type==="fixture.snapshot"&&row.stage==="start"));
+    const heldLookup=()=>records.slice(reconnectStart).some(row=>row.type==="fixture.snapshot"&&row.stage==="start"&&row.selected===machine);
+    for(let i=0;i<1000&&!heldLookup();i++) await delay(5);
+    assert.ok(heldLookup());
     await localAttachment.close();localAttachment=connectLocal();assert.equal((await localAttachment.connect()).connected,true);
     assert.equal((await request("/account-tools/__fixture",{method:"POST",body:JSON.stringify({delay_ms:0})})).status,204);
     const reconnected=await reconnectTurn;
@@ -238,13 +258,6 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
     const brain=await runTurn("BRAIN");assert.match(JSON.stringify(brain.turn),/BRAIN_INDEPENDENT/);
     assert.ok(!records.some(row=>row.type==="hand.tool.stage"&&row.parent_call_id==="call_preparation_BRAIN"&&row.stage==="namespace.prepare"));
     assert.equal((await request("/account-tools/__fixture",{method:"POST",body:JSON.stringify({delay_ms:30,fail:true})})).status,204);
-    if(!prepSource) {
-    const localStart=records.length;
-    const local=await runTurn("LOCAL");assert.match(JSON.stringify(local.turn),/LOCAL_INDEPENDENT/);
-    const localRows=records.slice(localStart);
-    assert.equal(localRows.filter(row=>row.type==="fixture.pool"||row.type==="fixture.snapshot").length,0,"known session-local route must not prepare unrelated account/VM routes even when discovery fails");
-    assert.equal(localRows.filter(row=>row.type==="hand.tool.stage"&&row.stage==="namespace.prepare").length,1);
-    }
     const failedId=`00000000-0000-7000-8000-${String(number++).padStart(12,"0")}`;
     const failureAdmission=await request(`/v1/agents/${thread}/turns`,{method:"POST",body:JSON.stringify({id:failedId,input:"PREPARATION_FAIL"})});
     assert.equal(failureAdmission.status,202);
@@ -295,7 +308,7 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
 
     }
     await writeFile(join(output,"diagnostics.json"),JSON.stringify(diagnostics.value,null,2));
-    result.observed={once_only_effects:effects.length,concurrent_cell_capture_count:7,unavailable_vms_excluded:true,brain_bypasses_prepare:true,discovery_failure_predispatch:true,failed_discovery_cancelled:true,local_bypasses_failed_discovery:!prepSource,mixed_cell_routes:true,known_offline_selected_only:!prepSource,reconnect_keeps_pinned_generation:!prepSource,fresh_cell_recovers:!prepSource,process_resumed:true,full_inventory:true,samples,localSamples};
+    result.observed={once_only_effects:effects.length,concurrent_cell_capture_count:7,unavailable_vms_excluded:true,brain_bypasses_prepare:true,discovery_failure_predispatch:true,failed_discovery_cancelled:true,thread_native_catalog_rejected:true,mixed_cell_routes:true,known_offline_selected_only:!prepSource,reconnect_keeps_pinned_generation:!prepSource,fresh_cell_recovers:!prepSource,process_resumed:true,full_inventory:true,samples,localSamples};
     console.log(JSON.stringify({evidence:output,label,...result.observed}));
   } catch(error){failure=error;result.error=error.stack;throw error;}
   finally {try{await localAttachment?.close();await attachment?.close();await tools?.close();await native?.close();await mf?.dispose();}finally{

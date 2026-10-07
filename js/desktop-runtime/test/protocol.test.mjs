@@ -68,12 +68,13 @@ test("default Hand preparation creates its workspace once and reconnects the sav
   const server = createServer((_request, response) => { response.setHeader("content-type", "application/json"); response.end(JSON.stringify({ data: [] })); });
   const sockets = new WebSocketServer({ server });
   let catalogs = 0;
-  sockets.on("connection", socket => socket.on("message", data => {
+  const attachedPaths = [];
+  sockets.on("connection", (socket, request) => { attachedPaths.push(new URL(request.url, "http://host").pathname); socket.on("message", data => {
     const frame = JSON.parse(String(data));
     if (frame.type === "catalog") { catalogs++; socket.send(JSON.stringify({ type: "ready" })); }
     if (frame.type === "ping") socket.send(JSON.stringify({ type: "pong", nonce: frame.nonce }));
     if (frame.type === "drain") socket.send(JSON.stringify({ type: "draining" }));
-  }));
+  }); });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
   let saved;
@@ -101,17 +102,27 @@ test("default Hand preparation creates its workspace once and reconnects the sav
     await restored.refresh();
     assert.equal(await restored.prepareDefaultHand(), null);
     assert.equal(catalogs, 2, "A reconnect must preserve an explicit disable");
-    const disabled = new DesktopRuntime({ baseUrl, apiKey: key, saved });
+    // A retained thread-scoped workspace Hand from an older client is retired
+    // on restore and never publishes again.
+    const legacy = { id: "legacy-folder", kind: "local", name: "Legacy folder", workspace: first.workspace, agentId: "folder-test" };
+    const disabled = new DesktopRuntime({ baseUrl, apiKey: key, saved: { ...saved, hands: [...saved.hands, legacy] } });
     try {
       await disabled.refresh();
       assert.equal(await disabled.prepareDefaultHand(), null);
       await disabled.setDefaultHandEnabled(true);
       assert.equal((await disabled.prepareDefaultHand()).id, first.id);
-      await disabled.stopHand(first.id);
+      // A tab folder resolves to this computer's one account Hand; it never
+      // publishes a separate thread-scoped workspace Hand.
       const folder = await disabled.prepareFolderHand({ agentId: "folder-test", workspace: first.workspace });
-      assert.notEqual(folder.id, first.id);
-      assert.equal(folder.agentId, "folder-test");
+      assert.equal(folder.id, first.id);
+      assert.equal(folder.agentId, undefined);
+      assert.deepEqual(disabled.state().hands.map(hand => hand.id), [first.id]);
+      await disabled.setDefaultHandEnabled(false);
+      await assert.rejects(disabled.prepareFolderHand({ agentId: "folder-test", workspace: first.workspace }), /Hand is disabled/);
       assert.equal(disabled.state().defaultHandEnabled, false, "A chosen folder must not re-enable the account Hand");
+      assert.deepEqual(disabled.state().hands.map(hand => hand.id), [first.id]);
+      await assert.rejects(disabled.saveHand({ ...legacy, id: "new-folder" }), /Thread workspace Hands were retired/);
+      assert.deepEqual([...new Set(attachedPaths)], ["/v1/account/tool-host"], "Only the account Hand publishes");
       await disabled.removeHand(first.id);
       assert.equal(await disabled.prepareDefaultHand(), null, "Removing the automatic Hand must not recreate it");
     } finally { await disabled.close(); }
@@ -159,8 +170,10 @@ test("accepted turns lock model and mode while effort and Fast use a minimal pat
   assert.equal(patches.length, 1);
 });
 test("Hand scope and VM resource validation preserve explicit grants", () => {
-  const config = { id: "desktop-test", name: "Laptop", workspace: "/tmp/project", kind: "local", agentId: "test-agent" };
+  const config = { id: "desktop-test", name: "Laptop", workspace: "/tmp/project", kind: "local" };
   assert.deepEqual(validateHand(config), config);
+  // Thread-scoped workspace Hands are retired; one account Hand serves every thread.
+  assert.throws(() => validateHand({ ...config, agentId: "test-agent" }), /Thread workspace Hands were retired/);
   assert.throws(() => validateHand({ ...config, workspace: "relative" }));
   assert.throws(() => validateHand({ ...config, id: "brain" }));
   assert.throws(() => validateHand({ ...config, kind: "vm", cpus: 0 }));
@@ -585,4 +598,52 @@ test("deep mixed split layouts retain every agent and draft through JSON persist
   assert.deepEqual(restored.paneLayouts, [tree]);
   assert.deepEqual(restored.tabs.map(t => t.draft), tabs.map(t => t.draft));
   assert.equal(restored.tiledTabIDs.length, 96);
+});
+
+test("folder prompts keep one computer identity and carry the native directory over HTTP", async t => {
+  const requests = [];
+  const baseUrl = await service(t, async (request, response) => {
+    if (request.method !== "POST") { response.end(JSON.stringify({ data: [] })); return; }
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const value = JSON.parse(body);
+    requests.push({ origin: request.headers["x-nanocodex-client-context"], value });
+    response.end(JSON.stringify({ turn_id: value.id, state: "queued" }));
+  });
+  const runtime = new DesktopRuntime({ baseUrl, apiKey: key });
+  t.after(() => runtime.close());
+  await runtime.refresh();
+  await runtime.saveHand({ id: "computer", name: "Computer", kind: "local", workspace: await directory(t) });
+  const before = runtime.state().hands.map(hand => hand.id);
+  for (const [index, nativeCwd] of ["/Users/example/project", "/tmp/δοκιμή 🚀"].entries()) {
+    await runtime.queuePrompt({ agentId: "thread", input: "Read this folder", requestId: `folder-${index}`, handId: "computer", nativeCwd });
+    const request = requests.at(-1);
+    assert.match(request.origin, /^[\x20-\x7e]+$/);
+    assert.deepEqual(JSON.parse(request.origin), { client: "nanocodex-desktop", hand: "user:computer", native_cwd: nativeCwd });
+    assert.deepEqual(runtime.state().hands.map(hand => hand.id), before);
+  }
+  await assert.rejects(runtime.queuePrompt({ agentId: "thread", input: "Read", requestId: "bad-folder", handId: "computer", nativeCwd: "relative/path" }), /native_cwd/);
+  assert.equal(requests.length, 2, "Invalid folder hints are rejected before admission");
+  await runtime.queuePrompt({ agentId: "thread", input: "Cloud task", requestId: "cloud", handId: "another-computer", nativeCwd: "/tmp/private-local-folder" });
+  assert.equal(requests.at(-1).origin, undefined, "A local directory never claims to originate on another computer");
+});
+
+
+test("restoring retired folder Hands preserves drafts and admitted request identities", async t => {
+  const legacy = { id: "legacy-folder", kind: "local", name: "Old folder", workspace: "/work/project", agentId: "thread" };
+  const pending = { id: "pending", tabID: "local", text: "Continue", predecessor: "", target: legacy.id, folder: legacy.workspace, phase: "submitting" };
+  const captured = { ...pending, id: "captured", prompt: "Continue\n\n[Selected Hand: legacy-folder]", acceptedCursor: "123" };
+  const saved = { hands: [legacy], layout: { tabs: [
+    { id: "local", threadId: "thread", target: legacy.id, folder: legacy.workspace, draft: "Keep my work" },
+    { id: "remote", target: "offline-server", folder: "/srv/project", draft: "Remote work" },
+  ], pendingMessages: [pending, captured] } };
+  const runtime = new DesktopRuntime({ saved, dataDirectory: await directory(t) });
+  t.after(() => runtime.close());
+  const state = runtime.state();
+  assert.deepEqual(state.hands, []);
+  assert.deepEqual(state.layout.tabs[0], { ...saved.layout.tabs[0], target: "" });
+  assert.deepEqual(state.layout.tabs[1], saved.layout.tabs[1]);
+  assert.deepEqual(state.layout.pendingMessages[0], { ...pending, target: "" });
+  assert.deepEqual(state.layout.pendingMessages[1], captured);
+  assert.equal(saved.layout.tabs[0].target, legacy.id, "Restoration must not mutate saved input");
 });

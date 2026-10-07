@@ -304,9 +304,9 @@ navigation, queue ownership, and review behavior.
   `~/Nanocodex` if needed. Relaunch reuses and reconnects the same Hand; temporary
   connection failures retry automatically. **Stop** disables the automatic Hand
   until explicitly re-enabled, including across relaunches.
-  Choosing a
-  folder for a tab and then sending automatically prepares a Hand scoped to that
-  thread. Merely choosing a folder does not start compute.
+  Folder tabs reuse this same computer Hand. Sending a message carries the
+  selected folder as its native working directory without publishing another
+  Hand. Merely choosing a folder does not start compute.
 - Native Hands run commands with the macOS user's permissions. Their processes
   use a filtered environment. Closing a window keeps Nanocodex and its Hands
   running; quitting disconnects the Hands and stops owned processes.

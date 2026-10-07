@@ -29,7 +29,7 @@ See the [menu-bar companion](../../macos/HandMenuBar/README.md) for build and li
 details.
 
 The account-only `GET /v1/account/hands/inventory` combines live and retained
-account registrations. It excludes thread-local tool hosts and Connect-scoped
+account registrations. It excludes thread tool hosts and Connect-scoped
 routes and returns only names, IDs, kind and connection state. Discovery has a
 four-second deadline. Unavailable account sources retain known identities as
 unknown and mark the inventory incomplete; account-owned offline devices remain
@@ -49,8 +49,44 @@ methods are `client.hand.list()`, `client.hand.forget(id, { force: true })`, and
 
 Run `pnpm --filter nanocodex-managed-service test:hand-inventory` for the real
 HTTP/WebSocket journey covering legacy-index retirement, account isolation,
-authorization, offline retention, and thread-local reconnects. Each run writes
-its request and catalog evidence under ignored `output/hand-inventory-journey/`.
+authorization, offline retention, and migration rejection of thread-scoped
+native catalogs. Each run writes its request and catalog evidence under ignored
+`output/hand-inventory-journey/`.
+
+### One account Hand per computer
+
+Physical computers attach only to the account broker at
+`/v1/account/tool-host`; that one Hand provides shell, code, screen and CUA to
+every thread. Thread-scoped workspace Hands are retired. A thread tool host
+(`/v1/agents/:id/tool-host`) that publishes machine metadata or a canonical
+machine primitive (`exec_command`, `write_stdin`, `preview`,
+`native_secure_input`, `validate_app`, `mcp__cua_repl__*`) is refused before
+publication with `catalog_contract_mismatch` carrying
+`hand_migration_required`. Thread tool hosts may still publish other tools
+(SDK `toolsTarget(agentId)` MCP/app tools). Leased VM attachments remain
+thread-scoped: their fixed `vm-host:<allocation>:<epoch>` route is injected by
+the Worker only after verifying the server-issued lease grant, so machine kind
+or metadata alone never qualifies.
+
+Routes retained from older services are not deleted. They leave discovery,
+inventory, file reads, secure input and new namespace routing even while
+connected. The exact runtime that still owns a durable namespace process or an
+unsettled admitted call may reconnect solely to finish that work: `write_stdin`
+reaches it through the process's runtime-pinned key, and no other runtime or
+reused machine ID matches. Once that work settles, the runtime's reconnect is
+refused like any new thread-scoped catalog. The desktop runtime publishes only
+its account Hand and drops saved thread-scoped Hand records.
+
+Run `pnpm --filter nanocodex-managed-service test:hand-retirement` for the
+upgrade journey: an older service build admits a thread-scoped Hand and a
+process, the candidate restarts on the same durable storage, hides that Hand,
+finishes the pinned process, refuses a fresh thread-scoped native publisher and
+admits a non-native thread catalog. Set `NANOCODEX_RETIREMENT_BASELINE=<ref>`
+to choose the older build and `NANOCODEX_RETIREMENT_CANDIDATE=<ref>` to replay
+another revision. This upgrade fixture requires Git history containing the
+baseline commit `f8a2b451dabba74cff003d6ec54d32cb06fd113b`; shallow checkouts
+must fetch that commit before running it. Evidence is written under ignored
+`output/hand-retirement-journey/`.
 
 The broker durably claims each call before sending it once. The daemon owns execution; a socket carries requests and replies. Each admitted source call has one durable transport command ID. The living Hand keeps its running task or immutable terminal receipt until the broker records the result and acknowledges it.
 

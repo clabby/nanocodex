@@ -1101,7 +1101,7 @@ mod tests {
         );
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "requires explicit live account credentials and a publishing Hand"]
+    #[ignore = "uses the saved account login and an explicitly selected publishing Hand"]
     async fn live_video_receiver() {
         let _logs = std::env::var("NANOCODEX_SCREEN_TEST_LOG").ok().map(|path| {
             nanocodex_observability::ObservabilityBuilder::new("screen-test", "1")
@@ -1110,12 +1110,10 @@ mod tests {
                 .install()
                 .unwrap()
         });
-        let client = ManagedClient::new(
-            std::env::var("NANOCODEX_MANAGED_URL").unwrap(),
-            nanocodex_managed::ManagedApiKey::parse(std::env::var("NANOCODEX_API_KEY").unwrap())
-                .unwrap(),
-        )
-        .unwrap();
+        // The explicitly opted-in live journey uses the same private credential
+        // selection as the CLI; no token needs to be exported into a test command.
+        let client = nanocodex_cli_auth::client_from_environment(None).unwrap();
+        let expected_machine = std::env::var("NANOCODEX_SCREEN_TEST_MACHINE_ID").ok();
         let performance = std::env::var_os("NANOCODEX_SCREEN_TEST_PERFORMANCE").is_some();
         #[allow(deprecated)]
         let mut picker = Picker::from_fontsize(ratatui_image::FontSize {
@@ -1133,6 +1131,9 @@ mod tests {
                 controller.updates.changed().await.unwrap();
                 let state = controller.updates.borrow_and_update().clone();
                 if let Some(surface) = state.surfaces.iter().find(|s| {
+                    if let Some(id) = &expected_machine {
+                        return &s.machine_id == id;
+                    }
                     s.machine_name
                         .to_lowercase()
                         .eq(&std::env::var("NANOCODEX_SCREEN_TEST_HAND")
@@ -1146,6 +1147,9 @@ mod tests {
         .await
         .unwrap();
         controller.command(&client, Command::Watch(surface));
+        if !performance {
+            controller.command(&client, Command::ToggleAudio);
+        }
         tokio::time::timeout(Duration::from_secs(40), async {
             let mut frames = 0;
             let mut previous = None;

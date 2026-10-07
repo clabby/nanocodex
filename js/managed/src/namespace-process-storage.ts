@@ -34,6 +34,15 @@ export class NamespaceProcessSessions implements NamespaceProcessStorage {
       id, JSON.stringify(binding));
   }
 
+  /** Whether an unfinished durable process is pinned to this exact provider key. */
+  ownsProcessSessionKey(processSessionKey: string): boolean {
+    this.ensureSchema();
+    return this.storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM managed_namespace_processes WHERE json_extract(binding_json, '$.processSessionKey') = ?",
+      processSessionKey,
+    ).one().count > 0;
+  }
+
   delete(id: number): void {
     this.ensureSchema();
     this.storage.sql.exec("DELETE FROM managed_namespace_processes WHERE id = ?", id);

@@ -157,7 +157,9 @@ for (const regional of [false, true]) test(`account inventory and SDK retirement
     assert.throws(() => sdk.hand.forget("../other"), TypeError);
     assert.throws(() => sdk.hand.forget("account-device", { force: "true" }), TypeError);
     const accountSocket = await publish("/v1/account/tool-host", "account-device");
-    let threadSocket = await publish(`/v1/agents/${thread}/tool-host`, "thread-device");
+    // Thread-scoped workspace Hands are retired: a native catalog on the
+    // thread tool host fails with a migration error and never joins inventory.
+    await assert.rejects(publish(`/v1/agents/${thread}/tool-host`, "thread-device"), /hand_migration_required/);
     const expected = { status: 200, value: { data: [{ id: "account-device", name: "account-device",
       kind: "hand", online: true, health: "connected" }], coverage: "known_account_and_workspace", complete: true } };
     assert.deepEqual(await sdk.hand.list(), expected.value);
@@ -183,9 +185,7 @@ for (const regional of [false, true]) test(`account inventory and SDK retirement
     assert.deepEqual(await request("/v1/account/hands/inventory",
       { headers: { authorization: "Bearer synthetic-other" } }), { status: 200,
       value: { data: [], coverage: "known_account_and_workspace", complete: true } });
-    await disconnect(threadSocket);
-    assert.deepEqual(await inventory(), expected);
-    threadSocket = await publish(`/v1/agents/${thread}/tool-host`, "thread-device");
+    await assert.rejects(publish(`/v1/agents/${thread}/tool-host`, "thread-device"), /hand_migration_required/);
     assert.deepEqual(await inventory(), expected);
     await disconnect(accountSocket);
     const offline = { status: 200, value: {

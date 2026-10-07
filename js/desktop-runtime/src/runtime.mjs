@@ -8,6 +8,7 @@ import { homedir, hostname } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { Agent } from "nanocodex/managed";
 import { createTools } from "nanocodex/tools";
+import { requestOriginContext } from "nanocodex/tools/environment";
 import * as Workspace from "nanocodex/node/workspace";
 import { createNodeProcessTools } from "nanocodex-tools/node";
 import { connectComputerTools, ensureComputer } from "nanocodex-computer";
@@ -49,14 +50,18 @@ export function managedOrigin(value) {
   return url.origin;
 }
 
+export const RETIRED_WORKSPACE_HAND = "Thread workspace Hands were retired. This computer's account Hand serves every thread.";
+
 export function validateHand(value) {
   if (!value || !["local", "vm"].includes(value.kind)) throw new Error("Choose a local workspace or VM Hand.");
   const id = value.id || `desktop-${randomUUID().slice(0, 8)}`;
   if (!/^[a-z0-9][a-z0-9._-]{0,62}$/.test(id) || ["brain", "sandbox", "tmp", "dev", "proc"].includes(id)) throw new Error("Use a short, lowercase machine ID.");
   if (typeof value.name !== "string" || !value.name.trim() || Buffer.byteLength(value.name) > 128) throw new Error("A machine name is required (up to 128 bytes).");
   if (typeof value.workspace !== "string" || !isAbsolute(value.workspace) || value.workspace.includes("\0")) throw new Error("Choose an absolute workspace path.");
-  if (value.agentId && !/^[A-Za-z0-9._:-]{1,128}$/.test(value.agentId)) throw new Error("Invalid agent ID.");
-  const config = { id, name: value.name.trim(), kind: value.kind, workspace: value.workspace, ...(value.agentId ? { agentId: value.agentId } : {}) };
+  // Thread-scoped workspace Hands were retired: one account Hand per computer
+  // serves every thread. Saved thread-scoped records are dropped on restore.
+  if (value.agentId && value.kind === "local") throw new Error(RETIRED_WORKSPACE_HAND);
+  const config = { id, name: value.name.trim(), kind: value.kind, workspace: value.workspace };
   if (value.kind === "vm") {
     for (const name of ["rootfs", "guestRuntime", "binary"]) {
       if (typeof value[name] !== "string" || !isAbsolute(value[name]) || value[name].includes("\0")) throw new Error(`Choose an absolute ${name} path.`);
@@ -72,7 +77,6 @@ export function validateHand(value) {
     if (typeof value.vmHost === "string" && /^[a-z0-9][a-z0-9._-]{0,62}$/.test(value.vmHost)) config.vmHost = value.vmHost;
     if (typeof value.vmName === "string" && /^[a-z0-9][a-z0-9-]{0,39}$/.test(value.vmName)) config.vmName = value.vmName;
     if (typeof value.firmware === "string" && isAbsolute(value.firmware)) config.firmware = value.firmware;
-    delete config.agentId; // The existing VM CLI attaches at account scope.
   }
   return config;
 }
@@ -202,7 +206,6 @@ export class DesktopRuntime extends EventEmitter {
   #connectionAttempt = 0;
   #accountTransition = Promise.resolve();
   #dataDirectory;
-  #folderPreparations = new Map();
   #defaultPreparation;
   #handServicePreparation;
   #deviceIdentity;
@@ -219,15 +222,27 @@ export class DesktopRuntime extends EventEmitter {
     this.#saveConnection = saveConnection;
     this.#dataDirectory = dataDirectory;
     this.#options = { baseUrl: managedOrigin(baseUrl), fetch: desktopFetch, ...(apiKey ? { apiKey } : {}) };
+    const savedHands = Array.isArray(saved.hands) ? saved.hands : [];
+    const retiredHandIds = new Set(savedHands.filter(hand => hand?.kind === "local" && hand.agentId && typeof hand.id === "string").map(hand => hand.id));
+    const layout = restoredLayout(saved.layout);
+    // Migrate only known retired workspace targets. Unknown/offline remote
+    // targets must not silently become local execution. Captured requests keep
+    // their original target and payload for admission/retry idempotency.
+    for (const tab of layout?.tabs ?? []) {
+      if (retiredHandIds.has(tab.target)) tab.target = "";
+    }
+    for (const message of layout?.pendingMessages ?? []) {
+      if (message.prompt == null && message.acceptedCursor == null && retiredHandIds.has(message.target)) message.target = "";
+    }
     this.#state = {
       connected: false, hasCredentials: Boolean(apiKey), baseUrl: this.#options.baseUrl, accountScope: randomUUID(), threads: [],
       defaultHandEnabled: saved.defaultHandEnabled !== false,
       accountHands: restoredAccountHands(saved.accountHands),
-      hands: (Array.isArray(saved.hands) ? saved.hands : []).flatMap(config => {
+      hands: savedHands.flatMap(config => {
         try { return [{ ...validateHand(config), status: "stopped", calls: 0, activeCalls: 0, logs: [] }]; }
         catch { return []; } // A stale preference must not prevent the app opening.
       }),
-      layout: restoredLayout(saved.layout),
+      layout,
       defaults: { name: hostname().replace(/\.local$/i, "").slice(0, 100) || (process.platform === "darwin" ? "This Mac" : "This computer"), kind: "local", workspace: join(homedir(), "Nanocodex"), cpus: 2, memoryMiB: 2048, network: true, ...defaults },
       platform: process.platform, version: "0.1.0",
     };
@@ -549,11 +564,20 @@ export class DesktopRuntime extends EventEmitter {
     void this.refresh();
     return id;
   }
-  async queuePrompt({ agentId, input, requestId }) {
+  async queuePrompt({ agentId, input, requestId, handId, nativeCwd }) {
     if (typeof input !== "string" || !input.trim() || input.length > 200_000) throw new Error("Enter a message of up to 200,000 characters.");
     if (typeof requestId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(requestId)) throw new Error("A stable message ID is required.");
+    const local = this.#state.hands.find(hand => hand.id === handId && hand.kind === "local" && !hand.agentId);
+    const headers = { "Idempotency-Key": requestId };
+    if (local) {
+      const origin = requestOriginContext({ client: "nanocodex-desktop", hand: `user:${local.id}`,
+        ...(nativeCwd ? { native_cwd: nativeCwd } : {}) });
+      // Header values must be ASCII even when the selected folder contains Unicode.
+      headers["x-nanocodex-client-context"] = JSON.stringify(origin).replace(/[^\x20-\x7e]/g,
+        character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    }
     const receipt = await this.request(`/v1/agents/${encodeURIComponent(agentId)}/turns`, {
-      method: "POST", headers: { "Idempotency-Key": requestId }, body: JSON.stringify({ id: requestId, input }),
+      method: "POST", headers, body: JSON.stringify({ id: requestId, input }),
     });
     if (receipt.turn_id !== requestId) throw new Error("The message acknowledgement did not match.");
     const thread = this.#threads.get(agentId);
@@ -720,32 +744,12 @@ export class DesktopRuntime extends EventEmitter {
     const folder = await realpath(workspace);
     if (!(await stat(folder)).isDirectory()) throw new Error("Choose a folder for this tab.");
     this.#sameAccount(generation);
-    const key = `${generation}\0${agentId}\0${folder}`;
-    if (this.#folderPreparations.has(key)) return this.#folderPreparations.get(key);
-    const preparation = (async () => {
-      let hand;
-      const candidates = this.#state.hands.filter(candidate => candidate.kind === "local" && (!candidate.agentId || candidate.agentId === agentId)
-        && (this.#state.defaultHandEnabled || !this.#isDefaultHand(candidate.id)))
-        .sort((a, b) => Number(b.status === "connected") - Number(a.status === "connected"));
-      for (const candidate of candidates) {
-        if (await realpath(candidate.workspace).catch(() => null) === folder) { hand = candidate; break; }
-      }
-      this.#sameAccount(generation);
-      if (!hand) {
-        const config = validateHand({ kind: "local", name: basename(folder) || this.#state.defaults.name, workspace: folder, agentId });
-        await this.saveHand(config);
-        this.#sameAccount(generation);
-        hand = this.#state.hands.find(candidate => candidate.id === config.id);
-      }
-      await this.startHand(hand.id);
-      this.#sameAccount(generation);
-      const connected = this.#state.hands.find(candidate => candidate.id === hand.id);
-      if (connected?.status !== "connected") throw new Error(connected?.error || "The folder could not connect. Try sending again.");
-      return structuredClone(connected);
-    })();
-    this.#folderPreparations.set(key, preparation);
-    try { return await preparation; }
-    finally { if (this.#folderPreparations.get(key) === preparation) this.#folderPreparations.delete(key); }
+    // A tab folder is a working directory on this computer's one account Hand,
+    // never a separately published thread-scoped Hand.
+    if (!this.#state.defaultHandEnabled) throw new Error("This computer's Hand is disabled. Enable it in Settings before sending to it.");
+    const hand = await this.prepareDefaultHand();
+    if (!hand) throw new Error("This computer's Hand is disabled. Enable it in Settings before sending to it.");
+    return hand;
   }
   #log(hand, message) {
     hand.logs = [...hand.logs.slice(-99), `${new Date().toLocaleTimeString()}  ${message}`];
@@ -851,14 +855,14 @@ export class DesktopRuntime extends EventEmitter {
     const tools = await createTools({ tools: [...processes.tools, ...vmTools, ...(computer?.tools ?? [])], workspace, attachmentId: hand.id, machines: [{ id: hand.id, name: hand.name, workspace: hand.workspace, resources: processes.resources, capabilities: ["native", "shell", "filesystem", "process", "pipes", ...(computer ? ["computer"] : []), ...(vmTools.length ? ["vm_host"] : [])] }] });
     resource.add(() => tools.close());
     resource.abort.signal.throwIfAborted();
-    const endpoint = new URL(hand.agentId ? `/v1/agents/${encodeURIComponent(hand.agentId)}/tool-host` : "/v1/account/tool-host", this.#options.baseUrl);
+    const endpoint = new URL("/v1/account/tool-host", this.#options.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     const apiKey = this.#options.apiKey;
     const attachment = tools.attach({ endpoint, transport: { connect: target => new WebSocket(target, { headers: { authorization: `Bearer ${apiKey}` } }) } });
     const connection = await attachment.connect();
     resource.abort.signal.throwIfAborted();
     hand.status = "connected";
-    this.#log(hand, hand.agentId ? "Connected to the selected thread." : "Connected to your account. Available to all your agents.");
+    this.#log(hand, "Connected to your account. Available to all your agents.");
     const monitor = setInterval(() => {
       if (resource.abort.signal.aborted) return;
       const status = connection.connected ? "connected" : "connecting";

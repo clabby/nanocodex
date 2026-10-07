@@ -721,6 +721,16 @@ jobs:
           pnpm --filter @nanocodex/x-api run typecheck
           pnpm exec turbo run build --filter nanocodex-connect-protocol
           pnpm --filter nanocodex-managed-service run prepare:code-evaluator
+      - name: Exercise single-Hand upgrade and routing
+        timeout-minutes: 5
+        run: |
+          # The upgrade journey boots the last legacy service against the same
+          # durable storage, then deploys this checkout. Fetch only its fixture.
+          git fetch --no-tags --depth=1 origin f8a2b451dabba74cff003d6ec54d32cb06fd113bf
+          pnpm --filter nanocodex-managed-service exec node --test \
+            test/hand-retirement-journey.test.mjs \
+            test/hand-preparation-journey.test.mjs \
+            test/cua-routing-journey.test.mjs
       - name: Exercise private-input account admission
         timeout-minutes: 5
         run: node js/managed/test/private-input-admission-journey.mjs

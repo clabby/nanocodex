@@ -176,6 +176,7 @@ import {
   HostedToolsBroker,
   type HostedToolsLeasedAttachmentRenewal,
 } from "./hosted-tools-broker";
+import { HOSTED_MACHINE_TOOL_NAMES } from "nanocodex-tools/hosted";
 import {
   AccountHostedTools,
   AccountHostedToolsCallRoutes,
@@ -749,6 +750,35 @@ function managedMountPublicProvider(mount: ManagedMountRow): string {
 function managedMountDisplayName(mount: ManagedMountRow): string {
   const provider = managedMountPublicProvider(mount);
   return `${provider === MANAGED_CLOUDFLARE_PROVIDER ? "Cloudflare" : provider} / ${mount.name}`.slice(0, 128);
+}
+
+/**
+ * Returned to a thread-scoped publisher that still sends a native Hand catalog.
+ * Kept short so the whole hint fits the 123-byte WebSocket close reason.
+ */
+const SESSION_WORKSPACE_HAND_RETIRED = "hand_migration_required: attach at /v1/account/tool-host";
+
+const SESSION_NATIVE_TOOL_NAMES: ReadonlySet<string> = new Set(HOSTED_MACHINE_TOOL_NAMES);
+
+/**
+ * Admits a thread tool-host catalog. Native machine catalogs are accepted only
+ * on a trusted leased VM route: its fixed route ID is injected by the Worker
+ * after verifying the server-issued lease grant and is never client-chosen.
+ * Machine metadata or kind alone never confers that trust.
+ */
+function admitSessionToolHostCatalog(candidate: Readonly<{
+  routeId: string;
+  machine: HostedMachine | undefined;
+  definitions: readonly Readonly<{ definition: Readonly<{ name: string }> }>[];
+}>, ownsAdmittedWork: () => boolean): void {
+  if (VM_HOST_ATTACHMENT_ROUTE.test(candidate.routeId)) return;
+  if (candidate.machine === undefined && !candidate.definitions.some(({ definition }) => (
+    SESSION_NATIVE_TOOL_NAMES.has(definition.name) || definition.name.startsWith("mcp__cua_repl__")
+  ))) return;
+  // A retired route may reconnect only as the exact executor runtime that owns
+  // already admitted work. It is never rediscovered: namespace routing reaches
+  // it solely through that work's runtime-pinned process key or call ledger.
+  if (!ownsAdmittedWork()) throw new Error(SESSION_WORKSPACE_HAND_RETIRED);
 }
 
 function vmHostMountAllocation(
@@ -3949,7 +3979,7 @@ export class DurableAgentSession extends DurableComputerObject {
   #nativeSecureInput(agentId: string): NativeSecureInput {
     return this.#nativeSecureInputRuntime ??= new NativeSecureInput(this.ctx.storage, agentId,
       this.env.NATIVE_SECURE_INPUT_SIGNING_KEY,
-      (machine, context) => this.#hostedTools.machineTool(machine, "native_secure_input", context)
+      (machine, context) => this.#leasedSessionMachineTool(machine, "native_secure_input", context)
         ?? this.#accountHostedTools?.machineTool(machine, "native_secure_input", context), this.env.NATIVE_SECURE_INPUT_HELPERS);
   }
   #presentation?: AgentPresentationWriter;
@@ -4243,6 +4273,8 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#hostedToolAllowed(entry, connectGrantId, appToolCatalogDigest, context)
       ),
       renewLeasedAttachment: (renewal) => this.#renewVmHostAttachment(renewal),
+      beforeCatalogPublish: async (candidate) => admitSessionToolHostCatalog(candidate,
+        () => this.#retiredRouteOwnsAdmittedWork(candidate.routeId, candidate.runtimeId)),
     });
     this.#archiveMaintenance = new ArchiveMaintenance(this.ctx.storage);
     if (!this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(history_projection_outbox)")
@@ -5241,7 +5273,7 @@ export class DurableAgentSession extends DurableComputerObject {
             const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage));
             await provider.refresh();
             return json(await this.#nativeSecureInput(session.session_id).submit(payload, context,
-              (machine, ctx) => this.#hostedTools.machineTool(machine, "native_secure_input", ctx)
+              (machine, ctx) => this.#leasedSessionMachineTool(machine, "native_secure_input", ctx)
                 ?? provider.machineTool(machine, "native_secure_input", ctx)));
           } finally { this.#fileReadAuthorizations.delete(context.sessionId); }
         }
@@ -5271,7 +5303,8 @@ export class DurableAgentSession extends DurableComputerObject {
         const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage));
         await provider.refresh();
         const mounts = this.#managedMounts().filter(mount => executionMountOwner(mount) === undefined);
-        const discovered = [...this.#hostedTools.machines(), ...provider.machines()];
+        // Physical computers are account Hands; leased VMs resolve by mount below.
+        const discovered = [...provider.machines()];
         const leased = new Set(this.#managedMounts().flatMap(mount => mount.provider === "cloudflare"
           ? [`cf:${mount.provider_resource_id}`] : [vmHostMountAllocation(mount)?.machine_id].filter((id): id is string => id !== undefined)));
         const machines = discovered.filter(machine => !leased.has(machine.id)
@@ -5302,8 +5335,7 @@ export class DurableAgentSession extends DurableComputerObject {
           }
         } else if (machine) {
           workspace = machine.workspace;
-          exec = this.#hostedTools.machineTool(machine.id, "exec_command", context)
-            ?? provider.machineTool(machine.id, "exec_command", context);
+          exec = provider.machineTool(machine.id, "exec_command", context);
         } else if (root !== "/brain" && !this.#handPaths.roots().includes(root)
           && ![...roots.keys()].some(id => machineMountRoot(id) === root)) {
           throw new FileDownloadError("file_path_unmapped", "This path is outside the agent's Hands", 404);
@@ -10394,10 +10426,9 @@ export class DurableAgentSession extends DurableComputerObject {
       }
       const id = machineId.slice("user:".length);
       if (!this.#userHandMachines(context).some((machine) => machine.id === id)) return undefined;
-      const upstreamAvailable = name !== CUA_JS_NAME && name !== CUA_RESET_NAME
-        || this.#hostedTools.machineOnline(id);
-      return (upstreamAvailable ? this.#hostedTools.machineTool(id, name, context) : undefined)
-        ?? this.#accountHostedTools?.machineTool(id, name, context);
+      // The account broker owns physical computers. Retired session-scoped
+      // workspace routes never take new commands, even while still connected.
+      return this.#accountHostedTools?.machineTool(id, name, context);
     };
     const namespaceRuntime = multiplayer ? undefined : createManagedNamespaceRuntime(
       (context) => this.#canUseExecutionNamespace(this.#authorizationForToolContext(context)),
@@ -10480,7 +10511,7 @@ export class DurableAgentSession extends DurableComputerObject {
           .some(root => cwd === root || cwd.startsWith(`${root}/`)));
         if (!selected) return undefined;
         const id = selected.id.slice("user:".length);
-        if (computer || !this.#hostedTools.machineOnline(id)) {
+        {
           if (!this.#accountHostedTools) return undefined;
           const started = performance.now();
           try {
@@ -10501,8 +10532,13 @@ export class DurableAgentSession extends DurableComputerObject {
         const authorization = this.#authorizationForToolContext(context);
         if (!this.#canUseExecutionNamespace(authorization) || !this.#hasFullAccountAuthority(authorization)
           || !binding.machineId.startsWith("user:")) return undefined;
-        return this.#accountHostedTools?.recoverProcessTool(
-          binding.machineId.slice("user:".length), binding.processSessionKey, context);
+        const id = binding.machineId.slice("user:".length);
+        // A process admitted before session-scoped workspace Hands were retired
+        // stays pinned to its exact executor runtime until it exits. The key
+        // names that route and runtime, so no replacement publisher can match.
+        const pinned = this.#hostedTools.machineTool(id, "write_stdin", context);
+        if (pinned?.processSessionKey !== undefined && pinned.processSessionKey === binding.processSessionKey) return pinned;
+        return this.#accountHostedTools?.recoverProcessTool(id, binding.processSessionKey, context);
       },
     );
     const cloudTools: NamedTool[] = [
@@ -12102,10 +12138,6 @@ export class DurableAgentSession extends DurableComputerObject {
     if (!this.#canUseExecutionNamespace(authorization)) return [];
     const userHands = this.#hasFullAccountAuthority(authorization) ? this.#userHandMachines(context) : [];
     const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root), this.#accountHostedTools?.machineRoots());
-    // Capability projection uses one indexed discovery view, not repeated
-    // catalog reconstruction inside namespace membership/route lookups.
-    const localCatalog = this.#hasFullAccountAuthority(authorization) ? this.#hostedTools.catalogSnapshot() : undefined;
-    const localOnline = new Set(localCatalog?.machines().filter(entry => entry.online).map(entry => entry.machine.id));
     return Object.freeze(projectHandProviders([
       ...this.#availableManagedMounts(authorization).map((mount) => {
         const hostMachine = mount.provider === "host" ? this.#hostMachineForMount(mount) : undefined;
@@ -12124,19 +12156,15 @@ export class DurableAgentSession extends DurableComputerObject {
       }),
       ...userHands.map((machine) => {
           const mount = roots.get(machine.id)!;
-          const upstream = localOnline.has(machine.id)
-            && localCatalog?.machineTool(machine.id, CUA_JS_NAME, context)
-            && localCatalog.machineTool(machine.id, CUA_RESET_NAME, context);
           return Object.freeze({
             id: `user:${machine.id}`,
             name: machine.name,
             kind: "user" as const,
-            online: this.#hostedTools.machineOnline(machine.id)
-              || this.#accountHostedTools?.machineOnline(machine.id, context) === true,
+            online: this.#accountHostedTools?.machineOnline(machine.id, context) === true,
             mount,
             aliases: [machineMountRoot(machine.id)],
             workspace: mount,
-            capabilities: upstream ? [...new Set([...machine.capabilities, "computer"])] : machine.capabilities,
+            capabilities: machine.capabilities,
             ...(machine.resources === undefined ? {} : { resources: machine.resources }),
           });
         }),
@@ -12155,6 +12183,39 @@ export class DurableAgentSession extends DurableComputerObject {
     return authorization !== undefined && authorization.connectGrant === undefined;
   }
 
+  /**
+   * True only while this exact retired ordinary route/runtime still owns a
+   * durable namespace process or an unsettled admitted call. Settled history,
+   * another runtime, or a reused machine ID never qualifies.
+   */
+  #retiredRouteOwnsAdmittedWork(routeId: string, runtimeId: string | undefined): boolean {
+    if (runtimeId === undefined) return false;
+    if (this.#processSessions.ownsProcessSessionKey(
+      JSON.stringify([routeId, "process-runtime", runtimeId, "write_stdin"]))) return true;
+    return this.ctx.storage.sql.exec<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM hosted_tool_routes r JOIN hosted_tool_calls c
+         ON c.lease_id = r.lease_id AND c.generation = r.generation
+       WHERE r.route_id = ? AND r.runtime_id = ? AND c.host_runtime_id = ? AND c.state IN ('admitted', 'dispatched')`,
+      routeId, runtimeId, runtimeId,
+    ).one().count > 0;
+  }
+
+  /** Resolves a session-broker primitive only on a mounted, server-leased VM route. */
+  #leasedSessionMachineTool(
+    machineId: string,
+    name: Parameters<HostedToolsBroker["machineToolOnRoute"]>[2],
+    context?: Parameters<HostedToolsBroker["machineToolOnRoute"]>[3],
+  ): ReturnType<HostedToolsBroker["machineToolOnRoute"]> {
+    for (const mount of this.#managedMounts()) {
+      if (mount.provider !== "host" || mount.state !== "mounted") continue;
+      const allocation = vmHostMountAllocation(mount);
+      if (allocation?.machine_id === machineId && allocation.route_id !== undefined) {
+        return this.#hostedTools.machineToolOnRoute(allocation.route_id, machineId, name, context);
+      }
+    }
+    return undefined;
+  }
+
   #userHandMachines(
     context?: Pick<ToolContext, "sessionId" | "subagent">,
   ): readonly HostedMachine[] {
@@ -12163,10 +12224,9 @@ export class DurableAgentSession extends DurableComputerObject {
       const allocation = vmHostMountAllocation(mount);
       return allocation === undefined ? [] : [allocation.machine_id];
     }));
-    const machines = [
-      ...this.#hostedTools.machines(),
-      ...(this.#accountHostedTools?.machines(context) ?? []),
-    ];
+    // Only the account broker publishes physical computers. Session-scoped
+    // workspace routes are retired from discovery; leased VMs are mounts.
+    const machines = [...(this.#accountHostedTools?.machines(context) ?? [])];
     // Screen-only publishers have no shell attachment. Merge by identity so a
     // separately published screen never makes its native Hand ambiguous.
     for (const screen of this.#accountHostedTools?.screenMachines(context) ?? []) {

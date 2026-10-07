@@ -2454,9 +2454,10 @@ final class NativeServiceTests: XCTestCase {
             XCTAssertEqual(model.backgroundActivity.options, .userInitiated)
             window.makeKeyAndOrderFront(nil)
             XCTAssertEqual(try String(contentsOf: workspace.appendingPathComponent("native-evidence.txt"), encoding: .utf8).trimmingCharacters(in: .newlines), "native-hand-roundtrip-ok")
-            XCTAssertEqual(model.state.hands.count, 2)
-            let folderHand = try XCTUnwrap(model.state.hands.first { $0.agentId == createdID })
-            XCTAssertEqual(folderHand.status, "connected", "Selected folders still create a Hand scoped to their thread")
+            XCTAssertEqual(model.state.hands.count, 1)
+            let folderHand = try XCTUnwrap(model.state.hands.first { $0.id == automaticHandID })
+            XCTAssertNil(folderHand.agentId)
+            XCTAssertEqual(folderHand.status, "connected", "Folder tabs reuse the computer Hand")
             XCTAssertNil(model.error)
             print("Native journey: first real file roundtrip completed")
             let firstTurnAt = Date().timeIntervalSince(start)
@@ -2480,8 +2481,7 @@ final class NativeServiceTests: XCTestCase {
             try await waitUntil(timeout: 20) { model.activeMessages.contains { $0.kind == .assistant && $0.text.contains("NATIVE_HAND_READY") } }
             try await waitUntil(timeout: 25) { model.state.hands.contains { $0.id == automaticHandID && $0.status == "connected" } }
             let restartedHand = try XCTUnwrap(model.state.hands.first { $0.id == folderHand.id })
-            XCTAssertEqual(restartedHand.status, "stopped", "Only the default device Hand restarts automatically")
-            await model.startHand(restartedHand.id)
+            XCTAssertEqual(restartedHand.status, "connected", "The selected folder reuses the automatically restored computer Hand")
             print("Native journey: Hand reconnected")
             XCTAssertEqual(model.state.hands.first { $0.id == restartedHand.id }?.status, "connected")
             await model.send("Read native-evidence.txt again from the same selected Hand. Reply with its contents followed by NATIVE_SECOND_TURN_READY.")
@@ -2507,7 +2507,7 @@ final class NativeServiceTests: XCTestCase {
             print("Native journey: queued follow-up steered once and completed")
             await model.stopHand(restartedHand.id)
             XCTAssertEqual(model.state.hands.first { $0.id == restartedHand.id }?.status, "stopped")
-            let report: [String: Any] = ["connectedSeconds": connectedAt, "firstTurnSeconds": firstTurnAt, "totalSeconds": Date().timeIntervalSince(start), "agentId": createdID ?? "", "nativeEditor": true, "shiftReturn": true, "returnSubmit": true, "tabs": true, "persistedTopTabs": true, "folderHand": true, "realFileRoundtrip": true, "twoDurableTurns": true, "steerNow": true, "queuedAcceptedOnce": true, "stoppedHand": true]
+            let report: [String: Any] = ["connectedSeconds": connectedAt, "firstTurnSeconds": firstTurnAt, "totalSeconds": Date().timeIntervalSince(start), "agentId": createdID ?? "", "nativeEditor": true, "shiftReturn": true, "returnSubmit": true, "tabs": true, "persistedTopTabs": true, "folderUsesComputerHand": true, "realFileRoundtrip": true, "twoDurableTurns": true, "steerNow": true, "queuedAcceptedOnce": true, "stoppedHand": true]
             try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: evidence.appendingPathComponent("native-journey.json"))
             await model.prepareToQuit()
             window.orderOut(nil)

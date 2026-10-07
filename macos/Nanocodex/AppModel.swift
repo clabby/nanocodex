@@ -967,7 +967,7 @@ final class AppModel: ObservableObject {
             guard current(epoch) else { return }
             submitting = true
             voice.noteTypedInput(conversationID: agentID)
-            let accepted = try await runtime.request("queuePrompt", [.object(["agentId": .string(agentID), "input": .string(message.prompt ?? message.text), "requestId": .string(requestID)])])
+            let accepted = try await runtime.request("queuePrompt", [.object(["agentId": .string(agentID), "input": .string(message.prompt ?? message.text), "requestId": .string(requestID), "handId": .string(message.target), "nativeCwd": .string(message.folder)])])
             guard current(epoch) else { return }
             guard accepted["turn_id"].string == requestID else { throw RuntimeFailure(message: "The message acknowledgement did not match.") }
             changePending(requestID) {

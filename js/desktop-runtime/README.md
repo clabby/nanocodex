@@ -72,11 +72,13 @@ this automatically after sign-in and restoration, retrying transient failures.
 Concurrent calls share preparation; account changes invalidate it. Generic
 runtime reads do not start compute.
 
-`prepareFolderHand({ agentId, workspace })` connects a folder when the user sends
-a message in that folder's tab. It reuses an existing eligible Hand or creates a
-thread-scoped one, chooses its name and ID, starts it, and returns the connected
-Hand. Merely selecting a folder does not start compute. Concurrent retries are
-deduplicated, and account changes fence the operation.
+`prepareFolderHand({ agentId, workspace })` runs when the user sends a message in
+a folder's tab. It validates the folder and returns this computer's one account
+Hand (as `prepareDefaultHand`), connected; the folder is a working directory on
+that Hand. It fails while the account Hand is disabled. Thread-scoped workspace
+Hands are retired: the runtime never publishes to `/v1/agents/:id/tool-host`,
+drops saved thread-scoped records on restore, and `saveHand` rejects `agentId`
+for local Hands. Merely selecting a folder does not start compute.
 
 On macOS, an imported native helper must carry a valid hypervisor entitlement.
 If it does not, the runtime clones the helper into its own cache, ad-hoc signs

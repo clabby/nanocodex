@@ -219,6 +219,28 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
       return socket;
     } } }, { machines: [{ id: machine, name: "Synthetic CUA Hand", workspace, capabilities: ["shell"] }], attachmentId: machine });
     assert.equal((await attachment.connect()).connected, true);
+    // The persistent local account Hand is already known before its shell turn.
+    localTools = await createTools({ tools: Object.fromEntries(native.tools.map(tool => [tool.name, tool])) });
+    // Thread-scoped workspace Hands are retired. A native catalog on the thread
+    // tool host fails with a migration error; the computer attaches once to
+    // the account broker, which owns physical computers.
+    const retiredEndpoint = new URL(`/v1/agents/${thread}/tool-host`, base); retiredEndpoint.protocol = "ws:";
+    const retired = createAttachment(localTools, { endpoint: retiredEndpoint.href, transport: { connect() {
+      const socket = new WebSocket(retiredEndpoint, { headers });
+      socket.on("close", (code, reason) => wire.push({ event: "retired-close", code, reason: String(reason) }));
+      return socket;
+    } } }, { machines: [{ id: localMachine, name: "Synthetic local screen Hand", workspace, capabilities: ["shell"] }], attachmentId: localMachine });
+    await assert.rejects(retired.connect(), /hand_migration_required/);
+    await retired.close().catch(() => {});
+    const localEndpoint = new URL("/tool-host", base); localEndpoint.protocol = "ws:";
+    localAttachment = createAttachment(localTools, { endpoint: localEndpoint.href, transport: { connect() {
+      const socket = new WebSocket(localEndpoint, { headers: { "x-nanocodex-owner-id": owner } });
+      const send = socket.send.bind(socket);
+      socket.send = (data, ...args) => { wire.push({ direction: "local-host", frame: JSON.parse(String(data)) }); return send(data, ...args); };
+      socket.on("message", data => wire.push({ direction: "local-broker", frame: JSON.parse(String(data)) }));
+      return socket;
+    } } }, { machines: [{ id: localMachine, name: "Synthetic local screen Hand", workspace, capabilities: ["shell"] }], attachmentId: localMachine });
+    assert.equal((await localAttachment.connect()).connected, true);
     assert.ok(wire.some(row => row.direction === "broker" && row.frame.type === "ready"));
     const snapshot = async () => {
       const response = await request("/account-tools/snapshot", { method: "POST", body: JSON.stringify({ owner_id: owner }) });
@@ -258,21 +280,10 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
 
     // A local shell capture must defer its independently published screen until
     // full CUA discovery, without requiring another Code Mode cell.
-    localTools = await createTools({ tools: Object.fromEntries(native.tools.map(tool => [tool.name, tool])) });
-    const localEndpoint = new URL(`/v1/agents/${thread}/tool-host`, base); localEndpoint.protocol = "ws:";
-    localAttachment = createAttachment(localTools, { endpoint: localEndpoint.href, transport: { connect() {
-      const socket = new WebSocket(localEndpoint, { headers });
-      const send = socket.send.bind(socket);
-      socket.send = (data, ...args) => { wire.push({ direction: "local-host", frame: JSON.parse(String(data)) }); return send(data, ...args); };
-      socket.on("message", data => wire.push({ direction: "local-broker", frame: JSON.parse(String(data)) }));
-      return socket;
-    } } }, { machines: [{ id: localMachine, name: "Synthetic local screen Hand", workspace, capabilities: ["shell"] }], attachmentId: localMachine });
-    assert.equal((await localAttachment.connect()).connected, true);
-    const shellDone = await startTurn("SHELL_SCREEN");
-    await waitFor(() => stages("SHELL_SCREEN", "namespace.invoke").some(row => row.tool === "exec_command" && row.outcome === "ok"), "local shell finished before screen publication");
+    // The account Hand's screen is published independently of its shell. One
+    // Code Mode cell runs the shell command and then CUA on the same Hand.
     const localScreen = await publishScreen(localMachine);
-    assert.equal(stages("SHELL_SCREEN", "namespace.route").length, 1, "screen publication must precede CUA discovery");
-    const shellScreen = await shellDone();
+    const shellScreen = await runTurn("SHELL_SCREEN");
     assert.match(rendered(shellScreen), /LOCAL_SHELL_OK/);
     assert.match(rendered(shellScreen), /native_screen/);
     assert.match(rendered(shellScreen), /Screen action completed/);
