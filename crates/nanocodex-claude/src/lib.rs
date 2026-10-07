@@ -3,7 +3,13 @@
 //! Authentication uses an explicit Console API key, a host header provider, or
 //! the Rust subscription manager with private host storage and HTTP capabilities.
 //! The crate never reads Claude Code credentials.
-use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+//!
+//! Agent sessions retry transient model failures before publishing text or risking
+//! repeated server effects, with five attempts per model call and three per compaction.
+//! Cancellable backoff grows through 1, 2, 4, and 8 seconds with 90–110% jitter.
+//! `Retry-After` is a minimum delay; hints over 60 seconds end the call.
+//! Direct [`ClaudeClient`] calls leave transient retry policy to their caller.
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -33,7 +39,12 @@ const FAST_MODE_BETA: &str = "fast-mode-2026-02-01";
 #[derive(Debug, Error)]
 pub enum ClaudeError {
     #[error("Messages HTTP {status}: {body}")]
-    Http { status: u16, body: String },
+    Http {
+        status: u16,
+        body: String,
+        /// Provider delay from a valid `Retry-After` header.
+        retry_after: Option<Duration>,
+    },
     #[error("Messages transport: {0}")]
     Transport(#[from] reqwest::Error),
     #[error("Messages JSON: {0}")]
@@ -46,6 +57,41 @@ pub enum ClaudeError {
     IncompleteStream,
     #[error("approved Claude authentication provider unavailable")]
     AuthUnavailable,
+}
+
+impl ClaudeError {
+    pub(crate) fn is_transient(&self) -> bool {
+        match self {
+            Self::Http { status, .. } => *status == 429 || (500..600).contains(status),
+            Self::Transport(error) => error.is_timeout() || error.is_request() || error.is_body(),
+            Self::StreamError { kind, .. } => matches!(
+                kind.as_str(),
+                "overloaded_error" | "api_error" | "rate_limit_error" | "timeout_error"
+            ),
+            Self::IncompleteStream => true,
+            Self::Json(_) | Self::Protocol(_) | Self::AuthUnavailable => false,
+        }
+    }
+}
+
+/// Parses delta-seconds or an HTTP-date; a past date means no extra delay.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(Duration::from_secs(value.parse().unwrap_or(u64::MAX)));
+    }
+    let deadline = httpdate::parse_http_date(value)
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .ok()?;
+    Some(deadline.saturating_sub(now))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1138,9 +1184,9 @@ impl ClaudeClient {
                 .body(wire_body.clone())
                 .send()
                 .await?;
-            // Only an explicit HTTP authentication rejection is recoverable. Do
-            // not replay requests after transport errors, 403/429/5xx, or any
-            // accepted stream (including an error partway through that stream).
+            // Only an explicit HTTP authentication rejection is recovered here.
+            // Agent sessions own transient retries because they track published
+            // text and possible server effects.
             if response.status() == reqwest::StatusCode::UNAUTHORIZED
                 && !retried
                 && let (ClientAuth::Provider(provider), Some(headers)) =
@@ -1155,12 +1201,17 @@ impl ClaudeClient {
             }
             if !response.status().is_success() {
                 let status = response.status().as_u16();
+                let retry_after = retry_after(response.headers());
                 let mut body = response.text().await?;
                 credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
                 for credential in &credentials {
                     body = body.replace(credential, "[redacted]");
                 }
-                return Err(ClaudeError::Http { status, body });
+                return Err(ClaudeError::Http {
+                    status,
+                    body,
+                    retry_after,
+                });
             }
             credentials.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
             return Ok((response, credentials));
@@ -1479,6 +1530,108 @@ enum BlockAccumulator {
     Other(ContentBlock),
 }
 
+impl BlockAccumulator {
+    fn finish(self, truncated: bool) -> Result<ContentBlock, ClaudeError> {
+        let block = match self {
+            BlockAccumulator::Text { text, extra } => ContentBlock::Text { text, extra },
+            BlockAccumulator::ToolUse {
+                id,
+                name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    Ok(initial)
+                } else {
+                    serde_json::from_str::<Value>(&fragments)
+                };
+                let input = match input {
+                    Ok(input) if input.is_object() => input,
+                    _ if truncated => {
+                        return Ok(ContentBlock::text(format!(
+                            "Incomplete tool input for {name} ({id}) was not executed because the output token limit was reached. Issue a fresh complete call if needed."
+                        )));
+                    }
+                    Err(error) => return Err(error.into()),
+                    _ => {
+                        return Err(ClaudeError::Protocol(
+                            "tool input must be a JSON object".into(),
+                        ));
+                    }
+                };
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    extra,
+                }
+            }
+            BlockAccumulator::ServerToolUse {
+                id,
+                name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    initial
+                } else {
+                    serde_json::from_str(&fragments)?
+                };
+                if !input.is_object() {
+                    return Err(ClaudeError::Protocol(
+                        "server tool input must be a JSON object".into(),
+                    ));
+                }
+                ContentBlock::ServerToolUse {
+                    id,
+                    name,
+                    input,
+                    extra,
+                }
+            }
+            BlockAccumulator::Thinking {
+                thinking,
+                signature,
+                extra,
+            } => ContentBlock::Thinking {
+                thinking,
+                signature,
+                extra,
+            },
+            BlockAccumulator::McpToolUse {
+                id,
+                name,
+                server_name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    initial
+                } else {
+                    serde_json::from_str(&fragments)?
+                };
+                if !input.is_object() {
+                    return Err(ClaudeError::Protocol(
+                        "MCP tool input must be a JSON object".into(),
+                    ));
+                }
+                ContentBlock::McpToolUse {
+                    id,
+                    name,
+                    server_name,
+                    input,
+                    extra,
+                }
+            }
+            BlockAccumulator::Other(block) => block,
+        };
+        Ok(block)
+    }
+}
+
 /// Assemble streaming deltas into the same typed response as `create`.
 /// A partial tool JSON object or a missing terminal event is never returned as
 /// a usable tool call.
@@ -1493,7 +1646,7 @@ where
         return Err(ClaudeError::Protocol("expected message_start".into()));
     };
     let mut active = BTreeMap::<usize, BlockAccumulator>::new();
-    let mut completed = BTreeMap::<usize, ContentBlock>::new();
+    let mut completed = BTreeMap::<usize, BlockAccumulator>::new();
     while let Some(event) = events.next().await {
         match event? {
             StreamEvent::ContentBlockStart {
@@ -1610,93 +1763,6 @@ where
                 let block = active.remove(&index).ok_or_else(|| {
                     ClaudeError::Protocol(format!("unknown content block {index}"))
                 })?;
-                let block = match block {
-                    BlockAccumulator::Text { text, extra } => ContentBlock::Text { text, extra },
-                    BlockAccumulator::ToolUse {
-                        id,
-                        name,
-                        initial,
-                        fragments,
-                        extra,
-                    } => {
-                        let input = if fragments.is_empty() {
-                            initial
-                        } else {
-                            serde_json::from_str(&fragments)?
-                        };
-                        if !input.is_object() {
-                            return Err(ClaudeError::Protocol(
-                                "tool input must be a JSON object".into(),
-                            ));
-                        }
-                        ContentBlock::ToolUse {
-                            id,
-                            name,
-                            input,
-                            extra,
-                        }
-                    }
-                    BlockAccumulator::ServerToolUse {
-                        id,
-                        name,
-                        initial,
-                        fragments,
-                        extra,
-                    } => {
-                        let input = if fragments.is_empty() {
-                            initial
-                        } else {
-                            serde_json::from_str(&fragments)?
-                        };
-                        if !input.is_object() {
-                            return Err(ClaudeError::Protocol(
-                                "server tool input must be a JSON object".into(),
-                            ));
-                        }
-                        ContentBlock::ServerToolUse {
-                            id,
-                            name,
-                            input,
-                            extra,
-                        }
-                    }
-                    BlockAccumulator::Thinking {
-                        thinking,
-                        signature,
-                        extra,
-                    } => ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                        extra,
-                    },
-                    BlockAccumulator::McpToolUse {
-                        id,
-                        name,
-                        server_name,
-                        initial,
-                        fragments,
-                        extra,
-                    } => {
-                        let input = if fragments.is_empty() {
-                            initial
-                        } else {
-                            serde_json::from_str(&fragments)?
-                        };
-                        if !input.is_object() {
-                            return Err(ClaudeError::Protocol(
-                                "MCP tool input must be a JSON object".into(),
-                            ));
-                        }
-                        ContentBlock::McpToolUse {
-                            id,
-                            name,
-                            server_name,
-                            input,
-                            extra,
-                        }
-                    }
-                    BlockAccumulator::Other(block) => block,
-                };
                 completed.insert(index, block);
             }
             StreamEvent::MessageDelta { delta, usage } => {
@@ -1723,10 +1789,24 @@ where
                 if message.stop_reason.is_none() {
                     return Err(ClaudeError::Protocol("missing final stop_reason".into()));
                 }
-                if !active.is_empty() {
-                    return Err(ClaudeError::Protocol(
-                        "message_stop before content_block_stop".into(),
-                    ));
+                let truncated = message.stop_reason == Some(StopReason::MaxTokens);
+                for (index, block) in active {
+                    // Only an explicit output cutoff explains an open text/client
+                    // block. Never synthesize a signature or a server-tool receipt.
+                    let block = match block {
+                        BlockAccumulator::Text { .. } if truncated => block,
+                        BlockAccumulator::ToolUse { id, name, .. } if truncated => {
+                            BlockAccumulator::Other(ContentBlock::text(format!(
+                                "Incomplete tool input for {name} ({id}) was not executed because the output token limit was reached. Issue a fresh complete call if needed."
+                            )))
+                        }
+                        _ => {
+                            return Err(ClaudeError::Protocol(
+                                "message_stop before content_block_stop".into(),
+                            ));
+                        }
+                    };
+                    completed.insert(index, block);
                 }
                 let count = completed.len();
                 if completed.keys().copied().ne(0..count) {
@@ -1734,7 +1814,10 @@ where
                         "non-contiguous content block indices".into(),
                     ));
                 }
-                message.content = completed.into_values().collect();
+                message.content = completed
+                    .into_values()
+                    .map(|block| block.finish(truncated))
+                    .collect::<Result<Vec<_>, _>>()?;
                 return Ok(message);
             }
             StreamEvent::Error { error } => {

@@ -178,6 +178,53 @@ fn signed_round() -> Vec<Value> {
 }
 
 #[tokio::test]
+async fn retried_model_call_receipt_replays_after_sqlite_reopen() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let (client, requests, server) = server(|index, request| {
+        if index == 1 {
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n".into()
+        } else if request["messages"].to_string().contains("tool_result") {
+            sse(text("completed after retry"), "end_turn", 10)
+        } else {
+            sse(signed_round(), "tool_use", 10)
+        }
+    })
+    .await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    for _ in 0..2 {
+        let counter = effects.clone();
+        let (agent, events) = Nanocodex::builder(Claude::new(client.clone(), "test"))
+            .tool(tool(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Ok("committed once".into()) }
+            })
+            .durability(reopen(&path).await)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        let result = agent
+            .prompt(PromptRequest::new("perform effect once").request_id("retried-request"))
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        assert_eq!(result.final_message(), "completed after retry");
+        assert_eq!(result.usage().unwrap().total_tokens(), 30);
+        agent.shutdown().await.unwrap();
+        drop((agent, events));
+    }
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 3, "replay must not call the provider");
+    assert_eq!(log[0], log[1], "a retry resends the admitted request");
+    server.abort();
+}
+
+#[tokio::test]
 async fn completed_effect_and_opaque_compaction_suffix_survive_reopen() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
@@ -583,6 +630,7 @@ enum CompactionJourney {
     Automatic,
     ContextRecovery,
     ExhaustionAfterRecovery,
+    OutputExhaustion,
 }
 
 async fn transaction_recovery(
@@ -590,8 +638,20 @@ async fn transaction_recovery(
     after_commit: bool,
     journey: CompactionJourney,
 ) -> usize {
-    let context_exhaustion = !matches!(journey, CompactionJourney::Automatic);
-    let repeated_exhaustion = matches!(journey, CompactionJourney::ExhaustionAfterRecovery);
+    let context_exhaustion = matches!(
+        journey,
+        CompactionJourney::ContextRecovery | CompactionJourney::ExhaustionAfterRecovery
+    );
+    let output_exhaustion = matches!(journey, CompactionJourney::OutputExhaustion);
+    let repeated_exhaustion = matches!(
+        journey,
+        CompactionJourney::ExhaustionAfterRecovery | CompactionJourney::OutputExhaustion
+    );
+    let terminal_error = if output_exhaustion {
+        "after 3 continuations"
+    } else {
+        "context window exhausted after recovery"
+    };
     use nanocodex_claude_tools::ClaudeTasks;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let directory = tempfile::tempdir().unwrap();
@@ -627,11 +687,11 @@ async fn transaction_recovery(
         } else if has_receipt {
             sse(
                 text("completed exactly once"),
-                if repeated_exhaustion { "model_context_window_exceeded" } else { "end_turn" },
+                if output_exhaustion { "max_tokens" } else if repeated_exhaustion { "model_context_window_exceeded" } else { "end_turn" },
                 10,
             )
         } else {
-            sse(signed_round(), "tool_use", if context_exhaustion { 10 } else { 70_000 })
+            sse(signed_round(), if output_exhaustion { "max_tokens" } else { "tool_use" }, if context_exhaustion || output_exhaustion { 10 } else { 70_000 })
         }
     })
     .await;
@@ -685,12 +745,7 @@ async fn transaction_recovery(
             "injected write {fail_at:?}/{after_commit} must interrupt the first driver"
         );
     } else if repeated_exhaustion {
-        assert!(
-            first
-                .unwrap_err()
-                .to_string()
-                .contains("context window exhausted after recovery")
-        );
+        assert!(first.unwrap_err().to_string().contains(terminal_error));
     } else {
         first.unwrap();
     }
@@ -736,9 +791,7 @@ async fn transaction_recovery(
     if repeated_exhaustion {
         let error = result.unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("context window exhausted after recovery"),
+            error.to_string().contains(terminal_error),
             "recovery at {fail_at:?}/{after_commit}: {error}"
         );
     } else {
@@ -796,6 +849,19 @@ async fn transaction_recovery(
             assert_eq!(log.len(), 4, "committed model responses must not repeat");
         }
     }
+    if output_exhaustion {
+        let log = requests.lock().unwrap();
+        let continuation = log.last().unwrap()["messages"].to_string();
+        assert!(continuation.contains("opaque-signature"));
+        assert!(continuation.contains("tool_result"));
+        if after_commit || fail_at.is_none() {
+            assert_eq!(
+                log.len(),
+                4,
+                "restart must retain the three-continuation cap and replay committed provider responses"
+            );
+        }
+    }
     let replay = match agent.prompt(request()).await {
         Ok(turn) => turn.result().await,
         Err(error) => Err(error),
@@ -835,6 +901,21 @@ async fn context_exhaustion_recovers_across_every_sqlite_write() {
             for ordinal in 0..count {
                 transaction_recovery(Some(ordinal), after_commit, journey).await;
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn output_exhaustion_cap_and_completed_effect_survive_every_sqlite_write() {
+    let count = transaction_recovery(None, false, CompactionJourney::OutputExhaustion).await;
+    for after_commit in [false, true] {
+        for ordinal in 0..count {
+            transaction_recovery(
+                Some(ordinal),
+                after_commit,
+                CompactionJourney::OutputExhaustion,
+            )
+            .await;
         }
     }
 }

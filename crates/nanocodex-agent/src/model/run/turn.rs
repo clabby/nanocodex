@@ -16,7 +16,7 @@ where
         &mut self,
         requested_workspace: Option<Arc<str>>,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         logical_turn: u64,
         cancel: &mut tokio::sync::oneshot::Receiver<()>,
         execution_steps: Option<ExecutionSteps>,
@@ -26,7 +26,7 @@ where
             .compact_inner(
                 requested_workspace,
                 thinking,
-                fast_mode,
+                service_tier,
                 logical_turn,
                 cancel,
                 execution_steps,
@@ -40,14 +40,14 @@ where
         &mut self,
         requested_workspace: Option<Arc<str>>,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         logical_turn: u64,
         cancel: &mut tokio::sync::oneshot::Receiver<()>,
         execution_steps: Option<ExecutionSteps>,
     ) -> Result<ModelCompactOutcome> {
         self.execution_steps = execution_steps;
         self.thinking = thinking;
-        self.fast_mode = fast_mode;
+        self.service_tier = service_tier;
         self.start_timing();
         self.stats = RunStats::default();
         self.transport_baseline = self.transport_stats.snapshot();
@@ -153,10 +153,10 @@ where
         task: &Prompt,
         workspace: Option<&str>,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
     ) -> Result<()> {
         self.thinking = thinking;
-        self.fast_mode = fast_mode;
+        self.service_tier = service_tier;
         self.start_timing();
         self.stats = RunStats::default();
         self.events.emit(
@@ -200,7 +200,7 @@ where
         task: &Prompt,
         workspace: Option<&str>,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         error: &NanocodexError,
     ) -> Result<()> {
         if matches!(
@@ -213,7 +213,7 @@ where
             return Ok(());
         }
         self.thinking = thinking;
-        self.fast_mode = fast_mode;
+        self.service_tier = service_tier;
         self.start_timing();
         self.stats = RunStats::default();
         self.events.emit(
@@ -242,7 +242,7 @@ where
         task: Prompt,
         workspace: Option<Arc<str>>,
         thinking: Thinking,
-        fast_mode: bool,
+        service_tier: ServiceTier,
         logical_turn: u64,
         steering: TurnSteering,
         mut cancel: tokio::sync::oneshot::Receiver<()>,
@@ -252,7 +252,7 @@ where
         self.execution_steps = execution_steps;
         self.instruction_revision = task.instruction_revision();
         self.thinking = thinking;
-        self.fast_mode = fast_mode;
+        self.service_tier = service_tier;
         self.start_timing();
         self.stats = RunStats::default();
         if let Some(tools) = &self.active_tools {
@@ -668,7 +668,7 @@ where
         ContinuationPolicy {
             model: self.model,
             thinking: self.thinking,
-            fast_mode: self.fast_mode,
+            service_tier: self.service_tier,
             reasoning_effort_updates: self.config.supports_reasoning_effort_updates(self.model),
         }
     }

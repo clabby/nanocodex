@@ -7,7 +7,7 @@ mod platform;
 
 use crate::{
     DefaultResponsesService, Model, OpenAiAuth, OpenAiAuthError, OpenAiAuthMode, ReasoningMode,
-    ResponsesHistory, ResponsesRetryPolicy, ResponsesTransport, Thinking,
+    ResponsesHistory, ResponsesRetryPolicy, ResponsesTransport, Thinking, pricing::ServiceTier,
     responses::StrictJsonSchema, session::SessionBuilder,
 };
 
@@ -284,8 +284,16 @@ impl<F> OpenAiBuilder<F> {
     /// A higher-level session or agent builder may override this reusable
     /// client default without mutating the `OpenAi` recipe.
     #[must_use]
-    pub const fn fast_mode(mut self, enabled: bool) -> Self {
-        self.config.fast_mode = enabled;
+    pub const fn fast_mode(self, enabled: bool) -> Self {
+        self.service_tier(ServiceTier::from_fast_mode(enabled))
+    }
+
+    /// Selects the processing tier for subsequently accepted turns.
+    ///
+    /// Unsupported tiers use the fastest tier supported by the selected model.
+    #[must_use]
+    pub const fn service_tier(mut self, service_tier: ServiceTier) -> Self {
+        self.config.service_tier = service_tier;
         self
     }
 
@@ -685,6 +693,7 @@ mod tests {
     use crate::{
         Model, ModelConfig, OpenAiAuthMode, ResponseError, ResponsesAttempt, ResponsesHistory,
         ResponsesServiceResponse, ResponsesTransport, Thinking,
+        pricing::ServiceTier,
         responses::{RequestProfile, StrictJsonSchema},
     };
     use serde_json::json;
@@ -741,7 +750,7 @@ mod tests {
             client.config(),
             Model::Astra,
             Thinking::Low,
-            false,
+            ServiceTier::Standard,
             &profile,
             None,
         ))

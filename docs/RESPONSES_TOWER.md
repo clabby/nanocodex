@@ -100,11 +100,15 @@ ResponsesRetryPolicy
        -> ResponsesSocket | HTTPS/SSE request
 ```
 
-Generation and compaction receive at most five attempts. Transient connection,
-handshake, send, receive, idle, premature-close, rate-limit, overload, and
-server failures may retry. Authentication, malformed protocol, invalid request,
-policy, quota, usage-limit, and context failures remain terminal. Server delay
-hints override bounded exponential backoff.
+Generation receives at most five attempts and compaction at most three on each
+transport; WebSocket-to-HTTPS fallback starts a fresh attempt budget. Transient
+connection, handshake, send, receive, idle, premature-close, rate-limit,
+overload, and server failures may retry. Authentication, malformed protocol,
+invalid request, policy, quota, usage-limit, and context failures remain
+terminal. Ordinary retries back off for 1, 2, 4, and 8 seconds with 90–110%
+jitter, and server delay hints override that backoff. Missing-checkpoint
+recovery retries immediately; transport fallback waits only for a server delay
+hint.
 
 Reconnect preserves the stable prompt-cache key and client-owned history,
 drops a connection-local `previous_response_id`, and forces full-history

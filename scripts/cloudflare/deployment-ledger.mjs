@@ -3,12 +3,18 @@ import { accountValid, currentWorkerDeployment, providerIdValid, releaseTag, wor
 
 const fingerprintValid = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) && value.length === 64;
 const idValid = value => Number.isSafeInteger(value) && value > 0;
-const failure = () => new Error('Deployment ledger request failed; release state is uncertain');
+export class DeploymentLedgerError extends Error {
+  constructor(status) {
+    super('Deployment ledger request failed; release state is uncertain' +
+      (Number.isInteger(status) && status >= 100 && status <= 599 ? ` (GitHub HTTP ${status})` : ''));
+  }
+}
+const failure = status => new DeploymentLedgerError(status);
 
 // Bodies go through stdin, never shell arguments. Do not surface subprocess
 // output or error causes: provider diagnostics can contain private information.
 export async function ghRequest({ method, path, body }, launch = spawn) {
-  const args = ['api', path, '--method', method, '--header', 'Accept: application/vnd.github+json',
+  const args = ['api', path, '--include', '--method', method, '--header', 'Accept: application/vnd.github+json',
     '--header', 'X-GitHub-Api-Version: 2022-11-28', '--header', 'Cache-Control: no-cache'];
   if (body !== undefined) args.push('--input', '-');
   return new Promise((resolve, reject) => {
@@ -24,8 +30,12 @@ export async function ghRequest({ method, path, body }, launch = spawn) {
     child.stdin.end(body === undefined ? undefined : JSON.stringify(body));
     child.once('close', code => {
       clearTimeout(timer);
-      if (code !== 0) { reject(failure()); return; }
-      try { resolve(JSON.parse(output)); } catch { reject(failure()); }
+      // Keep only a numeric HTTP status from headers; never expose provider bodies.
+      const status = Number(output.match(/^HTTP\/[\d.]+ (\d{3})\b/)?.[1]);
+      if (code !== 0) { reject(failure(status)); return; }
+      const separator = output.match(/\r?\n\r?\n/);
+      const body = separator ? output.slice(separator.index + separator[0].length) : '';
+      try { resolve(JSON.parse(body)); } catch { reject(failure(status)); }
     });
   });
 }
@@ -52,7 +62,9 @@ export function createDeploymentLedger({ repository = process.env.GITHUB_REPOSIT
   const base = `repos/${repository}/deployments`;
   const active = new WeakSet();
   const call = async args => {
-    try { return await request(args); } catch { throw failure(); }
+    try { return await request(args); } catch (error) {
+      throw error instanceof DeploymentLedgerError ? error : failure();
+    }
   };
   const context = worker => {
     if (!accountValid(account) || !Object.hasOwn(workerScripts, worker)) throw failure();

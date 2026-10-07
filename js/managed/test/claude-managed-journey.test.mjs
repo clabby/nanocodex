@@ -707,14 +707,14 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
         assert.equal(events.data.filter(row=>row.event?.type==='run.completed').length,expected==='completed'?1:0,'truncated stream cannot publish successful terminal');
         frames.push({agent:framed,id,expected,input:marker});
       }
-      assert.deepEqual(framingRequests,{crOnly:1,truncated:1},'neither stream framing path auto-retries inference');
+      assert.deepEqual(framingRequests,{crOnly:1,truncated:5},'an unpublished truncated stream exhausts the transient retry budget');
       await mf.dispose();mf=new Miniflare(options);
       for(const {agent,id,expected,input} of frames) {
         assert.equal((await call(`/v1/agents/${agent}/turns/${id}`)).state,expected);
         await call(`/v1/agents/${agent}/turns`,'POST',{input,id},200);
       }
-      assert.deepEqual(framingRequests,{crOnly:1,truncated:1},'retained failure and completion survive restart without replay');
-      trace.push({scenario:'managed WASM SSE framing',...framingRequests,crOnly:'completed',missingMessageStop:'failed',automaticRetries:0,restartReplay:false});
+      assert.deepEqual(framingRequests,{crOnly:1,truncated:5},'retained failure and completion survive restart without replay');
+      trace.push({scenario:'managed WASM SSE framing',...framingRequests,crOnly:'completed',missingMessageStop:'failed',automaticRetries:4,restartReplay:false});
     }
 
     const beforeDeniedMcp=mcpStarts(), ownerMcpToken=token;
