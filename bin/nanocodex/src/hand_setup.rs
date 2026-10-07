@@ -66,6 +66,13 @@ enum HandCommand {
     Restart,
     /// Recover an interrupted coordinated CLI and device Hand update.
     Recover,
+    /// Ask the running macOS Hand service to request Screen Recording and
+    /// Accessibility consent for its own executable. You confirm in macOS.
+    Permissions {
+        /// Also open the matching System Settings pane for anything not yet allowed.
+        #[arg(long)]
+        open_settings: bool,
+    },
     #[command(flatten)]
     Registry(crate::hand_registry::Command),
 }
@@ -451,6 +458,9 @@ impl Hand {
                 | HandCommand::Status
                 | HandCommand::MenuStatus
                 | HandCommand::MenuBar
+                // Consent is requested inside the already-running service;
+                // its PID check, not the service lock, pins the target.
+                | HandCommand::Permissions { .. }
                 // Registry edits are account-side; they never touch this
                 // machine's service and must not queue behind its lock.
                 | HandCommand::Registry(_)
@@ -524,8 +534,124 @@ impl Hand {
             }
             HandCommand::Restart => crate::update::restart_hand().await,
             HandCommand::Recover => crate::update::recover_hand_update().await,
+            HandCommand::Permissions { open_settings } => request_permissions(open_settings).await,
         }
     }
+}
+
+/// Route the consent request to the process launchd is running. A request
+/// made by this CLI would be attributed to the terminal app, not the Hand.
+/// One request per explicit invocation; macOS alone decides what is allowed.
+async fn request_permissions(open_settings: bool) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("Hand permissions are requested only on macOS; this platform needs no consent step");
+    }
+    let state = crate::hand_service::status().await?;
+    let (Some(pid), Some(executable)) = (state.pid, state.executable) else {
+        bail!("The Hand service is not running. Start it with `nanocodex hand start`, then retry.");
+    };
+    // The running daemon's own executable speaks its own IPC protocol.
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        Command::new(&executable)
+            .args(["__device-hand", "--request-permissions", "--daemon-pid"])
+            .arg(pid.to_string())
+            .arg("--daemon-executable")
+            .arg(&executable)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .wrap_err("The running Hand did not answer the permission request")??;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr.lines().map(str::trim).find(|line| !line.is_empty());
+        bail!(
+            "The running Hand could not request permissions: {}\nIf it predates `nanocodex hand permissions`, update it with `nanocodex update` and retry.",
+            reason.unwrap_or("it exited without a reason")
+        );
+    }
+    let reply: serde_json::Value = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str(line).ok())
+        .ok_or_else(|| eyre::eyre!("The running Hand returned no permission status"))?;
+    for key in ["screenCapture", "input"] {
+        if !reply["permissions"][key]["granted"].is_boolean()
+            || !reply["permissions"][key]["requested"].is_boolean()
+        {
+            bail!("The running Hand returned incomplete permission status; no grant was confirmed");
+        }
+    }
+    println!(
+        "Asked the running Hand service (PID {pid}, {}) to request macOS permissions for itself.",
+        executable.display()
+    );
+    let mut pending = Vec::new();
+    for (key, label, pane) in [
+        (
+            "screenCapture",
+            "Screen & System Audio Recording (live screen)",
+            "Privacy_ScreenCapture",
+        ),
+        (
+            "input",
+            "Accessibility (mouse and keyboard control)",
+            "Privacy_Accessibility",
+        ),
+    ] {
+        let permission = &reply["permissions"][key];
+        let status = match (
+            permission["granted"].as_bool(),
+            permission["requested"].as_bool(),
+        ) {
+            (Some(true), Some(false)) => "already allowed",
+            (Some(true), _) => "allowed",
+            (Some(false), _) => {
+                pending.push(pane);
+                "waiting for you to allow it in macOS"
+            }
+            _ => "not reported by this Hand",
+        };
+        println!("  {label}: {status}");
+    }
+    if pending.is_empty() {
+        println!("If live screen is still unavailable, restart the Hand: nanocodex hand restart");
+        return Ok(());
+    }
+    let name = executable.file_name().map_or_else(
+        || executable.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    println!(
+        "Nothing is allowed until you confirm it. macOS shows its prompt only once per Hand executable; if none appeared, enable \"{name}\" in System Settings > Privacy & Security{}.",
+        if open_settings {
+            ""
+        } else {
+            " (or rerun with --open-settings)"
+        }
+    );
+    println!(
+        "After allowing, restart the Hand so it uses the new permission: nanocodex hand restart"
+    );
+    if open_settings {
+        for pane in pending {
+            let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+            let opened = Command::new("/usr/bin/open")
+                .arg(&url)
+                .stdin(Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|status| status.success());
+            if !opened {
+                eprintln!(
+                    "Could not open System Settings ({url}); open Privacy & Security manually."
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -36,6 +36,16 @@ pub(crate) struct DeviceHand {
     /// Request an authoritative idle barrier from the currently running daemon.
     #[arg(long, hide = true, conflicts_with_all = ["describe", "daemon", "parent_pipe"])]
     prepare_update: bool,
+    /// Ask the running daemon process to request OS consent for itself.
+    #[arg(long, hide = true, requires_all = ["daemon_pid", "daemon_executable"],
+        conflicts_with_all = ["describe", "daemon", "parent_pipe", "prepare_update", "service_protocol"])]
+    request_permissions: bool,
+    /// PID the service manager reports for the running daemon.
+    #[arg(long, hide = true, requires = "request_permissions")]
+    daemon_pid: Option<u32>,
+    /// Executable the service manager reports for the running daemon.
+    #[arg(long, hide = true, requires = "request_permissions")]
+    daemon_executable: Option<PathBuf>,
     /// Print the shared identity without publishing a Hand.
     #[arg(long)]
     describe: bool,
@@ -503,6 +513,13 @@ pub(crate) async fn serve(command: DeviceHand) -> Result<(), ManagedError> {
         emit(&json!({"serviceProtocol": 1, "version": env!("CARGO_PKG_VERSION")}));
         return Ok(());
     }
+    if command.request_permissions {
+        let (Some(pid), Some(executable)) = (command.daemon_pid, command.daemon_executable) else {
+            return Err(error("--daemon-pid and --daemon-executable are required"));
+        };
+        emit(&request_daemon_permissions(pid, &executable).await?);
+        return Ok(());
+    }
     if command.prepare_update {
         let prepared = prepare_idle_update().await?;
         emit(&json!({"prepared": prepared}));
@@ -536,6 +553,102 @@ pub(crate) async fn prepare_idle_update() -> Result<bool, ManagedError> {
     transport::prepare_idle_update(&socket_path(&directory)?)
         .await
         .map_err(error)
+}
+
+/// This process as published in status.json and permission replies.
+fn daemon_identity() -> Value {
+    json!({"pid": std::process::id(), "executable": std::env::current_exe().ok(), "version": env!("CARGO_PKG_VERSION")})
+}
+
+/// Credential-free: the publisher records its PID in its account directory's
+/// status.json. Only the directory naming the service manager's PID is used.
+fn daemon_directory(hands: &Path, pid: u32) -> Result<PathBuf, ManagedError> {
+    fs::read_dir(hands)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|directory| {
+            fs::read(directory.join("status.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|status| status["daemon"]["pid"].as_u64() == Some(u64::from(pid)))
+        })
+        .ok_or_else(|| {
+            error(format!(
+                "The running Hand (PID {pid}) has not published a control endpoint. It may still be starting, or predate permission requests; update it and retry."
+            ))
+        })
+}
+
+async fn request_daemon_permissions(pid: u32, executable: &Path) -> Result<Value, ManagedError> {
+    let directory = daemon_directory(&home()?.join(".nanocodex/hands"), pid)?;
+    request_permissions_at(&socket_path(&directory)?, pid, executable).await
+}
+
+/// The OS attributes consent to the process that asks. Refuse unless the
+/// kernel-reported socket owner is the service manager's PID, and confirm the
+/// reply names the same process and executable. Never retried automatically.
+async fn request_permissions_at(
+    socket: &Path,
+    pid: u32,
+    executable: &Path,
+) -> Result<Value, ManagedError> {
+    #[cfg(unix)]
+    {
+        let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let expected = canonical(executable);
+        let reply = transport::request_permissions(socket, pid)
+            .await
+            .map_err(error)?;
+        let daemon = &reply["daemon"];
+        let reported = daemon["executable"]
+            .as_str()
+            .map(|path| canonical(Path::new(path)));
+        if daemon["pid"].as_u64() != Some(u64::from(pid)) || reported.as_deref() != Some(&*expected)
+        {
+            return Err(error(format!(
+                "The Hand that answered ({daemon}) is not the running service (PID {pid}, {}).",
+                expected.display()
+            )));
+        }
+        Ok(reply)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (socket, pid, executable);
+        Err(error("Hand permission requests are only used on macOS"))
+    }
+}
+
+/// Executed by the daemon on explicit request only. macOS shows its own
+/// consent sheet; nothing here can grant, and `granted` is the OS's answer.
+fn request_os_permissions() -> Value {
+    #[cfg(target_os = "macos")]
+    {
+        nanocodex_hand::request_access()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        json!({"unsupported": format!("no OS consent is needed on {}", std::env::consts::OS)})
+    }
+}
+
+async fn answer_permissions(
+    mut stream: impl tokio::io::AsyncWrite + Unpin,
+    consent: fn() -> Value,
+) {
+    let permissions = tokio::task::spawn_blocking(consent)
+        .await
+        .unwrap_or_else(|_| json!({"error": "the permission request failed"}));
+    tracing::info!(target: "nanocodex2", stage = "hand.permissions.requested", %permissions,
+        "Requested OS permissions on explicit user action");
+    let mut reply =
+        serde_json::to_vec(&json!({"daemon": daemon_identity(), "permissions": permissions}))
+            .unwrap_or_default();
+    reply.push(b'\n');
+    let _ = stream.write_all(&reply).await;
+    let _ = stream.shutdown().await;
 }
 
 async fn serve_inner(command: DeviceHand) -> Result<(), ManagedError> {
@@ -636,7 +749,7 @@ async fn share(
             }
             let machine = serde_json::to_value(&state.machine).map_err(error)?;
             let status = std::sync::Arc::new(std::sync::Mutex::new(
-                json!({"machine": machine, "status": "connecting", "daemon": {"pid": std::process::id(), "executable": std::env::current_exe().ok(), "version": env!("CARGO_PKG_VERSION")}}),
+                json!({"machine": machine, "status": "connecting", "daemon": daemon_identity()}),
             ));
             {
                 let mut status = status.lock().unwrap();
@@ -780,13 +893,14 @@ async fn watch_clients(listener: transport::Listener, cancel: CancellationToken)
     // tools, retained CUA/process sessions, or independently hosted VMs idle.
     // Keep the wire request usable by updaters but fail closed until all those
     // owners participate in the admission barrier.
-    watch_clients_with_barrier(listener, cancel, || async { false }).await;
+    watch_clients_with_barrier(listener, cancel, || async { false }, request_os_permissions).await;
 }
 
 async fn watch_clients_with_barrier<F, Fut>(
     mut listener: transport::Listener,
     cancel: CancellationToken,
     mut prepare: F,
+    consent: fn() -> Value,
 ) where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -800,6 +914,12 @@ async fn watch_clients_with_barrier<F, Fut>(
                     clients.spawn(async move {
                         match stream.read_u8().await {
                             Ok(transport::PREPARE_IDLE_UPDATE) => Some(stream),
+                            // Answered on this client's task: never admits a
+                            // lease or participates in the update barrier.
+                            Ok(transport::REQUEST_PERMISSIONS) => {
+                                answer_permissions(stream, consent).await;
+                                None
+                            }
                             _ => None,
                         }
                     });
@@ -1314,6 +1434,7 @@ mod idle_update_tests {
                 recorded.fetch_add(1, Ordering::SeqCst);
                 async { true }
             },
+            || -> Value { unreachable!("an update barrier never requests OS consent") },
         ));
         let lease = transport::connect(&path).await.unwrap();
         assert!(!transport::prepare_idle_update(&path).await.unwrap());
@@ -1361,5 +1482,117 @@ mod idle_update_tests {
         let request = transport::prepare_idle_update(&path).await.unwrap_err();
         assert_eq!(request.kind(), std::io::ErrorKind::TimedOut);
         stalled.abort();
+    }
+}
+
+/// Real lease socket and daemon accept loop; only the macOS consent sheet is
+/// replaced, because a test must never ask TCC on behalf of the test runner.
+#[cfg(all(test, unix))]
+mod permission_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CONSENTS: AtomicUsize = AtomicUsize::new(0);
+    fn pending_screen_consent() -> Value {
+        CONSENTS.fetch_add(1, Ordering::SeqCst);
+        json!({"screenCapture": {"granted": false, "requested": true}, "input": {"granted": true, "requested": false}})
+    }
+
+    #[tokio::test]
+    async fn permission_request_reaches_only_the_verified_daemon_without_disturbing_leases() {
+        let path = PathBuf::from(format!(
+            "/tmp/ncx-permissions-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let listener = transport::Listener::bind(&path).unwrap();
+        let cancel = CancellationToken::new();
+        let watching = tokio::spawn(watch_clients_with_barrier(
+            listener,
+            cancel.clone(),
+            || async { false },
+            pending_screen_consent,
+        ));
+        let mut lease = transport::connect(&path).await.unwrap();
+        let pid = std::process::id();
+        let executable = std::env::current_exe().unwrap();
+
+        // A different service PID is refused before the opcode is sent.
+        let refused = request_permissions_at(&path, pid + 1, &executable)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("no permission was requested"), "{refused}");
+        assert_eq!(CONSENTS.load(Ordering::SeqCst), 0);
+
+        let reply = request_permissions_at(&path, pid, &executable)
+            .await
+            .unwrap();
+        assert_eq!(CONSENTS.load(Ordering::SeqCst), 1);
+        assert_eq!(reply["daemon"]["pid"], pid);
+        assert_eq!(
+            reply["permissions"]["screenCapture"],
+            json!({"granted": false, "requested": true})
+        );
+
+        // A process running a different binary than the service manager reports
+        // is reported, not trusted.
+        let mismatch = request_permissions_at(&path, pid, Path::new("/nonexistent/nanocodex2"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            mismatch.contains("is not the running service"),
+            "{mismatch}"
+        );
+
+        // The existing lease and publisher are untouched by the request.
+        let mut byte = [0];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), lease.read(&mut byte))
+                .await
+                .is_err()
+        );
+        assert!(!cancel.is_cancelled());
+        cancel.cancel();
+        watching.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_daemon_and_missing_endpoint_are_actionable_errors() {
+        let path = PathBuf::from(format!(
+            "/tmp/ncx-permissions-{}.sock",
+            uuid::Uuid::new_v4()
+        ));
+        let mut listener = transport::Listener::bind(&path).unwrap();
+        let old_daemon = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let _ = stream.read_u8().await; // Unknown opcode: close without replying.
+        });
+        let old =
+            request_permissions_at(&path, std::process::id(), &std::env::current_exe().unwrap())
+                .await
+                .unwrap_err()
+                .to_string();
+        assert!(
+            old.contains("does not support permission requests"),
+            "{old}"
+        );
+        old_daemon.await.unwrap();
+
+        let hands = tempfile::tempdir().unwrap();
+        for (name, pid) in [("stale", 1_u32), ("current", 4242)] {
+            fs::create_dir(hands.path().join(name)).unwrap();
+            fs::write(
+                hands.path().join(name).join("status.json"),
+                json!({"status": "connected", "daemon": {"pid": pid}}).to_string(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            daemon_directory(hands.path(), 4242).unwrap(),
+            hands.path().join("current")
+        );
+        let missing = daemon_directory(hands.path(), 7).unwrap_err().to_string();
+        assert!(missing.contains("PID 7"), "{missing}");
     }
 }

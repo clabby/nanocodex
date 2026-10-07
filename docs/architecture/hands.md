@@ -116,6 +116,15 @@ sudo python3 scripts/install-hand-service.py --user "$USER" --binary /path/to/na
 
 The installer creates one machine-wide launchd service on macOS or systemd service on Linux, running as that non-root user. It uses the user's saved account login and existing `vm.json` configuration. It neither copies credentials into the service definition nor requires a terminal or app to stay open. Host tools work without a GUI; desktop capture needs the platform's GUI session and permissions.
 
+On macOS, `nanocodex hand permissions` asks the running Hand service to request
+Screen & System Audio Recording and Accessibility access. The request runs in
+the capturing process, with its PID verified against launchd and the local socket
+peer. macOS grants access only after user consent; the command reports pending
+and granted permissions separately. `--open-settings` opens the matching privacy
+panes. Restart the Hand after granting access. Unsigned or ad-hoc signed local
+builds can require consent again when their executable identity changes.
+
+
 For a custom login, pass `--managed-url https://your-server` and `--account-file /absolute/path/to/nanocodex-account.json` to the installer. These select the existing login without copying its secret.
 
 Use `sudo systemctl stop/start nanocodex-hand` on Linux. On macOS, use `sudo launchctl bootout system/com.nanocodex.hand` to stop and `sudo launchctl bootstrap system /Library/LaunchDaemons/com.nanocodex.hand.plist` to start. Remove/disable the OS service to prevent future boot startup. Windows service installation is not provided by this helper.

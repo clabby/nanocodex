@@ -659,6 +659,25 @@ fn hid_to_mac(hid: u16) -> Option<u16> {
     })
 }
 
+/// Explicit, user-initiated consent request for THIS process. Only the
+/// persistent Hand's own process may call it, so macOS attributes the Screen &
+/// System Audio Recording and Accessibility entries to the executable that
+/// actually captures and posts input. Already-granted access is never
+/// re-requested. `granted` reports only what macOS says right now; a request
+/// made here is still pending until the user confirms the system sheet.
+pub fn request_access() -> Value {
+    fn one(preflight: impl Fn() -> bool, request: impl Fn() -> bool) -> Value {
+        if preflight() {
+            return json!({"granted": true, "requested": false});
+        }
+        json!({"granted": request(), "requested": true})
+    }
+    json!({
+        "screenCapture": one(|| CGPreflightScreenCaptureAccess(), || CGRequestScreenCaptureAccess()),
+        "input": one(|| CGPreflightPostEventAccess(), || CGRequestPostEventAccess()),
+    })
+}
+
 fn capture_available() -> Result<()> {
     if !CGPreflightScreenCaptureAccess() {
         return Err(error(CAPTURE_PERMISSION));

@@ -355,6 +355,126 @@ fn digest(value: &str) -> String {
     hex::encode(Sha256::digest(value))
 }
 
+/// The shipped companion asks the real daemon over its real lease socket.
+/// macOS consent itself is never exercised here: a test must not ask TCC on
+/// behalf of the test runner, so the successful request runs where the daemon
+/// needs no consent (Linux) and reports that rather than claiming a grant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permission_request_targets_only_the_running_daemon() {
+    eprintln!(
+        "Reproduce: cargo test -p nanocodex2-bin --test nanocodex2_background_hand permission_request -- --nocapture"
+    );
+    let (calls, receiver) = mpsc::unbounded_channel();
+    let state = Cloud {
+        calls,
+        receiver: Arc::new(Mutex::new(Some(receiver))),
+        catalog: Arc::new(Mutex::new(None)),
+        origins: Arc::new(Mutex::new(Vec::new())),
+        account_connections: Arc::new(AtomicUsize::new(0)),
+        agent_connections: Arc::new(AtomicUsize::new(0)),
+        model_reads: Arc::new(AtomicUsize::new(0)),
+    };
+    let app = Router::new()
+        .route(
+            "/v1/me",
+            get(|headers: HeaderMap| async move {
+                authorize(&headers);
+                Json(json!({"user":{"id":OWNER}}))
+            }),
+        )
+        .route("/v1/account/tool-host", get(account_socket))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let temporary = tempfile::Builder::new()
+        .prefix("nc-perm-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let home = temporary.path().canonicalize().unwrap();
+    let daemon_log = std::fs::File::create(home.join("daemon.log")).unwrap();
+    let mut daemon = command(&home, &origin)
+        .env("NANOCODEX_EXTERNAL_VM_FACTORY", "retained-fixture")
+        .args(["hand"])
+        .stdout(Stdio::from(daemon_log.try_clone().unwrap()))
+        .stderr(Stdio::from(daemon_log))
+        .spawn()
+        .unwrap();
+    let pid = daemon.id().unwrap();
+    let status = home
+        .join(".nanocodex/hands")
+        .join(digest(&format!("{origin}\0{OWNER}")))
+        .join("status.json");
+    tokio::time::timeout(TIMEOUT, async {
+        while !status.exists() || state.catalog.lock().unwrap().is_none() {
+            assert!(daemon.try_wait().unwrap().is_none(), "daemon exited");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "daemon readiness timed out: {}",
+            std::fs::read_to_string(home.join("daemon.log")).unwrap()
+        )
+    });
+
+    let executable = Path::new(env!("CARGO_BIN_EXE_nanocodex2"));
+    let request = |pid: u32| {
+        let mut command = command(&home, &origin);
+        command
+            .args(["__device-hand", "--request-permissions", "--daemon-pid"])
+            .arg(pid.to_string())
+            .arg("--daemon-executable")
+            .arg(executable);
+        command
+    };
+    // A PID that is not the publisher is refused without contacting it.
+    let other = std::process::id();
+    let refused = tokio::time::timeout(TIMEOUT, request(other).output())
+        .await
+        .unwrap()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    eprintln!(
+        "PERMISSIONS wrong pid {other}: status={} stderr={stderr}",
+        refused.status
+    );
+    assert!(!refused.status.success());
+    assert!(stderr.contains(&format!("PID {other}")), "{stderr}");
+    if cfg!(target_os = "linux") {
+        let output = tokio::time::timeout(TIMEOUT, request(pid).output())
+            .await
+            .unwrap()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        eprintln!(
+            "PERMISSIONS daemon pid {pid}: status={} stdout={stdout}",
+            output.status
+        );
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reply: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+        assert_eq!(reply["daemon"]["pid"], pid);
+        assert_eq!(
+            Path::new(reply["daemon"]["executable"].as_str().unwrap())
+                .canonicalize()
+                .unwrap(),
+            executable.canonicalize().unwrap()
+        );
+        assert!(reply["permissions"]["unsupported"].is_string(), "{reply}");
+    }
+    assert!(
+        daemon.try_wait().unwrap().is_none(),
+        "permission request stopped daemon"
+    );
+    daemon.kill().await.unwrap();
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_daemon_survives_two_clients_and_routes_native_cwds() {
     eprintln!(

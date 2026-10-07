@@ -117,3 +117,49 @@ pub(super) async fn prepare_idle_update(path: &Path) -> io::Result<bool> {
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Hand update request timed out"))?
 }
+
+// Explicit user action only: ask the daemon process itself to request macOS
+// consent so the OS attributes it to the executable that captures the screen.
+// Reply is one bounded JSON object; older daemons close without replying.
+pub(super) const REQUEST_PERMISSIONS: u8 = 0xB1;
+#[cfg(unix)]
+const PERMISSIONS_REPLY_LIMIT: u64 = 16 * 1024;
+
+/// Refuses before sending anything unless the kernel-attested socket owner is
+/// `expected_pid`. The OS request is non-blocking; the bound covers a stalled peer.
+#[cfg(unix)]
+pub(super) async fn request_permissions(
+    path: &Path,
+    expected_pid: u32,
+) -> io::Result<serde_json::Value> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut stream = connect(path).await?;
+        let peer = stream.peer_cred()?.pid();
+        if peer != i32::try_from(expected_pid).ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the Hand control socket is owned by PID {}, not the running service PID {expected_pid}; no permission was requested",
+                    peer.map_or_else(|| "unknown".to_owned(), |peer| peer.to_string())
+                ),
+            ));
+        }
+        stream.write_all(&[REQUEST_PERMISSIONS]).await?;
+        let mut reply = Vec::new();
+        (&mut stream)
+            .take(PERMISSIONS_REPLY_LIMIT)
+            .read_to_end(&mut reply)
+            .await?;
+        if reply.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the running Hand does not support permission requests",
+            ));
+        }
+        serde_json::from_slice(&reply)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid Hand permission reply"))
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Hand permission request timed out"))?
+}
