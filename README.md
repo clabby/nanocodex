@@ -161,6 +161,13 @@ There is no separate Hand setup command. An existing service keeps its account
 configuration. Optional Computer Use components prepare in the background while
 you use Nanocodex. `--no-setup` explicitly opts out of automatic preparation.
 
+`nanocodex2`, `run`, and `attach` use this persistent computer Hand. Opening a
+terminal or changing projects does not publish another Hand or reconnect its
+tools. Closing a terminal releases only that client's local lease; the service
+and its processes remain available. The current directory travels as descriptive
+request context, independently of the Hand's identity and connection. If the
+service is unavailable, the client does not substitute a workspace publisher.
+
 On Linux and Windows, the installer runs guided setup when a terminal or saved
 account login is available; unattended installs print the command to resume.
 Setup remains idempotent and resumable.

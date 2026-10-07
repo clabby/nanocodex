@@ -107,17 +107,12 @@ use nanocodex_managed::{
     AgentSettings, AgentState, EventCursor, Managed, ManagedClient, ManagedError, ManagedEvent,
     PromptInput, validate_vm_factory_name,
 };
-use nanocodex_oai_tools::{
-    Tools, WorkspaceTools,
-    attachment::{Attachment, AttachmentMetadata, AttachmentTarget},
-    mcp::{Mcp, McpServer},
-};
+use nanocodex_oai_tools::attachment::{Attachment, AttachmentMetadata, AttachmentTarget};
 use percent_encoding::percent_decode_str;
 use tracing::Instrument as _;
 use url::Url;
 
 const SYSTEM_HOST_TOKEN_ENV: &str = "NANOCODEX_SYSTEM_HOST_TOKEN";
-const MERCATOR_MCP_URL: &str = "https://mercator.sh/mcp";
 
 #[derive(Parser)]
 #[command(
@@ -1271,30 +1266,9 @@ async fn build_workspace_agent_with_settings(
     let config =
         HostConfig::load().map_err(|error| ManagedError::Configuration(error.to_string()))?;
     let workspace = config.workspace().to_path_buf();
-    let attachment_metadata = config
-        .attachment_metadata()
-        .map_err(|error| ManagedError::Configuration(error.to_string()))?;
-    let hand_key = format!("user:{}", attachment_metadata.attachment_id());
-    let hand_cwd = format!("/{}", attachment_metadata.attachment_id());
-    let client =
-        client
-            .clone()
-            .with_request_origin("nanocodex2", Some(&hand_key), Some(&hand_cwd))?;
-    // Required workspace configuration is validated before cloud admission.
-    let tools = Tools::builder()
-        .without_defaults()
-        .add(WorkspaceTools::new(&workspace))
-        .add(default_mercator_mcp()?)
-        .build()
-        .map_err(|error| ManagedError::Configuration(error.to_string()))?;
-    // Explicit providers preserve their fail-before-admission contract.
-    let explicit_computer =
-        std::env::var_os("NANOCODEX_COMPUTER").is_some_and(|value| !value.is_empty());
-    let tools = if explicit_computer {
-        prepare_workspace_computer(tools).await?
-    } else {
-        tools
-    };
+    // A terminal is a client of the account's persistent computer Hand. Its
+    // directory is turn context, never another machine or tool publisher.
+    let client = device_hand::with_client_context(client.clone(), &workspace)?;
     let backend = match (agent_id, state) {
         (None, None) if initial_prompt.is_some() => {
             let backend = Managed::create(client.clone());
@@ -1318,7 +1292,7 @@ async fn build_workspace_agent_with_settings(
             ));
         }
     };
-    let mut builder = Nanocodex::builder(backend).attachment_metadata(attachment_metadata);
+    let mut builder = Nanocodex::builder(backend);
     if let Some((selection, account)) = startup {
         if let Some(selection) = selection {
             builder = builder.settings_selection(selection);
@@ -1327,20 +1301,6 @@ async fn build_workspace_agent_with_settings(
             builder = builder.chatgpt_account(account);
         }
     }
-    let builder = if explicit_computer {
-        builder.tools(tools)
-    } else {
-        builder.tools_async(async move {
-            let fallback = tools.clone();
-            match prepare_workspace_computer(tools).await {
-                Ok(tools) => tools,
-                Err(error) => {
-                    tracing::warn!(%error, "optional computer tools unavailable; retaining workspace tools");
-                    fallback
-                }
-            }
-        })
-    };
     let builder = match event_observer {
         Some(observer) => builder.event_observer(observer),
         None => builder,
@@ -1363,32 +1323,6 @@ async fn build_workspace_agent_with_settings(
     };
     let agent_id = agent.agent_id().to_owned();
     Ok((agent, events, agent_id, workspace, turn))
-}
-
-async fn prepare_workspace_computer(tools: Tools) -> Result<Tools, ManagedError> {
-    let _timing = startup_timing::Stage::new("computer_discovery");
-    let Some(computer) = native_hand::computer_tools().await? else {
-        return Ok(tools);
-    };
-    let mut builder = tools.into_builder();
-    for tool in computer.tools() {
-        builder = builder.add(tool);
-    }
-    builder
-        .build()
-        .map_err(|error| ManagedError::Configuration(error.to_string()))
-}
-
-fn default_mercator_mcp() -> Result<Mcp, ManagedError> {
-    Mcp::builder()
-        .server(
-            "mercator",
-            McpServer::http(MERCATOR_MCP_URL)
-                .description("Discover and quote Mercator services. Paid jobs require separate authorization.")
-                .parallel_tools(["get_suggested_queries", "get_connection_status", "search_services"]),
-        )
-        .build()
-        .map_err(|error| ManagedError::Configuration(error.to_string()))
 }
 
 async fn await_turn(

@@ -47,7 +47,13 @@ export function contextData(tag: string, value: unknown): string;
 export type RequestOriginLocation = Readonly<{
   latitude: number; longitude: number; accuracy_meters: number; timestamp_ms: number; approximate: boolean;
 }>;
-export type RequestOriginContext = Readonly<{ client?: string; hand?: string; cwd?: string; timezone?: string; location?: RequestOriginLocation }>;
+export type RequestOriginContext = Readonly<{
+  client?: string; hand?: string; cwd?: string;
+  /** Initial native absolute directory on the reported Hand, at most 512 UTF-8 bytes.
+   * Descriptive only: never a logical workdir, routing hint, or authorization. */
+  native_cwd?: string;
+  timezone?: string; location?: RequestOriginLocation;
+}>;
 /** Drops invalid optional location samples or samples older than five minutes / over 30 seconds in the future. */
 export function requestOriginLocation(value: unknown, now?: number): RequestOriginLocation | undefined;
 export function requestOriginContext(value: unknown, now?: number): RequestOriginContext;

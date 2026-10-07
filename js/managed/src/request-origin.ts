@@ -31,6 +31,7 @@ export function projectCaller(context: CallerContext, hands: readonly AccountMac
   return {
     client: claimed?.client ? { name: claimed.client, attribution: "client_reported" as const } : null,
     hand: hand ? { key: hand.id, path: hand.mount, attribution: "client_reported_authorized_hand" as const } : null,
+    ...(hand && claimed?.native_cwd ? { native_cwd: claimed.native_cwd } : {}),
     ...(location ? { location: { ...location, attribution: "client_reported" as const } } : {}),
     ...(context.principal ? { principal: context.principal } : {}),
     ...(claimed ? { cwd, timezone: claimed.timezone ?? null } : {}),

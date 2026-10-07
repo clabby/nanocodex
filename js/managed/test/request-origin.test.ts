@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { callerContext, projectCaller } from "../src/request-origin";
 import { forwardPrincipalAssertions, type Principal } from "../src/account-auth";
+import { projectExecutionPreferences } from "../src/execution-preferences";
 import { requestOriginContext, requestOriginLocation } from "nanocodex/tools/environment";
 const hands = [{ id: "user:laptop", name: "Laptop", mount: "/laptop", workspace: "/laptop", kind: "user" as const, capabilities: ["exec_command"] }];
 
@@ -26,6 +27,26 @@ describe("caller attribution", () => {
     const renamed = [{ ...hands[0]!, mount: "/omarchy-desktop", aliases: ["/laptop"] }];
     expect(projectCaller({ reported: { hand: "user:laptop", cwd: "/laptop/src" } }, renamed).cwd).toBe("/omarchy-desktop/src");
     expect(projectCaller({ reported: { hand: "user:laptop", cwd: "/laptop-other/src" } }, renamed).cwd).toBeNull();
+  });
+  it("projects native directory claims only for authorized Hands without rebasing or routing", () => {
+    const renamed = [{ ...hands[0]!, mount: "/renamed", aliases: ["/laptop"] }];
+    for (const native_cwd of ["/Users/example/project", "C:\\Users\\example\\project"]) {
+      const headers = new Headers({ "x-nanocodex-client-context": JSON.stringify({
+        hand: "user:laptop", cwd: "/laptop/src", native_cwd,
+      }) });
+      const projected = projectCaller(callerContext(headers), renamed);
+      expect(projected).toMatchObject({ native_cwd, cwd: "/renamed/src", hand: { path: "/renamed" } });
+      expect(projectExecutionPreferences([{ ...renamed[0]!, online: true, capabilities: ["shell"] }], projected)
+        .native.recommended_workdir).toBe("/renamed/src");
+      for (const hand of [undefined, "user:unknown"]) {
+        headers.set("x-nanocodex-client-context", JSON.stringify({ hand, native_cwd }));
+        expect(projectCaller(callerContext(headers), renamed)).not.toHaveProperty("native_cwd");
+      }
+    }
+    const invalid = new Headers({ "x-nanocodex-client-context": JSON.stringify({
+      hand: "user:laptop", native_cwd: "/" + "é".repeat(256),
+    }).replaceAll("é", "\\u00e9") });
+    expect(projectCaller(callerContext(invalid), renamed)).toEqual({ client: null, hand: null });
   });
   it("rejects malformed hints without turning them into principal assertions", () => {
     for (const value of [{ client: "bad\nclient" }, { cwd: "/laptop/../other" }, { timezone: "not/a/timezone" }, { user_id: "forged" }])

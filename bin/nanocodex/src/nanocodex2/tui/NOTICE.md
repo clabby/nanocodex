@@ -13,6 +13,6 @@ repository's `LICENSE-APACHE` contains the applicable license text.
 
 Nanocodex2 does not start Tact's local agent, memory, or subagent runtimes. The
 memory browser is intentionally omitted; hosted tools and the existing
-Nanocodex workspace attachment remain the owners of those capabilities. The
+Nanocodex background Hand service remain the owners of those capabilities. The
 copied presentation may use Nanocodex's own subagent protocol types to render
 hosted events, but it does not create or supervise a subagent runtime.

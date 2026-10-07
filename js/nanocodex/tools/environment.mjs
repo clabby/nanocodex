@@ -42,7 +42,7 @@ export function contextData(tag, value) {
 /** Client-reported context is descriptive data, never identity or authorization. */
 export function requestOriginContext(value, now = Date.now()) {
   if (!value || typeof value !== "object" || Array.isArray(value)
-    || Object.keys(value).some(key => !["client", "hand", "cwd", "timezone", "location"].includes(key))) {
+    || Object.keys(value).some(key => !["client", "hand", "cwd", "native_cwd", "timezone", "location"].includes(key))) {
     throw new TypeError("invalid request origin");
   }
   const result = {};
@@ -56,6 +56,15 @@ export function requestOriginContext(value, now = Date.now()) {
   if (result.client && !/^[A-Za-z0-9_.-]+$/.test(result.client)) throw new TypeError("invalid request origin client");
   if (result.cwd && (!result.cwd.startsWith("/") || result.cwd.includes("\\")
     || result.cwd.split("/").some(part => part === "." || part === ".."))) throw new TypeError("invalid request origin cwd");
+  if (value.native_cwd !== undefined) {
+    const path = value.native_cwd;
+    // Native paths describe the caller's directory; they never select a mount.
+    const absolute = typeof path === "string" && (path.startsWith("/")
+      || /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\/]+[\\/][^\\/]+/.test(path));
+    if (!absolute || new TextEncoder().encode(path).length > 512
+      || /[\p{Cc}\p{Cs}]/u.test(path)) throw new TypeError("invalid request origin native_cwd");
+    result.native_cwd = path;
+  }
   if (result.timezone) {
     try { new Intl.DateTimeFormat("en-US", { timeZone: result.timezone }); }
     catch { throw new TypeError("invalid request origin timezone"); }

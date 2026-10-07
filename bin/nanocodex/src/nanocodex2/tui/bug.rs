@@ -61,7 +61,7 @@ pub(super) async fn launch(
         })?;
     let agent_id = receipt.agent_id;
     // HTTP admission is durable and idempotent; the turn does not depend on a
-    // TUI WebSocket or local workspace attachment staying alive.
+    // TUI WebSocket or local client staying alive.
     let key = uuid::Uuid::new_v4().to_string();
     client.submit(&agent_id, None, &key, &PromptInput::Text(prompt)).await.map_err(|error| ConnectionFailure {
         error: ManagedError::Configuration(format!(

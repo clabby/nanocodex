@@ -189,6 +189,58 @@ impl ManagedClient {
         Ok(self)
     }
 
+    /// Adds the client's native working directory as descriptive turn context.
+    /// This never creates a Hand, changes its root, or selects tool placement.
+    ///
+    /// # Errors
+    /// Returns a configuration error for a non-absolute, oversized, or invalid path.
+    pub fn with_native_cwd(mut self, cwd: &str) -> Result<Self, ManagedError> {
+        let bytes = cwd.as_bytes();
+        let unc = cwd.strip_prefix("\\\\").is_some_and(|path| {
+            let mut parts = path.split(['\\', '/']);
+            parts.next().is_some_and(|host| !host.is_empty())
+                && parts.next().is_some_and(|share| !share.is_empty())
+        });
+        let absolute = cwd.starts_with('/')
+            || (bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'/' | b'\\'))
+            || unc;
+        if !absolute || bytes.len() > 512 || cwd.chars().any(char::is_control) {
+            return Err(ManagedError::Configuration(
+                "invalid native working directory".to_owned(),
+            ));
+        }
+        let mut context: serde_json::Value = self
+            .request_origin
+            .as_ref()
+            .and_then(|value| serde_json::from_slice(value.as_bytes()).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        context["native_cwd"] = cwd.into();
+        // HTTP headers remain ASCII even when a project directory contains
+        // Unicode. JSON decoding restores the exact native path at the server.
+        let mut header = String::new();
+        for character in context.to_string().chars() {
+            if character.is_ascii() {
+                header.push(character);
+            } else {
+                for unit in character.encode_utf16(&mut [0; 2]) {
+                    header.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+        if header.len() > 2048 {
+            return Err(ManagedError::Configuration(
+                "request origin is too large".to_owned(),
+            ));
+        }
+        self.request_origin = Some(HeaderValue::from_str(&header).map_err(|_| {
+            ManagedError::Configuration("invalid request origin header".to_owned())
+        })?);
+        Ok(self)
+    }
+
     fn from_builder(mut builder: ManagedClientBuilder) -> Result<Self, ManagedError> {
         install_default_rustls_crypto_provider();
         validate_origin(&builder.origin)?;

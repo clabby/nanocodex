@@ -85,3 +85,15 @@ test("environment exposes account wallet independently of funding and strips sig
     assert.deepEqual(projectEnvironment({ ...account, wallet: { ...wallet, status } }, host).wallet, { status });
   }
 });
+
+test("request origin accepts bounded native absolute paths without relaxing logical cwd", () => {
+  for (const native_cwd of ["/Users/example/project", "/tmp/δοκιμή 🚀", "C:\\Users\\example\\project", "D:/project", "\\\\server\\share\\project", "/" + "é".repeat(255) + "a"]) {
+    assert.equal(requestOriginContext({ hand: "user:desktop", native_cwd }).native_cwd, native_cwd);
+  }
+  for (const native_cwd of ["", "relative/path", "C:relative", "\\rooted", "\\\\server", "/tmp/line\nbreak", "/tmp/\u007f", "/tmp/\u0085", "/tmp/\ud800", "/" + "é".repeat(256), "/" + "a".repeat(512), null, 1]) {
+    assert.throws(() => requestOriginContext({ native_cwd }), /invalid request origin native_cwd/);
+  }
+  for (const cwd of ["/laptop/../other", "C:\\project", "/tmp/δοκιμή", "/laptop\\src"]) {
+    assert.throws(() => requestOriginContext({ cwd, native_cwd: "/tmp/project" }), /invalid request origin cwd/);
+  }
+});

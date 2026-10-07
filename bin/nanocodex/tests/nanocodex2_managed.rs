@@ -23,8 +23,8 @@ use axum::{
 
 const AGENT_ID: &str = "019fc927-b280-79a7-8445-1b9996ad2fb0";
 const TURN_ID: &str = "019fc927-b281-7a11-8445-1b9996ad2fb0";
-const LOCAL_TURN_ID: &str = "019fc927-b282-7a11-8445-1b9996ad2fb0";
-const CLOUD_TURN_ID: &str = "019fc927-b283-7a11-8445-1b9996ad2fb0";
+const FIRST_TURN_ID: &str = "019fc927-b282-7a11-8445-1b9996ad2fb0";
+const SECOND_TURN_ID: &str = "019fc927-b283-7a11-8445-1b9996ad2fb0";
 const PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[tokio::test]
@@ -280,12 +280,8 @@ struct TestState {
     authorized_requests: Arc<AtomicUsize>,
     tool_host_attempts: Arc<AtomicUsize>,
     completed: Arc<tokio::sync::Notify>,
-    tool_completed: Arc<tokio::sync::Notify>,
     origin: String,
-    failed_tool_host_attempts: usize,
     expect_local_tool: bool,
-    delay_ready_until_submission: bool,
-    disconnect_after_ready: bool,
     catalogs: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
@@ -392,7 +388,7 @@ async fn run_flushes_each_assistant_delta_before_completion() {
 }
 
 #[tokio::test]
-async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
+async fn run_streams_cloud_answer_with_configured_directory_context() {
     run_workspace_lifecycle(false, false).await;
 }
 
@@ -401,91 +397,157 @@ async fn pinned_run_combines_creation_and_first_prompt() {
     run_workspace_lifecycle(true, false).await;
 }
 
-#[cfg(target_os = "macos")]
 #[tokio::test]
-async fn run_admits_while_optional_computer_is_pending_and_preserves_workspace_tools() {
+async fn run_does_not_discover_an_explicit_missing_computer_provider() {
+    // Provider selection belongs to the background daemon, not the CLI agent.
     run_workspace_lifecycle(false, true).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn explicit_missing_computer_fails_before_cloud_admission() {
+async fn tui_does_not_discover_an_explicit_missing_computer_provider() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+
+    let home = tempfile::tempdir().unwrap();
+    let api_key = format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
+    let authorization = format!("Bearer {api_key}");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed_attempts = attempts.clone();
+    let connected = Arc::new(tokio::sync::Notify::new());
+    let observed_connected = connected.clone();
+    let app = Router::new()
+        .route("/v1/models", fixture_catalog(authorization.clone()))
+        .route(
+            "/v1/agents/{agent}",
+            get(move |headers: HeaderMap| {
+                let authorization = authorization.clone();
+                async move {
+                    assert_eq!(headers["authorization"], authorization);
+                    json_response(StatusCode::OK, agent_state_value("0"))
+                }
+            }),
+        )
+        .route(
+            "/v1/agents/{agent}/events/history",
+            get(|| async {
+                axum::Json(serde_json::json!({"data": [], "has_more": false, "latest_cursor": "0"}))
+            }),
+        )
+        .route(
+            "/v1/agents/{agent}/tool-host",
+            get(move || {
+                observed_attempts.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::NOT_FOUND }
+            }),
+        )
+        .route(
+            "/v1/agents/{agent}/ws",
+            get(move |upgrade: WebSocketUpgrade| {
+                let connected = observed_connected.clone();
+                async move {
+                    upgrade.on_upgrade(move |mut socket| async move {
+                        send_ready(&mut socket, "0", false).await;
+                        connected.notify_one();
+                        while let Some(Ok(Message::Text(frame))) = socket.recv().await {
+                            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                            if frame["type"] != "prompt" {
+                                continue;
+                            }
+                            assert_eq!(frame["input"][0]["text"], "provider ownership probe");
+                            let id = frame["id"].as_str().unwrap();
+                            send_accepted(&mut socket, id, "provider ownership probe", 1).await;
+                            send_turn_messages(
+                                &mut socket,
+                                id,
+                                "cloud provider ownership answer",
+                                2,
+                                1,
+                            )
+                            .await;
+                        }
+                    })
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let requests = Arc::new(AtomicUsize::new(0));
-    let observed = requests.clone();
-    let app = Router::new().fallback(move || {
-        observed.fetch_add(1, Ordering::SeqCst);
-        async { StatusCode::INTERNAL_SERVER_ERROR }
-    });
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let workspace = tempfile::tempdir().unwrap();
-    let (config_home, decoy) = configure_workspace(workspace.path());
-    let output = tokio::time::timeout(
-        PROCESS_TIMEOUT,
-        fixture_command(config_home.path())
-            .env("NANOCODEX_MANAGED_URL", origin)
-            .env(
-                "NC_API_KEY",
-                format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43)),
-            )
-            .env(
-                "NANOCODEX_COMPUTER",
-                config_home.path().join("missing-provider"),
-            )
-            .args([
-                "run",
-                "do not admit this",
-                "--model",
-                "gpt-6.1-sol",
-                "--thinking",
-                "low",
-            ])
-            .current_dir(decoy.path())
-            .output(),
-    )
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 30,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
+    let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_nanocodex2"));
+    command.env_clear();
+    command.env("PATH", std::env::var_os("PATH").unwrap_or_default());
+    command.env("HOME", home.path());
+    command.env("CODEX_HOME", home.path().join(".codex"));
+    command.env("NANOCODEX_HOME", home.path());
+    command.env("NANOCODEX_DISABLE_HAND", "1");
+    command.env("NANOCODEX_COMPUTER", home.path().join("missing-provider"));
+    command.env("NANOCODEX_MANAGED_URL", origin);
+    command.env("NC_API_KEY", &api_key);
+    command.env("TERM", "xterm-256color");
+    command.args(["attach", AGENT_ID]);
+    command.cwd(home.path());
+    struct ChildGuard(Box<dyn portable_pty::Child + Send + Sync>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+    let _child = ChildGuard(pair.slave.spawn_command(command).unwrap());
+    drop(pair.slave);
+    let mut writer = pair.master.take_writer().unwrap();
+    let mut reader = pair.master.try_clone_reader().unwrap();
+    let transcript = Arc::new(Mutex::new(Vec::new()));
+    let captured = transcript.clone();
+    std::thread::spawn(move || {
+        let mut bytes = [0; 8192];
+        while let Ok(count) = reader.read(&mut bytes) {
+            if count == 0 {
+                break;
+            }
+            captured.lock().unwrap().extend_from_slice(&bytes[..count]);
+        }
+    });
+    tokio::time::timeout(PROCESS_TIMEOUT, async {
+        connected.notified().await;
+        writer.write_all(b"provider ownership probe\r").unwrap();
+        writer.flush().unwrap();
+        loop {
+            if String::from_utf8_lossy(&transcript.lock().unwrap())
+                .contains("cloud provider ownership answer")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
     .await
-    .unwrap()
-    .unwrap();
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("Cannot start upstream Sky MCP provider")
+    .unwrap_or_else(|_| {
+        panic!(
+            "TUI did not answer: {}",
+            String::from_utf8_lossy(&transcript.lock().unwrap())
+        )
+    });
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    let transcript = String::from_utf8_lossy(&transcript.lock().unwrap()).into_owned();
+    assert!(!transcript.contains(&api_key));
+    eprintln!(
+        "JOURNEY TUI attach with missing provider: cloud answer rendered, zero per-agent publishers\n{transcript}"
     );
-    assert_eq!(requests.load(Ordering::SeqCst), 0);
-    eprintln!("JOURNEY explicit unavailable provider: error before any cloud request");
     server.abort();
 }
 
-async fn run_workspace_lifecycle(pinned: bool, automatic_computer: bool) {
-    let computer_home = tempfile::tempdir().unwrap();
-    let idempotency_key = if automatic_computer {
-        "stable-request-computer"
-    } else {
-        "stable-request"
-    };
-    // Block automatic installation in the isolated test HOME, without contacting
-    // the real service or a component feed. Only our MCP fixture is available.
-    let _setup_lock = if automatic_computer {
-        let root = computer_home.path().join("runtimes/openai-cua");
-        std::fs::create_dir_all(&root).unwrap();
-        let lock = std::fs::File::create(root.join("background.lock")).unwrap();
-        lock.lock().unwrap();
-        let provider = computer_home.path().join("provider");
-        // Never finish MCP initialization: the existing optional-provider
-        // deadline must retain workspace tools without delaying admission.
-        std::fs::write(&provider, "IFS= read -r initialize\nIFS= read -r blocked\n").unwrap();
-        std::fs::write(
-            root.join("provider.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "status":"installed", "transport":"mcp", "executable":"/bin/sh", "args":[provider],
-                "dependency_contract":"nanocodex-direct-cua-v2"
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        Some(lock)
-    } else {
-        None
-    };
+async fn run_workspace_lifecycle(pinned: bool, missing_computer: bool) {
+    let workspace = tempfile::tempdir().unwrap();
+    let expected_workspace = workspace.path().to_string_lossy().into_owned();
+    let idempotency_key = "stable-request";
     let api_key = format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -495,12 +557,8 @@ async fn run_workspace_lifecycle(pinned: bool, automatic_computer: bool) {
         authorized_requests: Arc::new(AtomicUsize::new(0)),
         tool_host_attempts: Arc::new(AtomicUsize::new(0)),
         completed: Arc::new(tokio::sync::Notify::new()),
-        tool_completed: Arc::new(tokio::sync::Notify::new()),
         origin: format!("http://{address}"),
-        failed_tool_host_attempts: 0,
-        expect_local_tool: true,
-        delay_ready_until_submission: true,
-        disconnect_after_ready: false,
+        expect_local_tool: false,
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
@@ -510,12 +568,25 @@ async fn run_workspace_lifecycle(pinned: bool, automatic_computer: bool) {
             post(
                 move |State(state): State<TestState>,
                       headers: HeaderMap,
-                      axum::Json(body): axum::Json<serde_json::Value>| async move {
-                    assert_eq!(
-                        body["configuration"]["chatgpt_account_id"].as_str(),
-                        pinned.then_some("account-a")
-                    );
-                    combined_cli_run(State(state), headers, axum::Json(body)).await
+                      axum::Json(body): axum::Json<serde_json::Value>| {
+                    let expected_workspace = expected_workspace.clone();
+                    async move {
+                        let context: serde_json::Value = serde_json::from_str(
+                            headers["x-nanocodex-client-context"].to_str().unwrap(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            context,
+                            serde_json::json!({
+                                "client": "nanocodex2", "native_cwd": expected_workspace
+                            })
+                        );
+                        assert_eq!(
+                            body["configuration"]["chatgpt_account_id"].as_str(),
+                            pinned.then_some("account-a")
+                        );
+                        combined_cli_run(State(state), headers, axum::Json(body)).await
+                    }
                 },
             ),
         )
@@ -527,27 +598,13 @@ async fn run_workspace_lifecycle(pinned: bool, automatic_computer: bool) {
         .with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    let workspace = tempfile::tempdir().unwrap();
-    let git = |arguments: &[&str]| {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(workspace.path())
-            .args(arguments)
-            .status()
-            .unwrap();
-        assert!(status.success());
-    };
-    git(&["init", "-q"]);
-    std::fs::write(workspace.path().join("fixture.txt"), "managed fixture\n").unwrap();
-    git(&["add", "fixture.txt"]);
-
     let (config_home, decoy) = configure_workspace(workspace.path());
     let mut command = fixture_command(config_home.path());
-    if automatic_computer {
-        command
-            .env_remove("NANOCODEX_COMPUTER")
-            .env("NANOCODEX_DIR", computer_home.path())
-            .env("NANOCODEX_STARTUP_TIMING", "1");
+    if missing_computer {
+        command.env(
+            "NANOCODEX_COMPUTER",
+            config_home.path().join("missing-provider"),
+        );
     }
     let output = tokio::time::timeout(
         PROCESS_TIMEOUT,
@@ -583,34 +640,6 @@ async fn run_workspace_lifecycle(pinned: bool, automatic_computer: bool) {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
-    let stderr = if automatic_computer {
-        let stages = stderr
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .collect::<Vec<_>>();
-        let admitted = stages
-            .iter()
-            .position(|event| event["stage"] == "managed_backend")
-            .unwrap();
-        let discovered = stages
-            .iter()
-            .position(|event| event["stage"] == "computer_discovery")
-            .unwrap();
-        assert!(
-            admitted < discovered,
-            "cloud admission waited for optional discovery: {stderr}"
-        );
-        eprintln!(
-            "JOURNEY optional computer pending: cloud admission precedes discovery; workspace tool executes; timings={stages:?}"
-        );
-        stderr
-            .lines()
-            .filter(|line| !line.starts_with('{'))
-            .map(|line| format!("{line}\n"))
-            .collect::<String>()
-    } else {
-        stderr
-    };
     let lines = stdout.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 2);
     let agent_event: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
@@ -623,38 +652,16 @@ async fn run_workspace_lifecycle(pinned: bool, automatic_computer: bool) {
     );
     assert!(!stdout.contains(&api_key));
     assert!(!stderr.contains(&api_key));
-    assert!(state.authorized_requests.load(Ordering::SeqCst) >= 2);
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("hosted-proof.txt")).unwrap(),
-        "private-host\n",
-    );
+    assert_eq!(state.authorized_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(state.tool_host_attempts.load(Ordering::SeqCst), 0);
+    assert!(state.catalogs.lock().unwrap().is_empty());
+    assert!(!workspace.path().join("hosted-proof.txt").exists());
     assert!(!decoy.path().join("hosted-proof.txt").exists());
     assert!(!config_home.path().join("host-id").exists());
     assert!(!config_home.path().join("attachment-id").exists());
-    let catalogs = state.catalogs.lock().unwrap();
-    assert_eq!(catalogs.len(), 1);
-    let catalog = &catalogs[0];
-    let attachment_id = catalog["attachment_id"].as_str().unwrap();
-    assert!(attachment_id.len() <= 123);
-    assert!(uuid::Uuid::parse_str(attachment_id).is_ok());
-    assert_eq!(catalog["machines"].as_array().unwrap().len(), 1);
-    assert_eq!(catalog["machines"][0]["id"], attachment_id);
-    assert_eq!(
-        catalog["machines"][0]["workspace"],
-        workspace.path().to_string_lossy().as_ref()
+    eprintln!(
+        "JOURNEY cloud-only run: pinned={pinned} missing_provider={missing_computer}; streamed answer; zero tool-host connections/catalogs"
     );
-    assert!(
-        !catalog["machines"][0]["name"]
-            .as_str()
-            .unwrap()
-            .trim()
-            .is_empty()
-    );
-    assert_eq!(
-        catalog["machines"][0]["capabilities"],
-        serde_json::json!(["native", "filesystem", "process", "package", "server"])
-    );
-    drop(catalogs);
     server.abort();
 }
 
@@ -669,12 +676,8 @@ async fn run_rejects_a_malformed_combined_receipt() {
         authorized_requests: Arc::new(AtomicUsize::new(0)),
         tool_host_attempts: Arc::new(AtomicUsize::new(0)),
         completed: Arc::new(tokio::sync::Notify::new()),
-        tool_completed: Arc::new(tokio::sync::Notify::new()),
         origin: format!("http://{address}"),
-        failed_tool_host_attempts: 0,
         expect_local_tool: false,
-        delay_ready_until_submission: false,
-        disconnect_after_ready: false,
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
@@ -723,159 +726,7 @@ async fn run_rejects_a_malformed_combined_receipt() {
 }
 
 #[tokio::test]
-async fn run_keeps_the_durable_agent_when_local_tools_are_initially_unavailable() {
-    let api_key = format!("ncx_live_{}_{}", "c".repeat(12), "d".repeat(43));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let state = TestState {
-        authorization: format!("Bearer {api_key}"),
-        idempotency_key: "stable-request-without-local-tools",
-        authorized_requests: Arc::new(AtomicUsize::new(0)),
-        tool_host_attempts: Arc::new(AtomicUsize::new(0)),
-        completed: Arc::new(tokio::sync::Notify::new()),
-        tool_completed: Arc::new(tokio::sync::Notify::new()),
-        origin: format!("http://{address}"),
-        failed_tool_host_attempts: usize::MAX,
-        expect_local_tool: false,
-        delay_ready_until_submission: false,
-        disconnect_after_ready: false,
-        catalogs: Arc::new(Mutex::new(Vec::new())),
-    };
-    let app = Router::new()
-        .route("/v1/models", fixture_catalog(state.authorization.clone()))
-        .route("/v1/agent-runs", post(combined_cli_run))
-        .route("/v1/agents/{agent}", get(agent_state))
-        .route("/v1/agents/{agent}/tool-host", get(tool_host))
-        .route("/v1/agents/{agent}/ws", get(managed_socket))
-        .route("/v1/agents/{agent}/turns", post(submit_turn))
-        .route("/v1/agents/{agent}/events", get(events))
-        .with_state(state.clone());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let workspace = tempfile::tempdir().unwrap();
-    let (config_home, decoy) = configure_workspace(workspace.path());
-
-    let output = tokio::time::timeout(
-        PROCESS_TIMEOUT,
-        fixture_command(config_home.path())
-            .env("NANOCODEX_DISABLE_HAND", "1")
-            .args([
-                "run",
-                "answer from managed",
-                "--idempotency-key",
-                "stable-request-without-local-tools",
-            ])
-            .env("NANOCODEX_COMPUTER", "off")
-            .env("NANOCODEX_MANAGED_URL", &state.origin)
-            .env("NC_API_KEY", &api_key)
-            .env_remove("NANOCODEX_API_KEY")
-            .env("NANOCODEX_HOME", config_home.path())
-            .env_remove("OPENAI_API_KEY")
-            .current_dir(decoy.path())
-            .output(),
-    )
-    .await
-    .expect("nanocodex2 cloud fallback lifecycle timed out")
-    .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stdout.contains("assistant.message"));
-    assert_eq!(
-        stderr,
-        format!("Managed agent: {AGENT_ID}\nmanaged answer\n")
-    );
-    assert!(state.tool_host_attempts.load(Ordering::SeqCst) >= 1);
-    assert!(!workspace.path().join("hosted-proof.txt").exists());
-    assert!(!decoy.path().join("hosted-proof.txt").exists());
-    server.abort();
-}
-
-#[tokio::test]
-async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
-    let api_key = format!("ncx_live_{}_{}", "3".repeat(12), "4".repeat(43));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let state = TestState {
-        authorization: format!("Bearer {api_key}"),
-        idempotency_key: "disconnect-then-cloud",
-        authorized_requests: Arc::new(AtomicUsize::new(0)),
-        tool_host_attempts: Arc::new(AtomicUsize::new(0)),
-        completed: Arc::new(tokio::sync::Notify::new()),
-        tool_completed: Arc::new(tokio::sync::Notify::new()),
-        origin: format!("http://{address}"),
-        failed_tool_host_attempts: 0,
-        expect_local_tool: false,
-        delay_ready_until_submission: false,
-        disconnect_after_ready: true,
-        catalogs: Arc::new(Mutex::new(Vec::new())),
-    };
-    let app = Router::new()
-        .route("/v1/models", fixture_catalog(state.authorization.clone()))
-        .route("/v1/agent-runs", post(combined_cli_run))
-        .route("/v1/agents/{agent}", get(agent_state))
-        .route("/v1/agents/{agent}/tool-host", get(tool_host))
-        .route("/v1/agents/{agent}/ws", get(managed_socket))
-        .route("/v1/agents/{agent}/turns", post(submit_turn))
-        .route("/v1/agents/{agent}/events", get(events))
-        .with_state(state.clone());
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let workspace = tempfile::tempdir().unwrap();
-    let (config_home, decoy) = configure_workspace(workspace.path());
-
-    let output = tokio::time::timeout(
-        PROCESS_TIMEOUT,
-        fixture_command(config_home.path())
-            .env("NANOCODEX_DISABLE_HAND", "1")
-            .args([
-                "run",
-                "answer from managed",
-                "--idempotency-key",
-                "disconnect-then-cloud",
-            ])
-            .env("NANOCODEX_COMPUTER", "off")
-            .env("NANOCODEX_MANAGED_URL", &state.origin)
-            .env("NC_API_KEY", &api_key)
-            .env_remove("NANOCODEX_API_KEY")
-            .env("NANOCODEX_HOME", config_home.path())
-            .env_remove("OPENAI_API_KEY")
-            .current_dir(decoy.path())
-            .output(),
-    )
-    .await
-    .expect("nanocodex2 reconnect lifecycle timed out")
-    .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("run.completed"));
-    assert_eq!(state.tool_host_attempts.load(Ordering::SeqCst), 2);
-    let catalogs = state.catalogs.lock().unwrap();
-    assert_eq!(catalogs.len(), 2);
-    assert_ne!(catalogs[0]["connection_id"], catalogs[1]["connection_id"]);
-    let mut first = catalogs[0].clone();
-    let mut second = catalogs[1].clone();
-    first.as_object_mut().unwrap().remove("connection_id");
-    second.as_object_mut().unwrap().remove("connection_id");
-    assert_eq!(first, second);
-    assert_eq!(
-        catalogs[0]["attachment_id"],
-        catalogs[0]["machines"][0]["id"]
-    );
-    assert!(!workspace.path().join("hosted-proof.txt").exists());
-    assert!(!String::from_utf8_lossy(&output.stderr).contains(&api_key));
-    server.abort();
-}
-
-#[tokio::test]
-async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absent() {
+async fn run_reopens_one_durable_cloud_agent_without_publishing_local_tools() {
     let api_key = format!("ncx_live_{}_{}", "e".repeat(12), "f".repeat(43));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -887,12 +738,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
         event_cursors: Arc::new(Mutex::new(Vec::new())),
         submissions: Arc::new(Mutex::new(Vec::new())),
         tool_host_attempts: Arc::new(AtomicUsize::new(0)),
-        accepted_attachments: Arc::new(AtomicUsize::new(0)),
-        local_calls: Arc::new(AtomicUsize::new(0)),
-        detaches: Arc::new(AtomicUsize::new(0)),
         changed: Arc::new(tokio::sync::Notify::new()),
-        first_submitted: Arc::new(tokio::sync::Notify::new()),
-        tool_completed: Arc::new(tokio::sync::Notify::new()),
     };
     let app = Router::new()
         .route("/v1/models", fixture_catalog(state.authorization.clone()))
@@ -911,13 +757,8 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
                         .lock()
                         .unwrap()
                         .push(("durable-turn-one".into(), "first durable turn".into()));
-                    state.first_submitted.notify_one();
                     combined_stream("first durable turn", async move {
-                        wait_for_durable_state(&state, || {
-                            state.local_calls.load(Ordering::SeqCst) == 1
-                        })
-                        .await;
-                        durable_turn_events(TURN_ID, "local turn answer", 2, 1)
+                        durable_turn_events(TURN_ID, "first cloud answer", 2, 1)
                     })
                 },
             ),
@@ -978,15 +819,9 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
     );
     assert_eq!(
         String::from_utf8(first.stderr).unwrap(),
-        format!("Managed agent: {AGENT_ID}\nlocal turn answer\n")
+        format!("Managed agent: {AGENT_ID}\nfirst cloud answer\n")
     );
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("hosted-proof.txt")).unwrap(),
-        "private-host\n",
-    );
-    assert_eq!(state.accepted_attachments.load(Ordering::SeqCst), 1);
-    assert_eq!(state.local_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(state.detaches.load(Ordering::SeqCst), 1);
+    assert!(!workspace.path().join("hosted-proof.txt").exists());
 
     let second = tokio::time::timeout(
         PROCESS_TIMEOUT,
@@ -1023,7 +858,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
     );
     assert_eq!(
         String::from_utf8(second.stderr.clone()).unwrap(),
-        "cloud fallback answer\n"
+        "second cloud answer\n"
     );
 
     assert_eq!(state.creates.load(Ordering::SeqCst), 1);
@@ -1048,14 +883,8 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
         ]
     );
     drop(submissions);
-    assert!(state.tool_host_attempts.load(Ordering::SeqCst) >= 2);
-    assert_eq!(state.accepted_attachments.load(Ordering::SeqCst), 1);
-    assert_eq!(state.local_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(state.detaches.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        std::fs::read_to_string(workspace.path().join("hosted-proof.txt")).unwrap(),
-        "private-host\n",
-    );
+    assert_eq!(state.tool_host_attempts.load(Ordering::SeqCst), 0);
+    assert!(!workspace.path().join("hosted-proof.txt").exists());
     assert_eq!(
         std::fs::read_to_string(first_decoy.path().join("hosted-proof.txt")).unwrap(),
         "first decoy sentinel\n",
@@ -1079,12 +908,7 @@ struct DurableState {
     event_cursors: Arc<Mutex<Vec<String>>>,
     submissions: Arc<Mutex<Vec<(String, String)>>>,
     tool_host_attempts: Arc<AtomicUsize>,
-    accepted_attachments: Arc<AtomicUsize>,
-    local_calls: Arc<AtomicUsize>,
-    detaches: Arc<AtomicUsize>,
     changed: Arc<tokio::sync::Notify>,
-    first_submitted: Arc<tokio::sync::Notify>,
-    tool_completed: Arc<tokio::sync::Notify>,
 }
 
 async fn durable_agent_state(
@@ -1128,28 +952,9 @@ fn agent_state_value(latest_event_cursor: &str) -> serde_json::Value {
     })
 }
 
-async fn durable_tool_host(
-    State(state): State<DurableState>,
-    Path(agent): Path<String>,
-    headers: HeaderMap,
-    upgrade: WebSocketUpgrade,
-) -> impl IntoResponse {
-    if !durable_authorized(&state, &headers) {
-        return unauthorized();
-    }
-    assert_eq!(agent, AGENT_ID);
-    let attempt = state.tool_host_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-    state.changed.notify_waiters();
-    if attempt > 1 {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(Body::from("local attachment is absent"))
-            .unwrap();
-    }
-    state.accepted_attachments.fetch_add(1, Ordering::SeqCst);
-    upgrade
-        .on_upgrade(move |socket| serve_durable_tool_host(socket, state))
-        .into_response()
+async fn durable_tool_host(State(state): State<DurableState>) -> StatusCode {
+    state.tool_host_attempts.fetch_add(1, Ordering::SeqCst);
+    StatusCode::NOT_FOUND
 }
 
 async fn durable_socket(
@@ -1185,51 +990,13 @@ async fn serve_durable_socket(mut socket: WebSocket, state: DurableState, cursor
         submissions.len()
     };
     let (answer, first_cursor, sequence) = match (index, key.as_str(), input.as_str()) {
-        (1, "durable-turn-one", "first durable turn") => ("local turn answer", 1, 1),
-        (2, "durable-turn-two", "second durable turn") => ("cloud fallback answer", 4, 3),
+        (1, "durable-turn-one", "first durable turn") => ("first cloud answer", 1, 1),
+        (2, "durable-turn-two", "second durable turn") => ("second cloud answer", 4, 3),
         unexpected => panic!("unexpected durable socket submission: {unexpected:?}"),
     };
-    if index == 1 {
-        state.first_submitted.notify_one();
-    }
     state.changed.notify_waiters();
     send_accepted(&mut socket, &key, &input, first_cursor).await;
-    if index == 1 {
-        wait_for_durable_state(&state, || state.local_calls.load(Ordering::SeqCst) == 1).await;
-    } else {
-        wait_for_durable_state(&state, || {
-            state.tool_host_attempts.load(Ordering::SeqCst) >= 2
-        })
-        .await;
-    }
     send_turn_messages(&mut socket, &key, answer, first_cursor + 1, sequence).await;
-}
-
-async fn serve_durable_tool_host(socket: WebSocket, state: DurableState) {
-    let observer_state = state.clone();
-    let observer = tokio::spawn(async move {
-        observer_state.tool_completed.notified().await;
-        observer_state.local_calls.fetch_add(1, Ordering::SeqCst);
-        observer_state.changed.notify_waiters();
-    });
-    let compatible_state = TestState {
-        authorization: state.authorization.clone(),
-        idempotency_key: "unused",
-        authorized_requests: Arc::new(AtomicUsize::new(0)),
-        tool_host_attempts: Arc::new(AtomicUsize::new(0)),
-        completed: state.first_submitted.clone(),
-        tool_completed: state.tool_completed.clone(),
-        origin: state.origin.clone(),
-        failed_tool_host_attempts: 0,
-        expect_local_tool: true,
-        delay_ready_until_submission: false,
-        disconnect_after_ready: false,
-        catalogs: Arc::new(Mutex::new(Vec::new())),
-    };
-    serve_tool_host(socket, compatible_state, false).await;
-    observer.await.unwrap();
-    state.detaches.fetch_add(1, Ordering::SeqCst);
-    state.changed.notify_waiters();
 }
 
 async fn durable_submit_turn(
@@ -1259,13 +1026,10 @@ async fn durable_submit_turn(
         submissions.len()
     };
     let (turn_id, accepted_cursor) = match (index, key.as_str(), prompt.as_str()) {
-        (1, "durable-turn-one", "first durable turn") => (LOCAL_TURN_ID, "1"),
-        (2, "durable-turn-two", "second durable turn") => (CLOUD_TURN_ID, "4"),
+        (1, "durable-turn-one", "first durable turn") => (FIRST_TURN_ID, "1"),
+        (2, "durable-turn-two", "second durable turn") => (SECOND_TURN_ID, "4"),
         unexpected => panic!("unexpected durable submission: {unexpected:?}"),
     };
-    if index == 1 {
-        state.first_submitted.notify_one();
-    }
     state.changed.notify_waiters();
     json_response(
         StatusCode::ACCEPTED,
@@ -1300,20 +1064,12 @@ async fn durable_events(
     state.event_cursors.lock().unwrap().push(cursor.clone());
     match cursor.as_str() {
         "0" => sse_response(async move {
-            wait_for_durable_state(&state, || {
-                !state.submissions.lock().unwrap().is_empty()
-                    && state.local_calls.load(Ordering::SeqCst) == 1
-            })
-            .await;
-            durable_turn_events(LOCAL_TURN_ID, "local turn answer", 1, 1)
+            wait_for_durable_state(&state, || !state.submissions.lock().unwrap().is_empty()).await;
+            durable_turn_events(FIRST_TURN_ID, "first cloud answer", 1, 1)
         }),
         "3" => sse_response(async move {
-            wait_for_durable_state(&state, || {
-                state.submissions.lock().unwrap().len() >= 2
-                    && state.tool_host_attempts.load(Ordering::SeqCst) >= 2
-            })
-            .await;
-            durable_turn_events(CLOUD_TURN_ID, "cloud fallback answer", 4, 3)
+            wait_for_durable_state(&state, || state.submissions.lock().unwrap().len() >= 2).await;
+            durable_turn_events(SECOND_TURN_ID, "second cloud answer", 4, 3)
         }),
         other => panic!("unexpected durable event cursor {other}"),
     }
@@ -1439,27 +1195,15 @@ async fn agent_state(State(state): State<TestState>, headers: HeaderMap) -> impl
     )
 }
 
-async fn tool_host(
-    State(state): State<TestState>,
-    headers: HeaderMap,
-    upgrade: WebSocketUpgrade,
-) -> impl IntoResponse {
+async fn tool_host(State(state): State<TestState>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&state, &headers) {
         return unauthorized();
     }
-    let attempt = state.tool_host_attempts.fetch_add(1, Ordering::SeqCst) + 1;
-    if attempt <= state.failed_tool_host_attempts {
-        return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .body(Body::from("local tools unavailable"))
-            .unwrap();
-    }
-    upgrade
-        .on_upgrade(move |socket| {
-            let disconnect = state.disconnect_after_ready && attempt == 1;
-            serve_tool_host(socket, state, disconnect)
-        })
-        .into_response()
+    state.tool_host_attempts.fetch_add(1, Ordering::SeqCst);
+    json_response(
+        StatusCode::NOT_FOUND,
+        serde_json::json!({"error":"no_cli_publisher"}),
+    )
 }
 
 async fn managed_socket(
@@ -1523,18 +1267,7 @@ async fn combined_cli_run(
     );
     state.completed.notify_one();
     combined_stream("answer from managed", async move {
-        if state.disconnect_after_ready {
-            state.tool_completed.notified().await;
-            while state.catalogs.lock().unwrap().len() < 2 {
-                tokio::task::yield_now().await;
-            }
-        } else if state.expect_local_tool {
-            state.tool_completed.notified().await;
-        } else {
-            while state.tool_host_attempts.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
+        assert!(!state.expect_local_tool);
         durable_turn_events(TURN_ID, "managed answer", 2, 1)
     })
 }
@@ -1551,18 +1284,7 @@ async fn serve_managed_socket(mut socket: WebSocket, state: TestState) {
     let turn_id = prompt["id"].as_str().unwrap();
     state.completed.notify_one();
     send_accepted(&mut socket, turn_id, "answer from managed", 1).await;
-    if state.disconnect_after_ready {
-        state.tool_completed.notified().await;
-        while state.tool_host_attempts.load(Ordering::SeqCst) < 2 {
-            tokio::task::yield_now().await;
-        }
-    } else if state.expect_local_tool {
-        state.tool_completed.notified().await;
-    } else {
-        while state.tool_host_attempts.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-    }
+    assert!(!state.expect_local_tool);
     send_turn_messages(&mut socket, turn_id, "managed answer", 2, 1).await;
 }
 
@@ -1674,178 +1396,6 @@ async fn send_turn_messages(
     }
 }
 
-async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_after_ready: bool) {
-    let Some(Ok(Message::Text(catalog))) = socket.recv().await else {
-        return;
-    };
-    let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
-    assert_eq!(catalog["type"], "catalog");
-    assert_eq!(
-        catalog
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>(),
-        [
-            "type",
-            "tools",
-            "machines",
-            "attachment_id",
-            "capabilities",
-            "runtime_id",
-            "command_recovery",
-            "turn_lifecycle",
-            "diagnostics",
-            "connection_id"
-        ]
-        .into_iter()
-        .collect(),
-    );
-    assert!(uuid::Uuid::parse_str(catalog["runtime_id"].as_str().unwrap()).is_ok());
-    assert_eq!(
-        catalog["capabilities"],
-        serde_json::json!(["turn_metadata"])
-    );
-    let names = catalog["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|tool| tool["definition"]["name"].as_str().unwrap())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        names,
-        [
-            "apply_patch",
-            "exec_command",
-            "view_image",
-            "write_stdin",
-            "mcp__mercator__create_job",
-            "mcp__mercator__create_job_review",
-            "mcp__mercator__describe_service",
-            "mcp__mercator__get_connection_status",
-            "mcp__mercator__get_job",
-            "mcp__mercator__get_job_details",
-            "mcp__mercator__get_job_review",
-            "mcp__mercator__get_suggested_queries",
-            "mcp__mercator__list_jobs",
-            "mcp__mercator__open_mercator",
-            "mcp__mercator__quote_plan",
-            "mcp__mercator__search_services",
-            "mcp__mercator__send_product_feedback",
-        ]
-        .into_iter()
-        .collect(),
-    );
-    state.catalogs.lock().unwrap().push(catalog);
-    if state.delay_ready_until_submission {
-        state.completed.notified().await;
-    }
-    socket
-        .send(Message::Text(
-            serde_json::json!({"type":"ready"}).to_string().into(),
-        ))
-        .await
-        .unwrap();
-
-    if disconnect_after_ready {
-        state.tool_completed.notify_one();
-        drop(socket.send(Message::Close(None)).await);
-        return;
-    }
-
-    if !state.expect_local_tool {
-        serve_until_drain(&mut socket).await;
-        return;
-    }
-
-    if !state.delay_ready_until_submission {
-        state.completed.notified().await;
-    }
-    socket
-        .send(Message::Text(
-            serde_json::json!({
-                "type": "call",
-                "session_id": AGENT_ID,
-                "call_id": "call-managed",
-                "model": "gpt-6-astra",
-                "name": "exec_command",
-                "input": {"cmd":"printf 'private-host\\n' > hosted-proof.txt && cat hosted-proof.txt"},
-                "output_token_budget": 1024,
-                "output_byte_budget": 131072,
-                "deadline_at": 9_000_000_000_000_u64
-            })
-            .to_string()
-            .into(),
-        ))
-        .await
-        .unwrap();
-    let result = loop {
-        let Some(Ok(Message::Text(frame))) = socket.recv().await else {
-            return;
-        };
-        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        if frame["type"] == "diagnostic" {
-            assert_eq!(frame["call_id"], "call-managed");
-            continue;
-        }
-        assert_eq!(frame["type"], "result");
-        break frame;
-    };
-    assert_eq!(result["call_id"], "call-managed");
-    assert_eq!(result["outcome"]["status"], "completed");
-    assert_eq!(result["outcome"]["output"]["success"], true, "{result}");
-    assert_eq!(
-        result["outcome"]["output"]["success"], true,
-        "hosted tool failed: {result}",
-    );
-    assert!(
-        result["outcome"]["output"]["output"]
-            .as_str()
-            .is_some_and(|output| output.contains("private-host")),
-        "hosted tool output omitted proof: {result}",
-    );
-    socket
-        .send(Message::Text(
-            serde_json::json!({
-                "type": "ack",
-                "call_id": "call-managed"
-            })
-            .to_string()
-            .into(),
-        ))
-        .await
-        .unwrap();
-    state.tool_completed.notify_one();
-    serve_until_drain(&mut socket).await;
-}
-
-async fn serve_until_drain(socket: &mut WebSocket) {
-    while let Some(Ok(Message::Text(frame))) = socket.recv().await {
-        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        match frame["type"].as_str() {
-            Some("ping") => socket
-                .send(Message::Text(
-                    serde_json::json!({"type":"pong","nonce":frame["nonce"]})
-                        .to_string()
-                        .into(),
-                ))
-                .await
-                .unwrap(),
-            Some("drain") => {
-                socket
-                    .send(Message::Text(
-                        serde_json::json!({"type":"draining"}).to_string().into(),
-                    ))
-                    .await
-                    .unwrap();
-                return;
-            }
-            kind => panic!("unexpected executor frame after result: {kind:?}"),
-        }
-    }
-}
-
 async fn submit_turn(
     State(state): State<TestState>,
     headers: HeaderMap,
@@ -1891,24 +1441,8 @@ async fn events(State(state): State<TestState>, headers: HeaderMap) -> impl Into
         return unauthorized();
     }
     sse_response(async move {
-        if state.disconnect_after_ready {
-            // The reconnect may finish before the CLI submits its prompt. Do
-            // not publish events for the fixture's turn until that turn
-            // exists; otherwise the driver correctly treats them as retained
-            // session events instead of routing them to the pending turn.
-            state.completed.notified().await;
-            state.tool_completed.notified().await;
-            while state.tool_host_attempts.load(Ordering::SeqCst) < 2 {
-                tokio::task::yield_now().await;
-            }
-        } else if state.expect_local_tool {
-            state.tool_completed.notified().await;
-        } else {
-            state.completed.notified().await;
-            while state.tool_host_attempts.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
+        state.completed.notified().await;
+        assert!(!state.expect_local_tool);
         durable_turn_events(TURN_ID, "managed answer", 2, 1)
     })
 }
@@ -2576,25 +2110,7 @@ async fn startup_catalog_journey(
                 combined_stream("startup answer", async { durable_turn_events(TURN_ID, "catalog-independent answer", 2, 1) })
             }),
         )
-        .route(
-            "/v1/agents/{agent}/tool-host",
-            get(|upgrade: WebSocketUpgrade| async move {
-                upgrade.on_upgrade(|mut socket| async move {
-                    let Some(Ok(Message::Text(catalog))) = socket.recv().await else {
-                        return;
-                    };
-                    let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
-                    assert_eq!(catalog["type"], "catalog");
-                    socket
-                        .send(Message::Text(
-                            serde_json::json!({"type":"ready"}).to_string().into(),
-                        ))
-                        .await
-                        .unwrap();
-                    serve_until_drain(&mut socket).await;
-                })
-            }),
-        );
+        ;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
