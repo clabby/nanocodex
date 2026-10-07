@@ -84,6 +84,9 @@ export default defineConfig({
         // direct subjects without loading the managed application's runtime.
         serviceBindings: {
           MANAGED_AGENT_OWNERSHIP: async () => new Response(null, { status: 503 }),
+          TWILIO_PHONE_PROVIDER: async () => {
+            throw new Error("Phone provider calls require the phone-service journey fixture");
+          },
         },
         bindings: {
           ENVIRONMENT: "test",
