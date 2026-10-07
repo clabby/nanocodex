@@ -82,7 +82,7 @@ import { serverHandTool } from "./ssh-hand-setup";
 import { parseEmailResume, resumeEmailWorkflow, type EmailResumeResult } from "./email-resume";
 import { phoneControlInput } from "./phone-control";
 import { accountAdmin } from "./account-admin";
-import { adminThreadsTool, routeAdminThreads, parseAdminThreadInput, type AdminThreadInput } from "./admin-threads";
+import { adminThreadsTool, routeAdminThreads, parseAdminThreadInput, threadProviderPerformance, type AdminThreadInput } from "./admin-threads";
 import { listAdminAccounts, listAdminThreads } from "./account-auth";
 import { accountCommunication } from "./account-communication";
 import { routeTodoRequest } from "./todo-inbox";
@@ -4569,13 +4569,28 @@ export class DurableAgentSession extends DurableComputerObject {
       return reply(403, { error: "forbidden" });
     let input: AdminThreadInput;
     try { input = parseAdminThreadInput(raw); } catch { return reply(400, { error: "invalid_request" }); }
-    if (input.operation !== "read" && input.operation !== "diagnostics") return reply(400, { error: "invalid_request" });
+    if (input.operation !== "read" && input.operation !== "diagnostics" && input.operation !== "performance") return reply(400, { error: "invalid_request" });
     const session = this.#session();
     if (!session || session.session_id !== input.thread_id || this.#deleting || this.#deleted || this.#durabilityExported
       || this.#durabilityImportState === "pending" || session.runtime_profile !== "managed") return reply(404, { error: "not_found" });
     console.info({ type: "managed.admin_threads.target", operator_id: operatorId, owner_id: session.owner_id,
       thread_id: session.session_id, operation: input.operation, at: Date.now() });
     if (input.operation === "diagnostics") return reply(200, await this.#threadDiagnostics(session, input.after_managed ?? 0, input.after_hand ?? 0, input.limit));
+    if (input.operation === "performance") {
+      const observedAt = Date.now(), route = this.#threadRoute();
+      let capacity: unknown;
+      try { capacity = { available: true, ...managedCapacitySnapshot(this.ctx.storage, session.session_id,
+        this.#eventArchive.capacity(), this.#turnArchive.capacity(), this.#realtimeArchive.capacity()) }; }
+      catch { capacity = { available: false }; }
+      return reply(200, { thread_id: session.session_id, observed_at: observedAt, settings: this.#settings(),
+        routing: route ? { backend: route.backend, model: route.model, provider_model: route.provider_model,
+          thinking: route.thinking, policy_version: route.policy_version, router_duration_ms: route.router_duration_ms,
+          created_at: route.created_at } : null,
+        provider_telemetry: threadProviderPerformance(this.ctx.storage.sql, input.limit, observedAt), capacity,
+        evidence: { usage_cache_compaction: "Use read for retained usage, cache and compaction events, correlated by turn_id.",
+          tool_and_transport_timing: "Use diagnostics for managed/Hand boundary, queue and execution timing; read for detailed tool events.",
+          limitation: "Only measurements recorded by the original runtime are available. Missing data is unknown, never zero." } });
+    }
     try {
       const page = input.after === undefined
         ? await this.#eventArchive.history(this.#eventLog, input.before, input.limit)

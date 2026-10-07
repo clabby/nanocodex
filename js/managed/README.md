@@ -1586,6 +1586,7 @@ text(await tools.admin_threads({ operation: "accounts" }));
 text(await tools.admin_threads({ operation: "list", owner_id: "ACCOUNT_UUID" }));
 text(await tools.admin_threads({ operation: "read", thread_id: "THREAD_UUID" }));
 text(await tools.admin_threads({ operation: "diagnostics", thread_id: "THREAD_UUID" }));
+text(await tools.admin_threads({ operation: "performance", thread_id: "THREAD_UUID" }));
 ```
 
 Calls require the root agent's direct account authority and `agents:read`,
@@ -1617,3 +1618,16 @@ workspace using the thread evidence and regression tests.
 Run `pnpm --filter nanocodex-managed-service run test:admin-threads` for the
 synthetic HTTP and tool journey. Per-run transcripts and runtime logs are kept in
 ignored `output/admin-threads-journey/`.
+
+`performance` supports optimization investigations as well as bug diagnosis. It
+returns current model settings, the selected route (when present), per-provider
+latency summaries and recent samples, and durable storage/archive capacity.
+Provider summaries use the existing two-hour freshness window, p50/p95/EWMA,
+minimum sample counts, and censored failures. These are thread-local measurements;
+missing provider instrumentation and client-delivery timing remain unknown. The
+provider store retains at most 512 observations, and the tool returns the latest
+`limit` samples with an explicit truncation marker. It never starts probes.
+Use `read` for recorded token usage, prompt-cache, compaction and detailed tool
+events; use `diagnostics` for transport, queue, inference and Hand timings. This
+allows comparisons and focused performance patches without inventing measurements
+for older runtimes or treating a completed server response as client receipt.

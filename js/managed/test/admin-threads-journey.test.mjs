@@ -42,7 +42,7 @@ export class FixtureModel extends DurableObject {
       const body = JSON.parse(event.data);
       const user = JSON.stringify((body.input ?? []).filter(item => item.role === 'user').at(-1)) ?? '';
       if (user.includes('ACTIVE_THREAD_HISTORY')) await new Promise(resolve => setTimeout(resolve, 1500));
-      const marker = user.match(/ADMIN_TOOL (accounts|read|diagnostics|restricted_read)(?: ([0-9a-f-]{36}))?/);
+      const marker = user.match(/ADMIN_TOOL (accounts|read|diagnostics|performance|restricted_read)(?: ([0-9a-f-]{36}))?/);
       if (marker && marker[0] !== lastUser) { index = 0; lastUser = marker[0]; }
       const operation = marker?.[1] === 'restricted_read' ? 'read' : marker?.[1];
       const args = {operation, limit: operation === 'accounts' ? 2 : 100, ...(marker?.[2] ? {thread_id:marker[2]} : {})};
@@ -189,6 +189,7 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     await turn(bobThread, "BOB_PRIVATE_HISTORY synthetic notes");
     await inspect("accounts", {}, 403);
     await inspect("read", { thread_id: aliceThreads[0] }, 403);
+    await inspect("performance", { thread_id: aliceThreads[0] }, 403);
     await call(`/v1/agents/${aliceThreads[0]}/events/history`, "GET", undefined, 404);
     principal = admin;
     const connectHeaders = { authorization: "", "x-nanocodex-connect-user": admin,
@@ -267,6 +268,7 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     const unknown = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     await inspect("read", { thread_id: unknown }, 404);
     await inspect("diagnostics", { thread_id: unknown }, 404);
+    await inspect("performance", { thread_id: unknown }, 404);
     let restrictedAdminToken;
     for (const missing of ["agents:read", "history:read", "tools:use"]) {
       const response = await backend.fetch("https://fixture.test/__fixture", { method: "POST", body: JSON.stringify({ user: admin, capabilities: caps.filter(cap => cap !== missing) }) });
@@ -282,7 +284,7 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     assert.ok(Array.isArray(results[0].structured_result.data), JSON.stringify(results));
     assert.equal(results[0].structured_result.data.length, 2);
     const toolResults = frames => frames.filter(frame => frame.event?.type === "tool.result" && frame.event.payload.tool === "admin_threads").map(frame => frame.event.payload);
-    for (const operation of ["read", "diagnostics"]) {
+    for (const operation of ["read", "diagnostics", "performance"]) {
       const frames = await turn(adminThread, `ADMIN_TOOL ${operation} ${aliceThreads[0]}`);
       const results = toolResults(frames);
       assert.equal(results.length, 1, JSON.stringify(frames));
@@ -292,6 +294,15 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
         assert.equal(result.thread.owner_id, alice);
         assert.match(JSON.stringify(result.data), /ALICE_PRIVATE_HISTORY/);
         assert.doesNotMatch(JSON.stringify(result.data), /BOB_PRIVATE_HISTORY/);
+      } else if (operation === "performance") {
+        assert.equal(result.thread_id, aliceThreads[0]);
+        assert.equal(result.settings.model, "gpt-6.1-sol");
+        assert.equal(result.capacity.available, true);
+        assert.ok(result.capacity.database_size_bytes > 0);
+        assert.equal(result.provider_telemetry.available, true);
+        assert.equal(result.provider_telemetry.scope, "thread");
+        assert.ok(Array.isArray(result.provider_telemetry.groups));
+        assert.match(result.evidence.limitation, /unknown/);
       } else {
         assert.equal(result.thread_id, aliceThreads[0]);
         assert.ok(result.services.some(service => service.events.length > 0));
@@ -323,7 +334,7 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     await inspect("read", { thread_id: aliceThreads[1] }, 404);
     await inspect("diagnostics", { thread_id: aliceThreads[1] }, 404);
     assert.ok(!(await inspect("list", { owner_id: alice })).data.some(row => row.id === aliceThreads[1]));
-    console.log(JSON.stringify({ evidence: output, owners, threads, real_admin_tool_results: 4, denied_admin_tool_results: 1, ordinary_tool_unavailable: true }));
+    console.log(JSON.stringify({ evidence: output, owners, threads, real_admin_tool_results: 5, denied_admin_tool_results: 1, ordinary_tool_unavailable: true }));
   } finally {
     for (const socket of sockets) socket.terminate();
     await writeFile(join(output, "trace.json"), JSON.stringify({ command: "pnpm --filter nanocodex-managed-service run test:admin-threads", configured, provenance, trace, wire }, null, 2) + "\n");
