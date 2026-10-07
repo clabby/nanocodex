@@ -364,6 +364,42 @@ export class SessionModelEgress extends WorkerEntrypoint<EgressEnv> {
   }
 }
 
+const SESSION_TOOL_OWNER_HEADER = "x-nanocodex-session-tool-owner";
+type SessionToolAuthority = Readonly<{ subject: string; owner: string }>;
+
+/** Tool routes a Session may send through its private tool binding. Model,
+ * control, browser-vault, phone, and owner-path routes are never reachable. */
+function sessionToolRoute(url: URL): boolean {
+  if (url.username || url.password || url.hash || url.hostname === "nanocodex.internal") return false;
+  if (url.protocol === "https:" && !url.port && !url.search
+    && ((url.hostname === "public-egress.internal" || url.hostname === "vault-egress.internal") && url.pathname === "/v1/request"
+      || url.hostname === "ssh.internal" && url.pathname === "/v1/execute")) return true;
+  return mcpConnectionId(url) !== undefined || connectorOperation(url) !== undefined;
+}
+
+/**
+ * Bound only to a managed Session's own tool traffic. The Session derives its
+ * owner from local durable state at call time, so egress need not call back
+ * into that same Durable Object. Such a callback becomes the Session's newest
+ * incoming request and every later subrequest of the turn inherits its deeper
+ * Workers request-chain depth.
+ */
+export class SessionToolEgress extends WorkerEntrypoint<EgressEnv> {
+  fetch(request: Request): Promise<Response> {
+    const owner = request.headers.get(SESSION_TOOL_OWNER_HEADER);
+    const subject = request.headers.get(SUBJECT_HEADER);
+    let url: URL;
+    try { url = new URL(request.url); } catch { return Promise.resolve(jsonError(403, "invalid_session_tool_authority")); }
+    if (!owner || !USER_ID.test(owner) || !subject || !MANAGED_SESSION_SUBJECT.test(subject)
+      || request.headers.has(SESSION_MODEL_OWNER_HEADER) || !sessionToolRoute(url)) {
+      return Promise.resolve(jsonError(403, "invalid_session_tool_authority"));
+    }
+    const forwarded = new Request(request);
+    forwarded.headers.delete(SESSION_TOOL_OWNER_HEADER);
+    return handleEgress(forwarded, this.env, this.ctx, fetch, undefined, undefined, { subject, owner });
+  }
+}
+
 type ModelOperation = Readonly<{
   id: "responses" | "search" | "image-generation" | "image-edit"
     | "realtime-call" | "realtime-sideband";
@@ -484,8 +520,10 @@ export function handleEgress(
   upstreamFetch: typeof fetch = fetch,
   diagnostics?: Readonly<{ upstreamException(error: Readonly<{ name: string }>): void }>,
   sessionModelAuthority?: SessionModelAuthority,
+  sessionToolAuthority?: SessionToolAuthority,
 ): Promise<Response> {
-  return handleEgressWithOwner(request, env, ctx, upstreamFetch, diagnostics, sessionModelAuthority);
+  return handleEgressWithOwner(request, env, ctx, upstreamFetch, diagnostics, sessionModelAuthority, undefined,
+    sessionToolAuthority);
 }
 
 function handleEgressWithOwner(...args: Parameters<typeof handleMeasuredEgressWithOwner>): Promise<Response> {
@@ -500,7 +538,19 @@ async function handleMeasuredEgressWithOwner(
   diagnostics?: Readonly<{ upstreamException(error: Readonly<{ name: string }>): void }>,
   sessionModelAuthority?: SessionModelAuthority,
   verifiedVoiceOwner?: Readonly<{ subject: string; userId: string }>,
+  sessionToolAuthority?: SessionToolAuthority,
 ): Promise<Response> {
+  // Generic callers can never assert Session tool ownership; only the private
+  // SessionToolEgress entrypoint strips its header and passes the authority.
+  if (request.headers.has(SESSION_TOOL_OWNER_HEADER)) return jsonError(403, "invalid_session_tool_authority");
+  if (sessionToolAuthority) {
+    let target: URL | undefined;
+    try { target = new URL(request.url); } catch { target = undefined; }
+    if (sessionModelAuthority || verifiedVoiceOwner || !target || !sessionToolRoute(target)
+      || request.headers.get(SUBJECT_HEADER) !== sessionToolAuthority.subject) {
+      return jsonError(403, "invalid_session_tool_authority");
+    }
+  }
   if (sessionModelAuthority?.region) env = { ...env, trustedPlacementRegion: sessionModelAuthority.region };
   const started = Date.now();
   // Headers on the general broker are never an ownership assertion. Only the
@@ -523,7 +573,7 @@ async function handleMeasuredEgressWithOwner(
   }
 
   if (url.origin === "https://public-egress.internal" && url.pathname === "/v1/request" && !url.search) {
-    return handlePublicEgress(request, env, upstreamFetch);
+    return handlePublicEgress(request, env, upstreamFetch, sessionToolAuthority);
   }
 
   // Human private-input saving uses the trusted binding, never model HTTP.
@@ -599,7 +649,7 @@ async function handleMeasuredEgressWithOwner(
 
   if (url.protocol === "https:" && url.hostname === "vault-egress.internal" && !url.port
     && url.pathname === "/v1/request" && !url.search) {
-    return handleVaultEgress(request, url, env, started, upstreamFetch);
+    return handleVaultEgress(request, url, env, started, upstreamFetch, undefined, sessionToolAuthority);
   }
 
   // Owner-authenticated account API only; the model gateway cannot route this
@@ -616,15 +666,17 @@ async function handleMeasuredEgressWithOwner(
 
   if (url.protocol === "https:" && url.hostname === "ssh.internal" && !url.port
     && url.pathname === "/v1/execute" && !url.search) {
-    return handleSshEgress(request, url, env, started);
+    return handleSshEgress(request, url, env, started, sessionToolAuthority);
   }
 
   const mcpConnection = mcpConnectionId(url);
   if (mcpConnection) {
-    return handleMcpEgress(request, url, mcpConnection, env, started);
+    return handleMcpEgress(request, url, mcpConnection, env, started, sessionToolAuthority);
   }
   const connector = connectorOperation(url);
-  if (connector) return handleConnectorEgress(request, url, connector, env, started);
+  if (connector) return handleConnectorEgress(request, url, connector, env, started, sessionToolAuthority);
+  // Defense in depth: a Session tool authority never reaches another route.
+  if (sessionToolAuthority) return jsonError(403, "invalid_session_tool_authority");
   const linkPoll = request.method === "GET"
     && /^\/users\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/connectors\/link$/.test(url.pathname)
     && /^\?attempt=[A-Za-z0-9_-]{43}$/.test(url.search);
@@ -927,6 +979,7 @@ async function handleVaultEgress(
   started: number,
   upstreamFetch: typeof fetch,
   trustedOwner?: string,
+  sessionToolAuthority?: SessionToolAuthority,
 ): Promise<Response> {
   if (request.method !== "POST") {
     return auditedError(403, "method_denied", request, url, "vault", started);
@@ -955,7 +1008,7 @@ async function handleVaultEgress(
   }
 
   try {
-    const userId = trustedOwner ?? await resolveSubject(env, subject!);
+    const userId = trustedOwner ?? await resolveSubject(env, subject!, sessionToolAuthority);
     const entry = await resolveVaultEntry(env, userId, envelope.vaultId);
     const requested = new Set([...envelope.placeholders].filter(name => name !== "SIGNATURE" && name !== "JWT"));
     if (entry.kind === "totp" && envelope.url.origin !== entry.origin) {
@@ -1144,12 +1197,13 @@ async function handlePublicEgress(
   request: Request,
   env: EgressEnv,
   upstreamFetch: typeof fetch,
+  sessionToolAuthority?: SessionToolAuthority,
 ): Promise<Response> {
   if (!VAULT_EGRESS_METHODS.has(request.method)) return jsonError(403, "method_denied");
   const subject = request.headers.get(SUBJECT_HEADER);
   if (subject !== null) {
     if (!SUBJECT.test(subject)) return jsonError(403, "agent_subject_required");
-    try { await resolveSubject(env, subject); }
+    try { await resolveSubject(env, subject, sessionToolAuthority); }
     catch (error) { const problem = egressFailure(error); return jsonError(problem.status, problem.code); }
   }
   let target: URL;
@@ -1317,6 +1371,7 @@ async function handleSshEgress(
   url: URL,
   env: EgressEnv,
   started: number,
+  sessionToolAuthority?: SessionToolAuthority,
 ): Promise<Response> {
   if (request.method !== "POST") return auditedError(403, "method_denied", request, url, "ssh", started);
   const subject = request.headers.get(SUBJECT_HEADER);
@@ -1332,7 +1387,7 @@ async function handleSshEgress(
   if (!parsed) return auditedError(400, "invalid_ssh_request", request, url, "ssh", started);
   let userId: string | undefined;
   try {
-    userId = await resolveSubject(env, subject);
+    userId = await resolveSubject(env, subject, sessionToolAuthority);
     const identity = await resolveSshIdentity(env, userId, parsed.identityReference);
     const result = await executeBrokeredSsh(identity, parsed, request.signal);
     audit("allow", request, url, "ssh", started, {
@@ -1358,6 +1413,7 @@ async function handleMcpEgress(
   connectionId: string,
   env: EgressEnv,
   started: number,
+  sessionToolAuthority?: SessionToolAuthority,
 ): Promise<Response> {
   if (!CONNECTOR_METHODS.has(request.method)) {
     return auditedError(403, "method_denied", request, url, "mcp", started);
@@ -1372,7 +1428,7 @@ async function handleMcpEgress(
   }
   let userId: string | undefined;
   try {
-    userId = await resolveSubject(env, subject);
+    userId = await resolveSubject(env, subject, sessionToolAuthority);
     const owner = await resolveMcpConnectionOwner(env, connectionId);
     if (owner !== userId) {
       return auditedError(403, "mcp_connection_owner_mismatch", request, url, "mcp", started, {
@@ -1433,6 +1489,7 @@ async function handleConnectorEgress(
   connector: ConnectorOperation,
   env: EgressEnv,
   started: number,
+  sessionToolAuthority?: SessionToolAuthority,
 ): Promise<Response> {
   if (!CONNECTOR_METHODS.has(request.method)) {
     return auditedError(403, "method_denied", request, url, connector.id, started);
@@ -1446,7 +1503,7 @@ async function handleConnectorEgress(
   }
   let userId: string | undefined;
   try {
-    userId = await resolveSubject(env, subject);
+    userId = await resolveSubject(env, subject, sessionToolAuthority);
     const response = await connectorBroker(env, userId).fetch(request);
     audit(response.status >= 500 ? "error" : response.status >= 400 ? "deny" : "allow",
       request, url, connector.id, started, {
@@ -3106,7 +3163,13 @@ function validRealtimeCallId(value: string | null): value is string {
   );
 }
 
-async function resolveSubject(env: EgressEnv, subject: string): Promise<string> {
+async function resolveSubject(env: EgressEnv, subject: string, trusted?: SessionToolAuthority): Promise<string> {
+  // The private Session tool binding already carries the Session's live owner.
+  // Never fall back to a callback (or legacy directory) for a mismatched subject.
+  if (trusted) {
+    if (trusted.subject !== subject) throw new EgressFailure(403, "agent_subject_unavailable");
+    return trusted.owner;
+  }
   const direct = subject.startsWith(MANAGED_SESSION_SUBJECT_PREFIX);
   if (direct && !MANAGED_SESSION_SUBJECT.test(subject)) {
     throw new EgressFailure(403, "agent_subject_unavailable");

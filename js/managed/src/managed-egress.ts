@@ -135,6 +135,8 @@ const FORBIDDEN_HEADERS = new Set([
   "connection", "host", "origin", "proxy-connection", "referer", "te", "trailer",
   "transfer-encoding", "upgrade", CONNECTOR_CONNECTION_HEADER, "x-nanocodex-subject",
   VAULT_ID_HEADER, "x-nanocodex-target-url",
+  // Session ownership assertions are set only by the Session's scoped egress.
+  "x-nanocodex-session-model-owner", "x-nanocodex-session-tool-owner",
 ]);
 const VAULT_FORBIDDEN_HEADERS = new Set([
   "content-length", "cookie", "expect", "proxy-authorization", "via",

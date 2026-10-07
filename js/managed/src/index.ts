@@ -74,7 +74,7 @@ import { threadSharingTools, redactSharedLinkTokens } from "./thread-sharing-too
 import { initializeTurnInputs, inputChunks, lazyTurnInput, readTurnInput, storeTurnInput } from "./managed-turn-input";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ArchiveMaintenance } from "./archive-maintenance";
-import { managedCredentialSubject, scopedManagedModelEgress, sessionCredentialOwner } from "./session-credential-ownership";
+import { managedCredentialSubject, scopedManagedModelEgress, scopedSessionToolEgress, sessionCredentialOwner } from "./session-credential-ownership";
 import { remoteICE } from "./hand-remote-ice";
 import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
@@ -515,6 +515,8 @@ export interface Env extends
   NANOCODEX: Fetcher;
   NANOCODEX_REALTIME?: Fetcher;
   NANOCODEX_SESSION_MODEL_EGRESS?: Fetcher;
+  /** Private Session tool egress; owner assertions avoid re-entrant subject callbacks. */
+  NANOCODEX_SESSION_TOOL_EGRESS?: Fetcher;
   NANOCODEX_X?: Fetcher;
   NANOCODEX_HISTORY: R2Bucket;
   NANOCODEX_WORKSPACES: R2Bucket;
@@ -4453,7 +4455,7 @@ export class DurableAgentSession extends DurableComputerObject {
       fetch:async(request:Request) => {
         authorize();
         if(!prepared) {await this.#ensureCredentialBinding(session,1000);authorize();prepared=true;}
-        return handleManagedEgress(request,this.env.NANOCODEX,this.#credentialSubject(),(capability,connection) => capability === "gcalendar" && connection === connectionId);
+        return handleManagedEgress(request,this.#toolEgress(),this.#credentialSubject(),(capability,connection) => capability === "gcalendar" && connection === connectionId);
       }};
   }
 
@@ -4551,7 +4553,7 @@ export class DurableAgentSession extends DurableComputerObject {
       const imported = await importCrmEmailPush({
         db: this.env.NANOCODEX_CRM, ownerId: wake.userId,
         authorize: () => { assertOwner(epoch); },
-        fetch: request => handleManagedEgress(request, this.env.NANOCODEX, this.#credentialSubject(),
+        fetch: request => handleManagedEgress(request, this.#toolEgress(), this.#credentialSubject(),
           (capability, connectionId) => capability === "gmail" && connectionId === selected),
       }, JSON.stringify(Object.fromEntries(Object.entries(emailEvent).filter(([key]) => key !== "messages"))));
       assertOwner(epoch);
@@ -10085,7 +10087,7 @@ export class DurableAgentSession extends DurableComputerObject {
     const computer = await createManagedComputerRuntime({
       computer: workspace,
       ...(multiplayer ? {} : { filesystem: createBrainWorkspace(this.#brainBucket(), session.session_id) }),
-      egress: this.env.NANOCODEX,
+      egress: this.#toolEgress(),
       mediaService: this.env.NANOCODEX_MEDIA,
       networkPolicy: configuration.environment?.network,
       ...(multiplayer ? {} : { subject: this.#credentialSubject() }),
@@ -10173,7 +10175,7 @@ export class DurableAgentSession extends DurableComputerObject {
           return authorization !== undefined && (authorization.connectGrant === undefined
             || authorization.connectGrant.connectors.includes(capability));
         },
-        fetch: (request, context, expectedCapability) => handleManagedEgress(request, this.env.NANOCODEX,
+        fetch: (request, context, expectedCapability) => handleManagedEgress(request, this.#toolEgress(),
           this.#credentialSubject(), (capability, connectionId) =>
             capability === expectedCapability && this.#toolConnectorAllowed(capability, connectionId, context)),
       }),
@@ -10332,7 +10334,7 @@ export class DurableAgentSession extends DurableComputerObject {
         const name = managedAccountMcpServerName(connection);
         nextServers[name] = accountMcpNames.get(connection.id) === connection.name && accountMcpServers[name]
           ? accountMcpServers[name]
-          : managedAccountMcpServers([connection], this.env.NANOCODEX, this.#credentialSubject(),
+          : managedAccountMcpServers([connection], this.#toolEgress(), this.#credentialSubject(),
             connectionId => this.#activeTurnMcpAllowed(connectionId))[name]!;
       }
       accountMcpNames = new Map(connections.map(connection => [connection.id, connection.name]));
@@ -10752,7 +10754,7 @@ export class DurableAgentSession extends DurableComputerObject {
       ...(multiplayer ? [] : crmTools({
         db: this.env.NANOCODEX_CRM, ownerId: session.owner_id,
         authorization: context => this.#authorizationForToolContext(context),
-        calendarFetch: (request, context) => handleManagedEgress(request, this.env.NANOCODEX,
+        calendarFetch: (request, context) => handleManagedEgress(request, this.#toolEgress(),
           this.#credentialSubject(), (capability, connectionId) => capability === "gcalendar"
             && this.#toolConnectorAllowed(capability, connectionId, context)),
         automation: async (input, context) => {
@@ -10789,7 +10791,7 @@ export class DurableAgentSession extends DurableComputerObject {
       ]),
       ...(multiplayer ? [] : this.#memoryTools()),
       ...(multiplayer ? [] : [createVaultIntakeTool(context => this.#authorizeVaultTool(context)),
-        createVaultRequestTool(this.env.NANOCODEX, () => this.#credentialSubject(), context => this.#authorizeVaultTool(context)),
+        createVaultRequestTool(this.#toolEgress(), () => this.#credentialSubject(), context => this.#authorizeVaultTool(context)),
         createPhoneNumbersTool(this.env.NANOCODEX, session.owner_id, context => this.#authorizeVaultTool(context))]),
       ...(multiplayer ? [] : createProviderVaultTools(this.env.NANOCODEX, session.owner_id, context => this.#authorizeVaultTool(context))),
       ...(multiplayer ? [] : [permissionRequestTool((input, context) => this.#requestPermissions(input, context))]),
@@ -10825,7 +10827,7 @@ export class DurableAgentSession extends DurableComputerObject {
       })]),
       ...(multiplayer ? [] : [serverHandTool({
         owner: session.owner_id, subject: this.#credentialSubject(), origin: session.public_origin,
-        image: this.env.NANOCODEX_HAND_IMAGE, egress: this.env.NANOCODEX,
+        image: this.env.NANOCODEX_HAND_IMAGE, egress: this.#toolEgress(),
         hosts: this.env.NANOCODEX_ACCOUNT_TOOLS.getByName(session.owner_id),
         authorize: context => {
           context.signal.throwIfAborted();
@@ -12751,6 +12753,21 @@ export class DurableAgentSession extends DurableComputerObject {
       return;
     }
     this.#publish(persistence.event!);
+  }
+
+  #toolEgress(): Fetcher {
+    return scopedSessionToolEgress(
+      this.env.NANOCODEX,
+      this.#credentialBinding?.strategy === "session_v1" ? this.env.NANOCODEX_SESSION_TOOL_EGRESS : undefined,
+      this.ctx.id.toString(), this.#credentialSubject(),
+      () => sessionCredentialOwner({
+        subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
+        binding: this.#credentialBinding, session: this.#session(),
+        initialization: this.#initializationOwnership(),
+        deleting: this.#deleting, deleted: this.#deleted,
+        exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
+      }),
+    );
   }
 
   #modelEgress(): Pick<Fetcher, "fetch"> {

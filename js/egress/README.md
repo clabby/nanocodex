@@ -140,9 +140,19 @@ service binding accepts the Session owner assertion; the general broker rejects
 it. Model credentials are still resolved live. For Session Responses POSTs, the
 bounded request-body read overlaps the live credential lookup; provider dispatch
 waits for both, and credential denial cancels an unfinished body read. The same
-buffer supplies the single explicit-401 recovery attempt. Tool, connector, voice, and legacy
+buffer supplies the single explicit-401 recovery attempt. Voice and legacy
 directory traffic keep their existing ownership checks. Deploy egress before
 enabling the managed binding.
+
+`SessionToolEgress` applies the same pattern to a managed Session's own tool
+traffic. It accepts only public egress, Vault `/v1/request`, SSH execute, MCP
+connection, and provider connector routes, requires a managed-session subject
+plus the Session owner assertion, strips that assertion before routing, and then
+skips the `ManagedAgentOwnership` callback for that subject only. Model, control,
+browser-vault, phone, and owner-path routes are rejected. The general broker
+rejects any request carrying the tool owner header. Avoiding the callback keeps
+tool bursts from ratcheting the originating Session's Workers request-chain
+depth (see the managed README).
 
 The internal `GET /users/:user/credentials/vault` control route returns only
 the existing public vault metadata projection. Managed startup uses it instead
