@@ -1700,29 +1700,16 @@ impl DriverRuntime {
             self.retry_target = Some(target.clone());
         }
         let client = self.client.clone();
-        let resolve_default = matches!(target, RetryTarget::Default);
         let (agent_id, settings) = match target {
             RetryTarget::Default => (None, AgentSettings::default()),
             RetryTarget::Create(settings) => (None, fresh_thread_settings(false, settings)),
             RetryTarget::Agent(agent_id) => (Some(agent_id), AgentSettings::default()),
         };
         self.connection.spawn(async move {
-            let result = if resolve_default {
-                // Availability determines the actual creation policy. Never send
-                // the temporary loading view's local defaults to the server.
-                match super::control::InitialSettings::default()
-                    .resolve_for_account(&client)
-                    .await
-                {
-                    Ok(settings) => connect_agent(client, None, settings).await,
-                    Err(error) => Err(ConnectionFailure {
-                        error,
-                        retry: RetryTarget::Default,
-                    }),
-                }
-            } else {
-                connect_agent(client, agent_id, settings).await
-            };
+            // The hosted live endpoint and this initial view share AgentSettings
+            // defaults. Catalog discovery only populates the optional model picker;
+            // it must never delay connecting or submitting the first prompt.
+            let result = connect_agent(client, agent_id, settings).await;
             ConnectionResult::Agent { purpose, result }
         });
     }
@@ -2109,9 +2096,9 @@ async fn run_inner(
         .map_err(|error| ManagedError::Configuration(error.to_string()))?
         .workspace()
         .to_path_buf();
-    // Paint an editable loading shell before discovery. New creation resolves
-    // its authoritative policy in the connection task; attach hydrates retained
-    // settings in connect_agent, where failures already have retry semantics.
+    // Paint the hosted defaults immediately. New creation uses this same policy;
+    // attach hydrates retained settings in connect_agent, where failures already
+    // have retry semantics. Optional catalog discovery never gates startup.
     let initial_settings = AgentSettings::default();
     let initial_effort = effort_from_thinking(initial_settings.thinking);
     let initial_reasoning_mode = reasoning_mode_from_managed(initial_settings.reasoning_mode);
@@ -3972,7 +3959,7 @@ fn fresh_thread_settings(was_routed: bool, settings: AgentSettings) -> AgentSett
 }
 
 fn new_agent_settings() -> AgentSettings {
-    super::control::InitialSettings::default().resolve()
+    AgentSettings::default()
 }
 
 async fn apply_update(

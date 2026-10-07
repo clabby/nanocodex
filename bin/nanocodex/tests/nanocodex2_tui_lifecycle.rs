@@ -815,7 +815,10 @@ impl Terminal {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_nanocodex2"));
+        let mut command = CommandBuilder::new(
+            std::env::var_os("NANOCODEX2_TEST_BINARY")
+                .unwrap_or_else(|| env!("CARGO_BIN_EXE_nanocodex2").into()),
+        );
         command.env_clear();
         command.env("PATH", std::env::var_os("PATH").unwrap_or_default());
         command.env("HOME", workspace.path());
@@ -1489,6 +1492,27 @@ impl Fixture {
         history_gate: Arc<tokio::sync::Semaphore>,
         reload_dir: Option<&Path>,
     ) -> Self {
+        Self::launch_with_catalog(
+            active,
+            attach,
+            initial_history,
+            history_gate,
+            reload_dir,
+            "available",
+            None,
+        )
+        .await
+    }
+
+    async fn launch_with_catalog(
+        active: bool,
+        attach: bool,
+        initial_history: Vec<Value>,
+        history_gate: Arc<tokio::sync::Semaphore>,
+        reload_dir: Option<&Path>,
+        catalog_mode: &'static str,
+        startup_prompt: Option<&str>,
+    ) -> Self {
         let cursor = initial_history
             .last()
             .and_then(|event| event["cursor"].as_str())
@@ -1527,12 +1551,18 @@ impl Fixture {
         let settings_requests = Arc::new(Mutex::new(Vec::new()));
         let model_route = Arc::new(Mutex::new(None));
         let app = Router::new()
-            .route("/v1/models", get(|headers: axum::http::HeaderMap| async move {
+            .route("/v1/models", get(move |headers: axum::http::HeaderMap| async move {
                 let authorization = format!("Bearer ncx_live_{}_{}", "a".repeat(12), "b".repeat(43));
                 let isolated_login = format!("Bearer ncx_live_{}_{}", "a".repeat(12), "c".repeat(43));
                 let supplied = headers.get("authorization").and_then(|value| value.to_str().ok());
                 assert!(supplied == Some(authorization.as_str()) || supplied == Some(isolated_login.as_str()));
-                Json(json!({
+                if catalog_mode == "held" {
+                    std::future::pending::<()>().await;
+                }
+                if catalog_mode == "unavailable" {
+                    return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+                }
+                Ok(Json(json!({
                     "object": "list", "default_model": "gpt-6-astra",
                     "data": [
                         {"id": "gpt-6-astra", "name": "Astra", "provider": "openai",
@@ -1545,7 +1575,7 @@ impl Fixture {
                         {"id": "mimo-v2.6-pro", "name": "MiMo V2.6 Pro", "provider": "gateway",
                             "thinking": ["low", "medium", "high"], "fast_mode": false, "reasoning_modes": ["standard"]}
                     ]
-                }))
+                })))
             }))
             .route("/v1/me", get(|headers: axum::http::HeaderMap| async move {
                 assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer ncx_live_"));
@@ -1607,7 +1637,11 @@ impl Fixture {
         let server = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let terminal = Terminal::start_with_reload_dir(&origin, attach, reload_dir);
+        let mut terminal = Terminal::start_with_reload_dir(&origin, attach, reload_dir);
+        if let Some(prompt) = startup_prompt {
+            terminal.wait_text("actions").await;
+            terminal.prompt(prompt, "\r");
+        }
         let events = tokio::time::timeout(TIMEOUT, connections.recv())
             .await
             .unwrap_or_else(|_| {
@@ -1741,6 +1775,60 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.server.abort();
+    }
+}
+
+// Invoke the shipped TUI over a real PTY/HTTP/WebSocket boundary. The optional
+// catalog never returns (or fails), but the first prompt must still complete.
+#[tokio::test]
+async fn terminal_hosted_defaults_do_not_wait_for_model_catalog() {
+    for catalog_mode in ["held", "unavailable"] {
+        let started = std::time::Instant::now();
+        let mut fixture = Fixture::launch_with_catalog(
+            false,
+            false,
+            Vec::new(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            None,
+            catalog_mode,
+            Some("INSTANT_DEFAULT_PROMPT"),
+        )
+        .await;
+        let connected = started.elapsed();
+        assert_eq!(
+            *fixture.settings.lock().unwrap(),
+            json!({
+                "model": "gpt-6-astra", "thinking": "low",
+                "reasoning_mode": "standard", "fast_mode": false,
+            })
+        );
+        assert_eq!(*fixture.socket_paths.lock().unwrap(), ["/v1/agents/live"]);
+        let turn = fixture.submission("INSTANT_DEFAULT_PROMPT").await;
+        fixture.nested(
+            &turn,
+            "assistant.message",
+            json!({
+                "phase": "final_answer", "text": "HOSTED_DEFAULT_READY",
+            }),
+        );
+        fixture.complete(&turn);
+        fixture.terminal.wait_text("HOSTED_DEFAULT_READY").await;
+        eprintln!(
+            "JOURNEY catalog={catalog_mode}: hosted Astra/low/standard/fast=false; live connection={connected:?}; first answer={:?}",
+            started.elapsed()
+        );
+        fixture.terminal.input("\x03\x03");
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                if let Some(status) = fixture.terminal.child.try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("TUI did not close while catalog was unavailable");
     }
 }
 

@@ -823,7 +823,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::Host(_)) => unreachable!("handled before managed client setup"),
         Some(Command::New(settings)) => {
             let account = settings.chatgpt_account.clone();
-            let settings = settings.resolve_for_account(&client).await?;
+            let settings = settings.resolve_validated()?;
             let receipt = match account {
                 Some(account) => {
                     client
@@ -1138,12 +1138,7 @@ fn supported_agent_page_origin(url: &Url) -> bool {
 async fn run_turn(client: &ManagedClient, command: Run) -> Result<(), ManagedError> {
     let created = command.agent.is_none();
     let account = command.settings.chatgpt_account.clone();
-    let selection = command.settings.server_selection();
-    let settings = if created && selection.is_none() {
-        command.settings.resolve_for_account(client).await?
-    } else {
-        command.settings.resolve()
-    };
+    let settings = command.settings.resolve_validated()?;
     let requested_agent = command.agent;
     let request_id = command
         .idempotency_key
@@ -1156,7 +1151,7 @@ async fn run_turn(client: &ManagedClient, command: Run) -> Result<(), ManagedErr
             settings,
             None,
             Some((command.prompt.clone(), request_id.clone())),
-            Some((selection, account)),
+            account,
         )
         .await?
     } else {
@@ -1211,13 +1206,7 @@ async fn open_workspace_agent_from(
     state: Option<AgentState>,
     event_observer: Option<tokio::sync::mpsc::UnboundedSender<ManagedEvent>>,
 ) -> Result<(Nanocodex, AgentEvents, String, std::path::PathBuf), ManagedError> {
-    let settings = if agent_id.is_none() {
-        control::InitialSettings::default()
-            .resolve_for_account(client)
-            .await?
-    } else {
-        control::InitialSettings::default().resolve()
-    };
+    let settings = AgentSettings::default();
     open_workspace_agent_with_settings(client, agent_id, state, settings, event_observer).await
 }
 
@@ -1248,10 +1237,7 @@ async fn build_workspace_agent_with_settings(
     settings: AgentSettings,
     event_observer: Option<tokio::sync::mpsc::UnboundedSender<ManagedEvent>>,
     initial_prompt: Option<(String, String)>,
-    startup: Option<(
-        Option<nanocodex_managed::InitialSettingsSelection>,
-        Option<String>,
-    )>,
+    chatgpt_account: Option<String>,
 ) -> Result<
     (
         Nanocodex,
@@ -1271,15 +1257,7 @@ async fn build_workspace_agent_with_settings(
     let client = device_hand::with_client_context(client.clone(), &workspace)?;
     let backend = match (agent_id, state) {
         (None, None) if initial_prompt.is_some() => {
-            let backend = Managed::create(client.clone());
-            if startup
-                .as_ref()
-                .is_some_and(|(selection, _)| selection.is_some())
-            {
-                backend
-            } else {
-                backend.with_settings(settings)
-            }
+            Managed::create(client.clone()).with_settings(settings)
         }
         (None, None) => Managed::create_live(client.clone()).with_settings(settings),
         (Some(agent_id), Some(state)) => {
@@ -1293,13 +1271,8 @@ async fn build_workspace_agent_with_settings(
         }
     };
     let mut builder = Nanocodex::builder(backend);
-    if let Some((selection, account)) = startup {
-        if let Some(selection) = selection {
-            builder = builder.settings_selection(selection);
-        }
-        if let Some(account) = account {
-            builder = builder.chatgpt_account(account);
-        }
+    if let Some(account) = chatgpt_account {
+        builder = builder.chatgpt_account(account);
     }
     let builder = match event_observer {
         Some(observer) => builder.event_observer(observer),

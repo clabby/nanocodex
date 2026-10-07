@@ -26,7 +26,7 @@ pub(crate) struct InitialSettings {
     /// Initial reasoning mode (standard or pro).
     #[arg(long)]
     reasoning_mode: Option<ReasoningMode>,
-    /// Request fast processing (default follows the selected model).
+    /// Request fast processing (disabled by default).
     #[arg(long, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
     fast_mode: Option<bool>,
     /// Pin the new session to this connected ChatGPT account (disables failover).
@@ -35,18 +35,6 @@ pub(crate) struct InitialSettings {
 }
 
 impl InitialSettings {
-    /// Defer only omitted-model selection; explicit models retain local validation.
-    pub(crate) fn server_selection(&self) -> Option<nanocodex_managed::InitialSettingsSelection> {
-        self.model
-            .is_none()
-            .then_some(nanocodex_managed::InitialSettingsSelection {
-                policy: nanocodex_managed::InitialSettingsPolicy::Cli,
-                thinking: self.thinking,
-                reasoning_mode: self.reasoning_mode,
-                fast_mode: self.fast_mode,
-            })
-    }
-
     pub(crate) fn is_explicit(&self) -> bool {
         self.model.is_some()
             || self.thinking.is_some()
@@ -56,95 +44,29 @@ impl InitialSettings {
     }
 
     pub(crate) fn resolve(self) -> AgentSettings {
-        let model = self.model.unwrap_or_else(|| Model::Sol.into());
-        let defaults = AgentSettings::new(model);
+        let defaults = self.model.map(AgentSettings::new).unwrap_or_default();
         AgentSettings {
-            model,
-            thinking: self.thinking.unwrap_or(if model.oai().is_some() {
-                Thinking::Xhigh
-            } else {
-                defaults.thinking
-            }),
+            model: defaults.model,
+            thinking: self.thinking.unwrap_or(defaults.thinking),
             reasoning_mode: self.reasoning_mode.unwrap_or(defaults.reasoning_mode),
-            fast_mode: self.fast_mode.unwrap_or(model.supports_fast_mode()),
+            fast_mode: self.fast_mode.unwrap_or(defaults.fast_mode),
         }
     }
 
-    /// Validates explicit models locally; default selection uses the live catalog.
+    /// Use the canonical hosted defaults and validate overrides without discovery.
     /// Provider availability is checked when the provider is used.
-    /// Reopening an existing conversation must preserve its retained settings.
-    pub(crate) async fn resolve_for_account(
-        mut self,
-        client: &ManagedClient,
-    ) -> Result<AgentSettings, ManagedError> {
-        if let Some(model) = self.model {
-            if self.chatgpt_account.is_some() && model.oai().is_none() {
-                return Err(ManagedError::Configuration(
-                    "The requested model cannot be pinned to a ChatGPT account".to_owned(),
-                ));
-            }
-            let settings = self.resolve();
-            if !model.supports_thinking(settings.thinking)
-                || !model.supports_reasoning_mode(settings.reasoning_mode)
-                || (settings.fast_mode && !model.supports_fast_mode())
-            {
-                return Err(ManagedError::Configuration(
-                    "The requested effort, reasoning mode, or fast mode is not offered for this model"
-                        .to_owned(),
-                ));
-            }
-            return Ok(settings);
-        }
-        let catalog = client.models().await?;
-        let model = match self.model {
-            Some(model) => model,
-            None if self.chatgpt_account.is_some() => catalog
-                .data
-                .iter()
-                .find(|entry| entry.provider == "openai" && entry.id == Model::Sol)
-                .or_else(|| catalog.data.iter().find(|entry| entry.provider == "openai"))
-                .map(|entry| entry.id)
-                .ok_or_else(|| {
-                    ManagedError::Configuration(
-                        "No ChatGPT model is available for the requested account pin".to_owned(),
-                    )
-                })?,
-            None => catalog.default_model.ok_or_else(|| {
-                ManagedError::Configuration(
-                    "No managed model is available; connect a provider subscription first"
-                        .to_owned(),
-                )
-            })?,
-        };
-        let entry = catalog.data.iter().find(|entry| entry.id == model)
-            .ok_or_else(|| ManagedError::Configuration("The requested model is not available to this account; inspect the managed model catalog".to_owned()))?;
-        if self.chatgpt_account.is_some() && (entry.provider != "openai" || model.oai().is_none()) {
+    pub(crate) fn resolve_validated(self) -> Result<AgentSettings, ManagedError> {
+        let pinned = self.chatgpt_account.is_some();
+        let settings = self.resolve();
+        let model = settings.model;
+        if pinned && model.oai().is_none() {
             return Err(ManagedError::Configuration(
                 "The requested model cannot be pinned to a ChatGPT account".to_owned(),
             ));
         }
-        if self.thinking.is_none() {
-            let preferred = if model.oai().is_some() {
-                Thinking::Xhigh
-            } else {
-                model.default_thinking()
-            };
-            self.thinking = Some(if entry.thinking.contains(&preferred) {
-                preferred
-            } else if entry.thinking.contains(&model.default_thinking()) {
-                model.default_thinking()
-            } else {
-                entry.thinking[0]
-            });
-        }
-        if self.fast_mode.is_none() {
-            self.fast_mode = Some(entry.fast_mode);
-        }
-        self.model = Some(model);
-        let settings = self.resolve();
-        if !entry.thinking.contains(&settings.thinking)
-            || !entry.reasoning_modes.contains(&settings.reasoning_mode)
-            || (settings.fast_mode && !entry.fast_mode)
+        if !model.supports_thinking(settings.thinking)
+            || !model.supports_reasoning_mode(settings.reasoning_mode)
+            || (settings.fast_mode && !model.supports_fast_mode())
         {
             return Err(ManagedError::Configuration(
                 "The requested effort, reasoning mode, or fast mode is not offered for this model"
@@ -281,54 +203,5 @@ impl Cron {
                 super::write_json(&client.put_trigger(&agent_id, &trigger_id, &config).await?)
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[derive(Parser)]
-    struct Cli {
-        #[command(flatten)]
-        settings: InitialSettings,
-    }
-
-    #[test]
-    fn initial_settings_default_to_sol_xhigh_fast() {
-        for settings in [
-            InitialSettings::default(),
-            Cli::parse_from(["test"]).settings,
-        ] {
-            let settings = settings.resolve();
-            assert_eq!(settings.model, Model::Sol);
-            assert_eq!(settings.thinking, Thinking::Xhigh);
-            assert!(settings.fast_mode);
-        }
-    }
-
-    #[test]
-    fn initial_settings_preserve_overrides() {
-        let settings = Cli::parse_from([
-            "test",
-            "--model",
-            "astra",
-            "--thinking",
-            "high",
-            "--fast-mode",
-            "false",
-        ])
-        .settings
-        .resolve();
-        assert_eq!(settings.model, Model::Astra);
-        assert_eq!(settings.thinking, Thinking::High);
-        assert!(!settings.fast_mode);
-        assert!(
-            Cli::parse_from(["test", "--fast-mode"])
-                .settings
-                .resolve()
-                .fast_mode
-        );
     }
 }

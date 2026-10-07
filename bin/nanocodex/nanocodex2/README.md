@@ -379,7 +379,7 @@ available without reopening the menu.
 ## Headless controls
 
 ```bash
-# Create with explicit initial settings; defaults are Sol, xhigh, standard, fast mode enabled.
+# Create with explicit initial settings; defaults are Astra, low, standard, fast mode disabled.
 nanocodex2 new --model astra --thinking high
 nanocodex2 run "Inspect this repository" --model sol --thinking high
 nanocodex2 run "Continue the review" --agent AGENT_ID
@@ -402,6 +402,11 @@ nanocodex2 cron list AGENT_ID
 nanocodex2 cron get AGENT_ID daily
 nanocodex2 cron delete AGENT_ID daily
 ```
+
+New terminal sessions, `new`, and `run` use the hosted defaults immediately:
+Astra, low reasoning effort, standard reasoning mode, and fast mode disabled.
+Startup does not wait for the model catalog; the terminal loads its model picker
+in the background. Select another model explicitly with `--model`.
 
 Creation flags on `run` apply only to new agents. Use `settings` to change an
 existing agent. Astra accepts low through max effort and standard reasoning
@@ -779,3 +784,8 @@ for `nestedVirtualization` and supported Windows configurations.
 Linux servers installed with `nanocodex hand install` keep their systemd service,
 private workspace, and machine identity across idempotent repairs. VM factories
 remain a separate `nanocodex2 host` capability and are not installed implicitly.
+
+To run the startup journeys against an installed or optimized build, set
+`NANOCODEX2_TEST_BINARY` to its absolute path when invoking the
+`nanocodex2_managed` or `nanocodex2_tui_lifecycle` test binaries. The synthetic
+account and terminal state remain isolated from your login.

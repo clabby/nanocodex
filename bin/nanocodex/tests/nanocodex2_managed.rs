@@ -1262,8 +1262,8 @@ async fn combined_cli_run(
     assert_eq!(headers["accept"], "text/event-stream");
     assert_eq!(body["input"], "answer from managed");
     assert_eq!(
-        body["settings_selection"],
-        serde_json::json!({"policy":"cli"})
+        body["settings"],
+        serde_json::json!({"model":"gpt-6-astra", "thinking":"low", "reasoning_mode":"standard", "fast_mode":false})
     );
     state.completed.notify_one();
     combined_stream("answer from managed", async move {
@@ -1476,7 +1476,10 @@ fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> 
 // An inherited login, Keychain reference, provider key, or installed Hand must
 // never become authority for a synthetic-account fixture subprocess.
 fn fixture_command(home: &std::path::Path) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_nanocodex2"));
+    let mut command = tokio::process::Command::new(
+        std::env::var_os("NANOCODEX2_TEST_BINARY")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_nanocodex2").into()),
+    );
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -2041,22 +2044,27 @@ async fn docker_preflight_errors_are_actionable_before_account_login() {
 #[path = "native_screen_lifecycle.rs"]
 mod native_screen_lifecycle;
 
-// Real executable over HTTP/WS: optional catalog failure must not gate an
-// explicit model, while default selection and live authentication remain live.
+// Real executable over HTTP/WS: optional catalog failure must not gate the
+// fixed hosted default or an explicit model. Authentication still gates admission.
 #[tokio::test]
-async fn explicit_model_startup_does_not_read_catalog() {
+async fn startup_uses_hosted_defaults_without_reading_catalog() {
     for catalog_mode in ["held", "unavailable", "available"] {
         for explicit in [true, false] {
-            startup_catalog_journey(catalog_mode, explicit, false, false).await;
+            for command in ["run", "new"] {
+                startup_catalog_journey(command, catalog_mode, explicit, false, false).await;
+            }
         }
     }
-    startup_catalog_journey("held", true, true, false).await;
-    startup_catalog_journey("held", false, false, true).await;
-    startup_catalog_journey("held", true, false, true).await;
-    startup_catalog_journey("held", false, true, true).await;
+    for command in ["run", "new"] {
+        startup_catalog_journey(command, "held", true, true, false).await;
+        startup_catalog_journey(command, "held", false, false, true).await;
+        startup_catalog_journey(command, "held", true, false, true).await;
+        startup_catalog_journey(command, "held", false, true, true).await;
+    }
 }
 
 async fn startup_catalog_journey(
+    command_name: &'static str,
     catalog_mode: &'static str,
     explicit: bool,
     revoked: bool,
@@ -2070,6 +2078,44 @@ async fn startup_catalog_journey(
     let catalog_reads = reads.clone();
     let prompt_count = prompts.clone();
     let admission_count = admissions.clone();
+    let creation = post(
+        move |headers: HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| async move {
+            admission_count.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(headers["authorization"], authorization);
+            if revoked {
+                return unauthorized();
+            }
+            if pinned {
+                assert_eq!(body["configuration"]["chatgpt_account_id"], "synthetic-pin");
+            }
+            assert!(body.get("settings_selection").is_none());
+            assert_eq!(
+                body["settings"],
+                serde_json::json!({
+                    "model": if explicit { "gpt-6.1-sol" } else { "gpt-6-astra" },
+                    "thinking": if pinned && !explicit { "high" } else { "low" },
+                    "reasoning_mode": "standard", "fast_mode": false,
+                })
+            );
+            if command_name == "new" {
+                assert!(body.get("input").is_none());
+                return json_response(
+                    StatusCode::CREATED,
+                    serde_json::json!({
+                        "agent_id": AGENT_ID, "session_id": AGENT_ID,
+                        "events_url": format!("/v1/agents/{AGENT_ID}/events"),
+                        "websocket_url": format!("/v1/agents/{AGENT_ID}/ws"),
+                    }),
+                );
+            }
+            assert_eq!(headers["accept"], "text/event-stream");
+            assert_eq!(body["input"], "startup answer");
+            prompt_count.fetch_add(1, Ordering::SeqCst);
+            combined_stream("startup answer", async {
+                durable_turn_events(TURN_ID, "catalog-independent answer", 2, 1)
+            })
+        },
+    );
     let app = Router::new()
         .route(
             "/v1/models",
@@ -2085,32 +2131,8 @@ async fn startup_catalog_journey(
                 }
             }),
         )
-        .route(
-            "/v1/agent-runs",
-            post(move |headers: HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| async move {
-                admission_count.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(headers["authorization"], authorization);
-                assert_eq!(headers["accept"], "text/event-stream");
-                if revoked { return unauthorized(); }
-                if pinned { assert_eq!(body["configuration"]["chatgpt_account_id"], "synthetic-pin"); }
-                if explicit {
-                    assert_eq!(body["settings"]["model"], "gpt-6.1-sol");
-                    assert_eq!(body["settings"]["thinking"], "xhigh");
-                    assert_eq!(body["settings"]["fast_mode"], true);
-                } else {
-                    assert_eq!(body["settings_selection"], if pinned {
-                        serde_json::json!({"policy":"cli", "thinking":"high", "fast_mode":false})
-                    } else { serde_json::json!({"policy":"cli"}) });
-                    if catalog_mode == "unavailable" {
-                        return json_response(StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({"error":"model_availability_unavailable"}));
-                    }
-                }
-                assert_eq!(body["input"], "startup answer");
-                prompt_count.fetch_add(1, Ordering::SeqCst);
-                combined_stream("startup answer", async { durable_turn_events(TURN_ID, "catalog-independent answer", 2, 1) })
-            }),
-        )
-        ;
+        .route("/v1/agent-runs", creation.clone())
+        .route("/v1/agents", creation);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -2119,8 +2141,11 @@ async fn startup_catalog_journey(
     command
         .env("NANOCODEX_MANAGED_URL", format!("http://{address}"))
         .env("NC_API_KEY", key)
-        .args(["run", "startup answer"])
+        .arg(command_name)
         .kill_on_drop(true);
+    if command_name == "run" {
+        command.arg("startup answer");
+    }
     if explicit {
         command.args(["--model", "sol"]);
     }
@@ -2136,40 +2161,31 @@ async fn startup_catalog_journey(
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!(
-            "catalog={catalog_mode} explicit={explicit} revoked={revoked} pinned={pinned}: status={} stdout={stdout} stderr={stderr}",
+            "command={command_name} catalog={catalog_mode} explicit={explicit} revoked={revoked} pinned={pinned}: status={} stdout={stdout} stderr={stderr}",
             output.status
         );
-        if revoked || (!explicit && catalog_mode == "unavailable") {
+        if revoked {
             assert!(!output.status.success());
-            if revoked {
-                assert!(
-                    stderr.contains("401") || stderr.contains("Unauthorized"),
-                    "{stderr}"
-                );
-            } else {
-                assert!(
-                    stderr.contains("model_availability_unavailable"),
-                    "{stderr}"
-                );
-            }
+            assert!(
+                stderr.contains("401") || stderr.contains("Unauthorized"),
+                "{stderr}"
+            );
         } else {
             assert!(output.status.success(), "{stderr}");
-            assert!(stdout.contains("catalog-independent answer"), "{stdout}");
+            let expected = if command_name == "new" {
+                AGENT_ID
+            } else {
+                "catalog-independent answer"
+            };
+            assert!(stdout.contains(expected), "{stdout}");
         }
     }
     assert_eq!(reads.load(Ordering::SeqCst), 0);
     assert_eq!(
         prompts.load(Ordering::SeqCst),
-        usize::from(!revoked && (explicit || catalog_mode != "unavailable"))
+        usize::from(!revoked && command_name == "run")
     );
-    if revoked || explicit || catalog_mode != "unavailable" {
-        assert_eq!(admissions.load(Ordering::SeqCst), 1, "one startup POST");
-    } else {
-        assert!(
-            admissions.load(Ordering::SeqCst) > 0,
-            "catalog error comes from startup POST"
-        );
-    }
+    assert_eq!(admissions.load(Ordering::SeqCst), 1, "one startup POST");
     server.abort();
 }
 
