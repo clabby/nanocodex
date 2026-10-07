@@ -655,7 +655,56 @@ async fn observed_terminal_with_open_block_is_protocol_error_not_missing_termina
     let mut events = client.stream(&request()).await.unwrap();
     let first = events.next().await.unwrap().unwrap();
     assert!(matches!(collect_stream(first, events).await,
-        Err(ClaudeError::Protocol(message)) if message == "message_stop before content_block_stop"));
+        Err(ClaudeError::Protocol(message)) if message == "message_stop before content_block_stop: stop_reason=end_turn, block_kind=text, block_index=0"));
+}
+
+#[tokio::test]
+async fn unfinished_blocks_report_only_bounded_protocol_metadata() {
+    let blocks = [
+        (
+            "thinking",
+            json!({"type":"thinking","thinking":"SECRET_CONTENT","signature":"SECRET_SIGNATURE"}),
+        ),
+        (
+            "server_tool_use",
+            json!({"type":"server_tool_use","id":"SECRET_ID","name":"SECRET_NAME","input":{"argument":"SECRET_ARGUMENT"}}),
+        ),
+        (
+            "web_search_tool_result",
+            json!({"type":"web_search_tool_result","tool_use_id":"SECRET_ID","content":[{"type":"SECRET_RAW_TYPE","text":"SECRET_CONTENT"}]}),
+        ),
+        (
+            "redacted_thinking",
+            json!({"type":"redacted_thinking","data":"SECRET_CONTENT"}),
+        ),
+    ];
+    for (reason, expected_reason) in [
+        ("end_turn", "end_turn"),
+        ("max_tokens", "max_tokens"),
+        ("SECRET_UNKNOWN_REASON", "unknown"),
+    ] {
+        for (kind, block) in &blocks {
+            let payload = [
+                json!({"type":"message_start","message":{"id":"SECRET_MESSAGE_ID","role":"assistant","model":"SECRET_MODEL","content":[],"usage":{}}}),
+                json!({"type":"content_block_start","index":7,"content_block":block}),
+                json!({"type":"message_delta","delta":{"stop_reason":reason},"usage":{"output_tokens":2}}),
+                json!({"type":"message_stop"}),
+            ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+            let endpoint =
+                server(move |_| (StatusCode::OK, "text/event-stream", payload.clone())).await;
+            let client = ClaudeClient::new(http_client(), endpoint, "synthetic-key");
+            let mut events = client.stream(&request()).await.unwrap();
+            let first = events.next().await.unwrap().unwrap();
+            let error = collect_stream(first, events).await.unwrap_err();
+            assert!(!error.to_string().contains("SECRET_"));
+            assert!(!format!("{error:?}").contains("SECRET_"));
+            assert!(
+                matches!(error, ClaudeError::Protocol(ref message)
+                if message == &format!("message_stop before content_block_stop: stop_reason={expected_reason}, block_kind={kind}, block_index=7")),
+                "unexpected error for {expected_reason}/{kind}: {error}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

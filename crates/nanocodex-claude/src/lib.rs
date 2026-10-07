@@ -1531,6 +1531,40 @@ enum BlockAccumulator {
 }
 
 impl BlockAccumulator {
+    // Diagnostics must never format payloads or provider-controlled type strings.
+    fn diagnostic_kind(&self) -> &'static str {
+        match self {
+            Self::Text { .. } => "text",
+            Self::ToolUse { .. } => "tool_use",
+            Self::Thinking { .. } => "thinking",
+            Self::ServerToolUse { .. } => "server_tool_use",
+            Self::McpToolUse { .. } => "mcp_tool_use",
+            Self::Other(block) => match block {
+                ContentBlock::Image { .. } => "image",
+                ContentBlock::Document { .. } => "document",
+                ContentBlock::Text { .. } => "text",
+                ContentBlock::ToolUse { .. } => "tool_use",
+                ContentBlock::ServerToolUse { .. } => "server_tool_use",
+                ContentBlock::WebSearchToolResult { .. } => "web_search_tool_result",
+                ContentBlock::WebFetchToolResult { .. } => "web_fetch_tool_result",
+                ContentBlock::ToolSearchToolResult { .. } => "tool_search_tool_result",
+                ContentBlock::CodeExecutionToolResult { .. } => "code_execution_tool_result",
+                ContentBlock::BashCodeExecutionToolResult { .. } => {
+                    "bash_code_execution_tool_result"
+                }
+                ContentBlock::TextEditorCodeExecutionToolResult { .. } => {
+                    "text_editor_code_execution_tool_result"
+                }
+                ContentBlock::McpToolUse { .. } => "mcp_tool_use",
+                ContentBlock::McpToolResult { .. } => "mcp_tool_result",
+                ContentBlock::McpToolListing { .. } => "mcp_tool_listing",
+                ContentBlock::ToolResult { .. } => "tool_result",
+                ContentBlock::Thinking { .. } => "thinking",
+                ContentBlock::RedactedThinking { .. } => "redacted_thinking",
+            },
+        }
+    }
+
     fn finish(self, truncated: bool) -> Result<ContentBlock, ClaudeError> {
         let block = match self {
             BlockAccumulator::Text { text, extra } => ContentBlock::Text { text, extra },
@@ -1801,9 +1835,22 @@ where
                             )))
                         }
                         _ => {
-                            return Err(ClaudeError::Protocol(
-                                "message_stop before content_block_stop".into(),
-                            ));
+                            return Err(ClaudeError::Protocol(format!(
+                                "message_stop before content_block_stop: stop_reason={}, block_kind={}, block_index={index}",
+                                match message.stop_reason {
+                                    Some(StopReason::EndTurn) => "end_turn",
+                                    Some(StopReason::MaxTokens) => "max_tokens",
+                                    Some(StopReason::StopSequence) => "stop_sequence",
+                                    Some(StopReason::ToolUse) => "tool_use",
+                                    Some(StopReason::PauseTurn) => "pause_turn",
+                                    Some(StopReason::Refusal) => "refusal",
+                                    Some(StopReason::ModelContextWindowExceeded) =>
+                                        "model_context_window_exceeded",
+                                    Some(StopReason::Unknown) => "unknown",
+                                    None => "missing",
+                                },
+                                block.diagnostic_kind(),
+                            )));
                         }
                     };
                     completed.insert(index, block);
