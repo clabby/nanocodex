@@ -42,6 +42,11 @@ try:
     run(['docker','run','--detach','--privileged','--cgroupns=host','--name',name,
          '--tmpfs','/run','--tmpfs','/run/lock','--mount',f'type=bind,src={args.bin_dir.resolve()},dst=/candidate,readonly',
          '--mount','type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup',args.image])
+    # Image libraries keep the executable runnable, but the actual installer
+    # must supply the missing display and encoder through its background job.
+    inside('apt-get','remove','--yes','--no-auto-remove','ffmpeg','xvfb')
+    for binary in ['ffmpeg','Xvfb']:
+        assert inside('sh','-c','command -v '+binary,ok=False).returncode != 0
     inside('mkdir','-p','/fixture/bin','/fixture/home-a','/fixture/home-b')
     for binary in ['nanocodex','nanocodex2']:
         inside('cp','/candidate/'+binary,'/fixture/bin/'+binary)
@@ -56,7 +61,10 @@ try:
     assert record['pending_login'] is True and record['service_uid']==1000, record
     assert inside('test','-e','/opt/nanocodex/account.env',ok=False).returncode != 0
     assert public('/evidence')['live']==[], 'logged-out preparation published a Hand'
-    wait(lambda: inside('systemctl','show','nanocodex-hand-components.service','-p','ActiveState','--value').stdout.strip()=='active')
+    preparation_state=inside('systemctl','show','nanocodex-hand-components.service','-p','ActiveState','--value').stdout.strip()
+    assert preparation_state in ['activating','active'], preparation_state
+    wait(lambda: inside('systemctl','show','nanocodex-hand-components.service','-p','ActiveState','--value').stdout.strip()=='active', seconds=300)
+    inside('sh','-c','command -v ffmpeg && command -v Xvfb')
     account=json.dumps({'version':1,'accounts':{origin:{'api_key':key}}})
     inside('sh','-c',"umask 077; cat >/fixture/home-a/account.json; chown ubuntu:ubuntu /fixture/home-a/account.json",data=account)
     connect=['/fixture/bin/nanocodex','hand','connect','--account-file','/fixture/home-a/account.json','--managed-url',origin]
@@ -94,7 +102,8 @@ try:
     assert not [e for e in final['events'] if e['type']=='rejected'], final
     summary={'result':'PASS','machine_id':machine['id'],'daemon_pid':original_pid,'account_publishers':len(publishers),
              'screen_catalogs':len(screens),'service_uid':record['service_uid'],'observers':2,
-             'logged_out_background_components':True,'private_credentials':True,'ambient_key_ignored':True,
+             'logged_out_background_components':True,'initial_components_state':preparation_state,
+             'missing_desktop_packages_installed':True,'private_credentials':True,'ambient_key_ignored':True,
              'daemon_survives_clients':True,'idempotent_setup':True}
     (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     (out/'account-events.json').write_text(json.dumps(final,indent=2)+'\n')
