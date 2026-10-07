@@ -423,7 +423,15 @@ impl State {
                 result = self.call_tool(id, name, input, handler, events, cursor) => result?,
                 () = cancel.cancelled() => unknown(),
             }
-        } else if self.code_only && name != "exec" && name != "wait" {
+        } else if self.code_only
+            && name != "exec"
+            && name != "wait"
+            && cursor
+                .template
+                .tools
+                .iter()
+                .any(|tool| matches!(tool, ClaudeToolSpec::Client(tool) if tool.name == name))
+        {
             ContentBlock::tool_result_content(
                 id,
                 ToolResultContent::Text(format!(
@@ -434,9 +442,10 @@ impl State {
         } else {
             ContentBlock::tool_result_content(
                 id,
-                ToolResultContent::Text(format!(
-                    "Tool {name} is not available in the recovered host; no handler was invoked."
-                )),
+                ToolResultContent::Text(
+                    "Tool is not available in the admitted catalog or current host; no handler was invoked. Use an available tool."
+                        .into(),
+                ),
                 true,
             )
         };

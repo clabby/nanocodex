@@ -83,6 +83,12 @@ Claude snapshots use the store's chunked immutable payloads; they do not yet
 use the OpenAI adapter's per-message context pages. Snapshot serialization and
 restoration therefore process the full retained Claude context.
 
+An unfinished Claude turn keeps the tool catalog it was admitted with across
+reopening. A client call outside that catalog receives a paired `is_error`
+result without invoking a handler, so the model can continue with an available
+tool. Attaching a handler when reopening cannot authorize that call. Malformed
+responses and calls to deferred tools before discovery still fail validation.
+
 `CheckpointBranch` supports explicit host-requested history branches. Opening it
 acquires the source through `StateStore` and refuses pending operations. Select a
 retained operation with `before`, validate the provider checkpoint (Claude hosts

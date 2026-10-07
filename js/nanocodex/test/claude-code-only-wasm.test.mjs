@@ -55,7 +55,12 @@ test('Claude code-only nests native tools and canonical children, resumes cells,
     const child = !history.includes('STRICT_CLAUDE_ROOT');
     if (child) return childStep++ === 0
       ? exec('child-submit', 'text(await tools.submit_result({output:"CHILD_OK"}));') : final('Child submitted.');
-    if (stale) return { type: 'tool_use', id: 'stale-direct', name: 'Read', input: {} };
+    if (stale) {
+      const denial = body.messages.at(-1).content.find?.(block => block.tool_use_id === 'stale-direct');
+      if (!denial) return { type: 'tool_use', id: 'stale-direct', name: 'Read', input: {} };
+      assert.equal(denial.is_error, true); assert.doesNotMatch(JSON.stringify(denial.content), /Read/);
+      return final('STALE_DIRECT_DENIED');
+    }
     switch (rootStep++) {
       case 0: return exec('native-and-spawn', 'text(await tools.Read({})); text(ALL_TOOLS.map(tool=>tool.name)); const child=await tools.spawn_agent({role:"fixture",task:"STRICT_CHILD",harness:null,model:null,thinking:null,output_contract:{kind:"string"}}); store("child",child.agent_id); text(child);');
       case 1:
@@ -80,7 +85,7 @@ test('Claude code-only nests native tools and canonical children, resumes cells,
     ] });
     assert.equal((await agent.turn.prompt({ input: 'STRICT_CLAUDE_ROOT' }).result()).finalMessage, 'STRICT_CLAUDE_OK');
     stale = true;
-    await assert.rejects(agent.turn.prompt({ input: 'Reject old direct tool call' }).result(), /outside the admitted catalog/);
+    assert.equal((await agent.turn.prompt({ input: 'Reject old direct tool call' }).result()).finalMessage, 'STALE_DIRECT_DENIED');
     assert.deepEqual(effects, ['read']); assert.deepEqual(f.errors, []);
   } catch (error) { failure = error; throw error; }
   finally {

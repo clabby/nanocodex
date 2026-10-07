@@ -99,7 +99,9 @@ async fn fixture(
                     Fault::RejectedClient => {
                         let mut blocks = completed_blocks();
                         blocks.push(json!({"type":"text","text":"large provider explanation ".repeat(4_000)}));
-                        blocks.push(json!({"type":"tool_use","id":"client-not-dispatched","name":"unregistered","input":{}}));
+                        // A repeated tool_use id makes the complete response invalid.
+                        let call = json!({"type":"tool_use","id":"client-not-dispatched","name":"unregistered","input":{}});
+                        blocks.extend([call.clone(), call]);
                         ([("content-type", "text/event-stream")], completed(blocks, "tool_use")).into_response()
                     }
                     Fault::Completed => (
