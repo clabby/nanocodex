@@ -82,6 +82,8 @@ import { serverHandTool } from "./ssh-hand-setup";
 import { parseEmailResume, resumeEmailWorkflow, type EmailResumeResult } from "./email-resume";
 import { phoneControlInput } from "./phone-control";
 import { accountAdmin } from "./account-admin";
+import { adminThreadsTool, routeAdminThreads, parseAdminThreadInput, type AdminThreadInput } from "./admin-threads";
+import { listAdminAccounts, listAdminThreads } from "./account-auth";
 import { accountCommunication } from "./account-communication";
 import { routeTodoRequest } from "./todo-inbox";
 import { phoneAdminConfigured } from "./phone-admin";
@@ -1943,6 +1945,15 @@ async function managedFetchRoute(
     if (url.pathname === "/v1/router") {
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
       return routerDashboard(request, env, principal ?? undefined);
+    }
+    if (url.pathname === "/v1/admin/threads") {
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      return routeAdminThreads(request, env.NANOCODEX_ADMIN_USER_ID, principal ?? undefined, async input => {
+        if (input.operation === "accounts") return json(await listAdminAccounts(env, input));
+        if (input.operation === "list") return json(await listAdminThreads(env, input as AdminThreadInput & { owner_id: string }));
+        const response = await env.NANOCODEX_SESSIONS.getByName(input.thread_id!).inspectForAdmin(principal!.userId, input);
+        return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
+      });
     }
     if (url.pathname === "/v1/account/admin") {
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
@@ -4550,6 +4561,48 @@ export class DurableAgentSession extends DurableComputerObject {
     });
   }
 
+  /** Binding-only read surface. Operator identity comes from the guarded Worker,
+   * never an owner assertion supplied to the ordinary session routes. */
+  async inspectForAdmin(operatorId: string, raw: AdminThreadInput): Promise<{ status: number; body: string }> {
+    const reply = (status: number, body: unknown) => ({ status, body: JSON.stringify(body) });
+    if (!this.env.NANOCODEX_ADMIN_USER_ID || operatorId !== this.env.NANOCODEX_ADMIN_USER_ID)
+      return reply(403, { error: "forbidden" });
+    let input: AdminThreadInput;
+    try { input = parseAdminThreadInput(raw); } catch { return reply(400, { error: "invalid_request" }); }
+    if (input.operation !== "read" && input.operation !== "diagnostics") return reply(400, { error: "invalid_request" });
+    const session = this.#session();
+    if (!session || session.session_id !== input.thread_id || this.#deleting || this.#deleted || this.#durabilityExported
+      || this.#durabilityImportState === "pending" || session.runtime_profile !== "managed") return reply(404, { error: "not_found" });
+    console.info({ type: "managed.admin_threads.target", operator_id: operatorId, owner_id: session.owner_id,
+      thread_id: session.session_id, operation: input.operation, at: Date.now() });
+    if (input.operation === "diagnostics") return reply(200, await this.#threadDiagnostics(session, input.after_managed ?? 0, input.after_hand ?? 0, input.limit));
+    try {
+      const page = input.after === undefined
+        ? await this.#eventArchive.history(this.#eventLog, input.before, input.limit)
+        : await this.#eventArchive.historyAfter(this.#eventLog, input.after, input.limit);
+      return reply(200, { thread: { id: session.session_id, owner_id: session.owner_id,
+        organization_id: session.organization_id, team_id: session.team_id },
+        data: page.data.map(event => ({ cursor: event.cursor, created_at: event.created_at, turn_id: event.turn_id, ...event.message })),
+        has_more: page.has_more, latest_cursor: page.latest_cursor,
+        next_before: page.data[0]?.cursor ?? null, next_after: page.data.at(-1)?.cursor ?? input.after ?? null });
+    } catch { return reply(503, { error: "event_archive_unavailable" }); }
+  }
+
+  async #threadDiagnostics(session: SessionRow, managedAfter: number, handAfter: number, limit: number, signal?: AbortSignal): Promise<unknown> {
+    const managed = this.#diagnostics.page(session.session_id, managedAfter, limit, true);
+    let hand: unknown = { service: "hand.broker", available: false, events: [], next_after: handAfter, history_truncated: true };
+    try {
+      const target = new URL("https://account-tools.internal/diagnostics");
+      target.searchParams.set("thread_id", session.session_id);
+      target.searchParams.set("after", String(handAfter));
+      target.searchParams.set("limit", String(limit));
+      hand = await fetchResponseWithDeadline(this.env.NANOCODEX_ACCOUNT_TOOLS.getByName(session.owner_id), target.toString(), {
+        headers: { "x-nanocodex-owner-id": session.owner_id }, signal,
+      }, 2_000, "Hand diagnostics", response => response.ok ? response.json() : hand);
+    } catch { /* Explicit unavailable evidence; never fail the real operation. */ }
+    return { thread_id: session.session_id, services: [managed, hand] };
+  }
+
   async fetch(request: Request): Promise<Response> {
     return performanceScope(this.ctx.id.toString(), `session.${request.method} ${new URL(request.url).pathname}`,
       () => this.#measuredFetch(request));
@@ -5362,18 +5415,8 @@ export class DurableAgentSession extends DurableComputerObject {
         return json({ error: "forbidden" }, { status: 403 });
       const query = diagnosticQuery(url);
       if (!query) return json({ error: "invalid_diagnostics_page" }, { status: 400 });
-      const managed = this.#diagnostics.page(session.session_id, query.managedAfter, query.limit, true);
-      let hand: unknown = { service: "hand.broker", available: false, events: [], next_after: query.handAfter, history_truncated: true };
-      try {
-        const target = new URL("https://account-tools.internal/diagnostics");
-        target.searchParams.set("thread_id", session.session_id);
-        target.searchParams.set("after", String(query.handAfter));
-        target.searchParams.set("limit", String(query.limit));
-        hand = await fetchResponseWithDeadline(this.env.NANOCODEX_ACCOUNT_TOOLS.getByName(session.owner_id), target.toString(), {
-          headers: { "x-nanocodex-owner-id": session.owner_id }, signal: request.signal,
-        }, 2_000, "Hand diagnostics", response => response.ok ? response.json() : hand);
-      } catch { /* An unavailable service is explicit; local evidence remains readable. */ }
-      return json({ thread_id: session.session_id, services: [managed, hand] }, { headers: { "cache-control": "no-store" } });
+      return json(await this.#threadDiagnostics(session, query.managedAfter, query.handAfter, query.limit, request.signal),
+        { headers: { "cache-control": "no-store" } });
     }
     if (request.method === "GET" && url.pathname === "/events") {
       if (this.#deleting)
@@ -10619,6 +10662,28 @@ export class DurableAgentSession extends DurableComputerObject {
           }, input, context);
         },
       })),
+      ...(multiplayer || !this.env.NANOCODEX_ADMIN_USER_ID || session.owner_id !== this.env.NANOCODEX_ADMIN_USER_ID ? [] : [
+        adminThreadsTool(async (input, context) => {
+          context.signal.throwIfAborted();
+          const current = this.#session();
+          const auth = this.#authorizationForToolContext(context);
+          if (context.subagent !== undefined || !current || this.#deleting || this.#deleted || this.#durabilityExported
+            || current.owner_id !== this.env.NANOCODEX_ADMIN_USER_ID || current.owner_id !== session.owner_id
+            || current.authorization_epoch !== session.authorization_epoch || !auth || auth.connectGrant || auth.guestShareLinkId
+            || !(["agents:read", "history:read", "tools:use"] as const).every(capability => auth.capabilities.includes(capability)))
+            throw new ManagedRequestError(403, "forbidden", "admin_threads requires the configured administrator's direct root agent and read capabilities");
+          const principal: Principal = { kind: "account_session", userId: current.owner_id,
+            organizationId: current.organization_id, teamId: current.team_id, authorizationEpoch: current.authorization_epoch,
+            role: "owner", subjectId: `user:${current.owner_id}`, credentialId: `admin-tool:${context.callId}`, capabilities: auth.capabilities };
+          const query = new URLSearchParams(Object.entries(input).map(([key, value]) => [key, String(value)]));
+          const response = await managedFetch(new Request(new URL(`/v1/admin/threads?${query}`, session.public_origin), { signal: context.signal }),
+            this.env, this.ctx, principal, this.#routingOrigin().clientIngressColo);
+          if (!response.ok) { await response.body?.cancel(); throw new ManagedRequestError(response.status, "admin_threads_failed", "Thread inspection failed; check the account, thread and page cursor."); }
+          const result = await response.json();
+          context.signal.throwIfAborted();
+          return result;
+        }),
+      ]),
       ...(multiplayer ? [] : this.#memoryTools()),
       ...(multiplayer ? [] : [createVaultIntakeTool(context => this.#authorizeVaultTool(context)),
         createVaultRequestTool(this.env.NANOCODEX, () => this.#credentialSubject(), context => this.#authorizeVaultTool(context)),

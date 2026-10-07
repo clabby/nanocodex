@@ -17,7 +17,7 @@ import { configurationCatalog } from "./agent-configuration";
 import { performanceState } from "./performance";
 import { MANAGED_ACCESS_HEADER, managedAccessRequest, readManagedAccess, observeManagedAccess } from "./managed-access";
 import { DurableObject } from "cloudflare:workers";
-import { fetchResponseWithDeadline } from "./deadline";
+import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { Handler, Kv } from "accounts/server";
 import { Address, PublicKey } from "ox";
 import {
@@ -83,6 +83,47 @@ export class NonceStorage extends DurableObject<unknown> {
   constructor(private readonly smsState: DurableObjectState, env: unknown) {
     super(smsState, env);
     this.nonce = new Kv.NonceStorage(smsState as unknown as Kv.NonceStorage.State, env);
+  }
+
+  /** Internal-only discovery projection; callers enforce platform-admin authority. */
+  async adminAccountPage(source: string, after: string | undefined, limit: number): Promise<{ data: string[]; next?: string }> {
+    const prefixes: Record<string, string> = { directory: "admin-account:", sms: "identity:", webauthn: "credential:", address: "address:" };
+    if (!Object.hasOwn(prefixes, source) || !Number.isSafeInteger(limit) || limit < 1 || limit > 100
+      || (after !== undefined && !isUuid(after))) throw new TypeError("invalid_admin_page");
+    const prefix = prefixes[source]!;
+    this.smsState.storage.sql.exec(`CREATE TABLE IF NOT EXISTS admin_page_cursors (
+      id TEXT PRIMARY KEY, source TEXT NOT NULL, position TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS admin_page_expiry ON admin_page_cursors(expires_at);`);
+    this.smsState.storage.sql.exec("DELETE FROM admin_page_cursors WHERE expires_at <= ?", Date.now());
+    const position = after ? this.smsState.storage.sql.exec<{ source: string; key: string }>(
+      "SELECT source, position AS key FROM admin_page_cursors WHERE id=?", after).toArray()[0] : undefined;
+    if (after && (!position || position.source !== source)) throw new TypeError("invalid_admin_cursor");
+    const rows = await this.smsState.storage.list<{ value: unknown; expiresAt?: number }>({ prefix, ...(position ? { startAfter: position.key } : {}), limit: limit + 1 });
+    const entries = [...rows.entries()].slice(0, limit);
+    const data = new Set<string>();
+    for (const [key, entry] of entries) {
+      if (entry.expiresAt !== undefined && entry.expiresAt <= Date.now()) continue;
+      const value = entry.value;
+      let id: unknown;
+      if (source === "directory" || source === "address") id = key.slice(prefix.length);
+      else if (source === "sms" && isSmsIdentity(value)) id = value.userId;
+      else if (source === "webauthn" && isStoredWebAuthnCredential(value)) id = decodeUserId((value as { userId: string }).userId);
+      if (isUserId(id)) data.add(id);
+    }
+    let next: string | undefined;
+    if (rows.size > limit) {
+      next = crypto.randomUUID();
+      // Keep opaque positions private: source keys can contain phone hashes or credential IDs.
+      this.smsState.storage.sql.exec("INSERT INTO admin_page_cursors(id,source,position,expires_at) VALUES(?,?,?,?)",
+        next, source, entries.at(-1)![0], Date.now() + 3_600_000);
+      this.smsState.storage.sql.exec("DELETE FROM admin_page_cursors WHERE id IN (SELECT id FROM admin_page_cursors ORDER BY expires_at DESC,id DESC LIMIT -1 OFFSET 1000)");
+    }
+    return { data: [...data], ...(next ? { next } : {}) };
+  }
+
+  async registerAdminAccount(userId: string): Promise<void> {
+    if (!isUserId(userId)) throw new Error("invalid account identity");
+    await this.smsState.storage.put(`admin-account:${userId}`, { value: true });
   }
 
   // Preserve the existing SDK storage envelope and expiry/revocation semantics,
@@ -1184,6 +1225,54 @@ export async function listAgents(env: AccountAuthEnv, userId: string): Promise<A
   return response.json<AgentSummary[]>();
 }
 
+/** Internal service helpers. These do not authenticate; invoke only after the admin tool gate. */
+export async function listAdminAccounts(env: AccountAuthEnv, input: { cursor?: string; limit?: number } = {}) {
+  const limit = input.limit ?? 50;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError("invalid_admin_page");
+  const sources = ["directory", "sms", "webauthn", "address"];
+  const names = ["admin-directory", "sms-otp", "webauthn", "account"];
+  let source = 0, after: string | undefined;
+  if (input.cursor !== undefined) {
+    if (input.cursor.length > 2048) throw new TypeError("invalid_admin_cursor");
+    try {
+      const parsed = JSON.parse(atob(input.cursor));
+      if (!Array.isArray(parsed) || parsed.length !== 2 || !Number.isInteger(parsed[0]) || parsed[0] < 0 || parsed[0] > 3
+        || (parsed[1] !== null && typeof parsed[1] !== "string")) throw new Error();
+      source = parsed[0]; after = parsed[1] ?? undefined;
+    } catch { throw new TypeError("invalid_admin_cursor"); }
+  }
+  const page = await env.NANOCODEX_AUTH.get(env.NANOCODEX_AUTH.idFromName(names[source]!)).adminAccountPage(sources[source]!, after, limit);
+  const next = page.next !== undefined ? [source, page.next] : source < 3 ? [source + 1, null] : undefined;
+  return { data: page.data.map(owner_id => ({ owner_id })), next_cursor: next ? btoa(JSON.stringify(next)) : null,
+    coverage: { complete: false, sources: ["registered_accounts", "sms_identities", "webauthn_credentials", "account_addresses"],
+      limitation: "Legacy anonymous accounts without retained identity records are not discoverable. Accounts may repeat across source pages; deduplicate by owner_id." } };
+}
+
+export async function listAdminThreads(env: AccountAuthEnv, input: { owner_id: string; cursor?: string; limit?: number }) {
+  if (!isUserId(input.owner_id)) throw new TypeError("invalid_account_identity");
+  const limit = input.limit ?? 32;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError("invalid_admin_page");
+  let after: string | undefined;
+  if (input.cursor !== undefined) {
+    try {
+      if (input.cursor.length > 2048) throw new TypeError();
+      const cursor = JSON.parse(atob(input.cursor));
+      if (!Array.isArray(cursor) || cursor.length !== 2 || cursor[0] !== input.owner_id || !isUuid(cursor[1])) throw new TypeError();
+      after = cursor[1];
+    } catch { throw new TypeError("invalid_admin_cursor"); }
+  }
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (after) query.set("after", after);
+  const response = await env.NANOCODEX_USERS.getByName(input.owner_id).fetch(`https://user.internal/admin-threads?${query}`);
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (response.status === 404) throw Object.assign(new Error("account_not_found"), { status: 404 });
+    throw new Error("admin_thread_listing_failed");
+  }
+  const page = await response.json<{ data: AgentSummary[]; next_cursor: string | null }>();
+  return { ...page, owner_id: input.owner_id, next_cursor: page.next_cursor ? btoa(JSON.stringify([input.owner_id, page.next_cursor])) : null };
+}
+
 export async function attachAgent(
   env: AccountAuthEnv,
   userId: string,
@@ -1654,7 +1743,10 @@ export async function ensureAccount(
     "account provisioning",
     (response) => response.status,
   );
-  if (status >= 200 && status < 300) return;
+  if (status >= 200 && status < 300) {
+    await withHardDeadline("account directory", 1000, () => env.NANOCODEX_AUTH.get(env.NANOCODEX_AUTH.idFromName("admin-directory")).registerAdminAccount(userId)).catch(() => { /* Discovery must not prevent account access; coverage remains explicitly partial. */ });
+    return;
+  }
   if (status === 409) {
     const current = await fetchResponseWithDeadline(
       accountStub,
@@ -1664,7 +1756,10 @@ export async function ensureAccount(
       "account provisioning verification",
       (response) => response.ok ? response.json<UserRecord>() : undefined,
     );
-    if (current?.id === userId && (current.persistent || !persistent)) return;
+    if (current?.id === userId && (current.persistent || !persistent)) {
+      await withHardDeadline("account directory", 1000, () => env.NANOCODEX_AUTH.get(env.NANOCODEX_AUTH.idFromName("admin-directory")).registerAdminAccount(userId)).catch(() => { /* Discovery must not prevent account access; coverage remains explicitly partial. */ });
+      return;
+    }
   }
   throw new Error("account provisioning failed");
 }
@@ -2291,6 +2386,20 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
       ).toArray()[0];
       return row?.deleted_at === null ? new Response(null, { status: 204 })
         : json({ error: "agent_deleted" }, { status: 410 });
+    }
+    if (url.pathname === "/admin-threads") {
+      if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (!await this.readAccount()) return json({ error: "not_found" }, { status: 404 });
+      const raw = url.searchParams.get("limit") ?? "50", after = url.searchParams.get("after");
+      const limit = Number(raw);
+      if (!/^[1-9][0-9]{0,2}$/.test(raw) || limit > 100 || (after !== null && !isUuid(after))
+        || [...url.searchParams.keys()].some(key => !["limit", "after"].includes(key) || url.searchParams.getAll(key).length !== 1))
+        return json({ error: "invalid_admin_page" }, { status: 400 });
+      const rows = this.ctx.storage.sql.exec<AgentRegistryRow>(
+        `SELECT id, title, created_at, updated_at, turn_count, deleted_at, cron_candidate, presentation
+         FROM agent_registry WHERE deleted_at IS NULL AND id > ? ORDER BY id LIMIT ?`, after ?? "", limit + 1,
+      ).toArray();
+      return json({ data: rows.slice(0, limit).map(agentSummary), next_cursor: rows.length > limit ? rows[limit - 1]!.id : null });
     }
     if (url.pathname === "/agents") {
       if (request.method === "GET") {

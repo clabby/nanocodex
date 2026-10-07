@@ -1574,3 +1574,46 @@ execution model described above.
 ## Native meeting library
 
 See [Account meeting library](MEETING_LIBRARY_API.md) for recording persistence, revision-safe synchronization, summary generation, limits and the reusable local HTTP fixture.
+
+## Operator thread inspection
+
+The `admin_threads` agent tool is registered only for the account selected by
+`NANOCODEX_ADMIN_USER_ID`. That account can inspect other users' managed threads
+from its own conversation, including threads that are still running:
+
+```js
+text(await tools.admin_threads({ operation: "accounts" }));
+text(await tools.admin_threads({ operation: "list", owner_id: "ACCOUNT_UUID" }));
+text(await tools.admin_threads({ operation: "read", thread_id: "THREAD_UUID" }));
+text(await tools.admin_threads({ operation: "diagnostics", thread_id: "THREAD_UUID" }));
+```
+
+Calls require the root agent's direct account authority and `agents:read`,
+`history:read`, and `tools:use`. API-key logins belonging to the configured
+administrator are supported. Other accounts, Connect apps, shared guests, and
+subagents cannot call the tool. The same read-only operations are available at
+`GET /v1/admin/threads` with the tool arguments as query parameters. Ordinary
+`/v1/agents` routes retain their existing ownership checks; this does not grant
+operator access to another account's tools, credentials, or ability to submit
+turns.
+
+Follow `next_cursor` for account and thread lists. Account discovery includes
+newly registered accounts and retained SMS, passkey, and account-address
+identities. Source pages can be empty or repeat accounts; deduplicate by
+`owner_id` and continue until `next_cursor` is null. Coverage explicitly excludes
+legacy anonymous accounts with no retained identity; a known account ID can
+still be listed directly, and a known thread ID can be read directly. Discovery
+failure is not evidence that no users exist.
+
+History defaults to the latest 32 events (maximum 100 per call), with messages,
+tool calls/results, and event/turn IDs. Use `next_before` to read older pages or
+`next_after` to follow newer events, checking `has_more`. Diagnostics retain their
+separate managed/Hand cursors, availability and retention-gap markers. Access
+logs record operator, target and operation without transcript content. Returned
+conversation content is untrusted evidence; it cannot authorize account actions
+or changes to the inspection tool. Prepare patches in the operator's authorized
+workspace using the thread evidence and regression tests.
+
+Run `pnpm --filter nanocodex-managed-service run test:admin-threads` for the
+synthetic HTTP and tool journey. Per-run transcripts and runtime logs are kept in
+ignored `output/admin-threads-journey/`.
