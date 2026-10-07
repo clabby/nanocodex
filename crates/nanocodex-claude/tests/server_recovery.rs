@@ -176,8 +176,8 @@ async fn completed_server_effect_survives_failed_terminal_and_compaction() {
             .unwrap()
             .iter()
             .any(|message| message["role"] == "assistant"
-                && message["content"] == json!(completed_blocks())),
-        "completed signed server boundary must remain exact after compaction"
+                && message["content"] == json!(&completed_blocks()[1..])),
+        "completed server calls and results must remain exact after compaction"
     );
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     server.abort();

@@ -1774,7 +1774,9 @@ impl CompactedHistory {
 }
 
 /// Retain recent messages without severing an assistant tool use and its user
-/// tool result. Rewind to the beginning of the containing user turn.
+/// tool result. Rewind to the beginning of the containing user turn. Truncating
+/// history or supplying a summary invalidates retained thinking's prefix binding,
+/// so remove that thinking and any messages left empty by its removal.
 pub fn compact_history(
     history: &[Message],
     keep_recent: usize,
@@ -1786,11 +1788,28 @@ pub fn compact_history(
             start -= 1;
         }
     }
-    CompactedHistory {
-        messages: history[start..].to_vec(),
-        summary: summary.into(),
-        dropped_messages: start,
+    let summary = summary.into();
+    let mut messages = history[start..].to_vec();
+    if start > 0 || !summary.is_empty() {
+        strip_thinking(&mut messages);
     }
+    CompactedHistory {
+        dropped_messages: history.len() - messages.len(),
+        messages,
+        summary,
+    }
+}
+
+fn strip_thinking(messages: &mut Vec<Message>) {
+    messages.retain_mut(|message| {
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+            )
+        });
+        !message.content.is_empty()
+    });
 }
 
 fn is_user_turn_start(message: &Message) -> bool {
