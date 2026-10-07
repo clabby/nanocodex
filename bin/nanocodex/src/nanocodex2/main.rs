@@ -119,7 +119,7 @@ const SYSTEM_HOST_TOKEN_ENV: &str = "NANOCODEX_SYSTEM_HOST_TOKEN";
     name = "nanocodex2",
     version = version::SHORT_VERSION,
     long_version = version::LONG_VERSION,
-    about = "Small managed Nanocodex client with local workspace tools"
+    about = "Nanocodex terminal client connected to the background machine Hand"
 )]
 struct Cli {
     /// Opt in to the separate Managed2 API (limited text sessions in the standard TUI).
@@ -148,7 +148,7 @@ enum Command {
     Vault(vault::Vault),
     /// Manage connected accounts directly.
     Connectors(connectors::Connectors),
-    /// Attach this machine's workspace to an existing managed agent.
+    /// Attach a terminal session to an existing managed agent.
     Attach(Attach),
     /// Connect this computer as a Hand; optionally run a VM or Docker Hand.
     Hand(Hand),

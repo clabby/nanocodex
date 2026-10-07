@@ -287,12 +287,140 @@ mod linux {
         Ok(())
     }
 
+    // Never borrow another user's session, or overwrite an explicitly selected bus.
+    #[cfg(unix)]
+    fn infer_bus(
+        command: &mut Command,
+        runtime: Option<std::ffi::OsString>,
+        bus: Option<std::ffi::OsString>,
+        uid: u32,
+        fallback: &Path,
+    ) -> Result<()> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if bus.as_ref().is_some_and(|value| !value.is_empty()) {
+            return Ok(());
+        }
+        let runtime = runtime.filter(|value| !value.is_empty());
+        let directory = runtime
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| fallback.into());
+        if !directory.is_absolute() {
+            return Ok(());
+        }
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+            return Ok(());
+        }
+        let socket = directory.join("bus");
+        let metadata = match fs::symlink_metadata(&socket) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_socket() || metadata.uid() != uid {
+            return Ok(());
+        }
+        // D-Bus address values use percent escaping, independently of shell quoting.
+        let mut address = String::from("unix:path=");
+        use std::os::unix::ffi::OsStrExt;
+        for byte in socket.as_os_str().as_bytes() {
+            if byte.is_ascii_alphanumeric() || b"/._-".contains(byte) {
+                address.push(*byte as char);
+            } else {
+                address.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        command.env("DBUS_SESSION_BUS_ADDRESS", address);
+        if runtime.is_none() {
+            command.env("XDG_RUNTIME_DIR", directory);
+        }
+        Ok(())
+    }
+
     fn systemctl(arguments: &[&str]) -> Result<Output> {
-        Command::new("systemctl")
+        let mut command = Command::new("systemctl");
+        #[cfg(unix)]
+        {
+            let uid = nix::unistd::geteuid().as_raw();
+            infer_bus(
+                &mut command,
+                std::env::var_os("XDG_RUNTIME_DIR"),
+                std::env::var_os("DBUS_SESSION_BUS_ADDRESS"),
+                uid,
+                &PathBuf::from(format!("/run/user/{uid}")),
+            )?;
+        }
+        command
             .arg("--user")
             .args(arguments)
+            .env("LC_ALL", "C")
             .output()
             .wrap_err("Could not run the user systemd manager")
+    }
+
+    fn manager_unavailable(output: &Output) -> bool {
+        if output.status.success() {
+            return false;
+        }
+        // Only absence is optional. Access denied, malformed units, missing systemctl,
+        // and all other failures still surface to the caller.
+        String::from_utf8_lossy(&output.stderr).lines().any(|line| {
+            (line.starts_with("Failed to connect to bus:")
+                || line.starts_with("Failed to connect to user scope bus via local transport:"))
+                && (line.ends_with("No medium found")
+                    || line.ends_with("No such file or directory")
+                    || line.contains("$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined"))
+        })
+    }
+
+    fn enable_offline(home: &Path) -> Result<()> {
+        let (_, timer) = paths(home);
+        let wants = timer
+            .parent()
+            .expect("unit directory")
+            .join("timers.target.wants");
+        fs::create_dir_all(&wants)?;
+        if !fs::symlink_metadata(&wants)?.is_dir() {
+            bail!("refusing non-directory automatic update enablement path");
+        }
+        let link = wants.join(TIMER);
+        if entry_exists(&link)? {
+            if fs::read_link(&link)? != timer {
+                bail!("refusing conflicting automatic update enablement link");
+            }
+        } else {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&timer, &link)?;
+            #[cfg(not(unix))]
+            bail!("systemd offline enablement requires Unix");
+        }
+        Ok(())
+    }
+
+    fn activate(home: &Path) -> Result<()> {
+        let reload = systemctl(&["daemon-reload"])?;
+        if reload.status.success() {
+            checked(&["enable", "--now", TIMER], "enable automatic updates")?;
+            println!("Automatic updates enabled every hour.");
+        } else if manager_unavailable(&reload) {
+            // systemctl --user enable still requires a bus on some systemd versions,
+            // even with --no-reload. Install this owned timer's WantedBy link directly.
+            enable_offline(home)?;
+            println!(
+                "Automatic updates enabled for the next user login; user systemd manager unavailable, timer not started."
+            );
+        } else {
+            bail!(
+                "Could not reload user systemd units: {}",
+                String::from_utf8_lossy(&reload.stderr).trim()
+            );
+        }
+        Ok(())
     }
 
     fn checked(arguments: &[&str], operation: &str) -> Result<()> {
@@ -311,8 +439,11 @@ mod linux {
             return Ok(());
         }
         let home = home()?;
-        let (_, timer) = paths(&home);
-        if should_install_default(root, &timer)? {
+        if existing(root, &home)? {
+            // A previous attempt may have written the units but failed before enable.
+            // Reuse the validated units verbatim, preserving their channel.
+            activate(&home)?;
+        } else {
             configure(AutoUpdate::Enable, root, nightly)?;
         }
         Ok(())
@@ -327,8 +458,45 @@ mod linux {
         let installed = existing(root, &home)?;
         match action {
             AutoUpdate::Status => {
-                let enabled = systemctl(&["is-enabled", TIMER])?.status.success();
-                let active = systemctl(&["is-active", TIMER])?.status.success();
+                let active_output = systemctl(&["is-active", TIMER])?;
+                let (enabled, active) = if manager_unavailable(&active_output) {
+                    let link = timer_path
+                        .parent()
+                        .expect("unit directory")
+                        .join("timers.target.wants")
+                        .join(TIMER);
+                    let enabled = if entry_exists(&link)? {
+                        fs::canonicalize(&link)? == fs::canonicalize(&timer_path)?
+                    } else {
+                        false
+                    };
+                    (enabled, "unavailable (no user systemd manager)".to_owned())
+                } else {
+                    let state = String::from_utf8_lossy(&active_output.stdout)
+                        .trim()
+                        .to_owned();
+                    if !active_output.status.success()
+                        && !matches!(state.as_str(), "inactive" | "failed" | "unknown")
+                    {
+                        bail!(
+                            "Could not inspect automatic update activity: {}",
+                            String::from_utf8_lossy(&active_output.stderr).trim()
+                        );
+                    }
+                    let output = systemctl(&["is-enabled", TIMER])?;
+                    if !output.status.success()
+                        && !matches!(
+                            String::from_utf8_lossy(&output.stdout).trim(),
+                            "disabled" | "masked" | "not-found"
+                        )
+                    {
+                        bail!(
+                            "Could not inspect automatic update enablement: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        );
+                    }
+                    (output.status.success(), state)
+                };
                 println!(
                     "Automatic updates: configured={installed}, enabled={enabled}, active={active}\nTimer: {}",
                     timer_path.display()
@@ -341,23 +509,174 @@ mod linux {
                 }
                 save(&service_path, &render_service(root, &home, nightly)?)?;
                 save(&timer_path, &render_timer())?;
-                checked(&["daemon-reload"], "reload user systemd units")?;
-                checked(&["enable", "--now", TIMER], "enable automatic updates")?;
+                activate(&home)?;
                 clear_opt_out(root)?;
-                println!("Automatic updates enabled every hour (nightly={nightly}).");
             }
             AutoUpdate::Disable => {
                 record_opt_out(root)?;
                 if installed {
-                    checked(&["disable", "--now", TIMER], "disable automatic updates")?;
+                    let output = systemctl(&["disable", "--now", TIMER])?;
+                    if manager_unavailable(&output) {
+                        let link = timer_path
+                            .parent()
+                            .expect("unit directory")
+                            .join("timers.target.wants")
+                            .join(TIMER);
+                        if entry_exists(&link)? {
+                            let target = fs::read_link(&link)?;
+                            let target = if target.is_absolute() {
+                                target
+                            } else {
+                                link.parent().expect("enablement directory").join(target)
+                            };
+                            if fs::canonicalize(target)? != fs::canonicalize(&timer_path)? {
+                                bail!("refusing conflicting automatic update enablement link");
+                            }
+                            fs::remove_file(link)?;
+                        }
+                    } else if !output.status.success() {
+                        bail!(
+                            "Could not disable automatic updates: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        );
+                    }
                     fs::remove_file(timer_path)?;
                     fs::remove_file(service_path)?;
-                    checked(&["daemon-reload"], "reload user systemd units")?;
+                    if output.status.success() {
+                        checked(&["daemon-reload"], "reload user systemd units")?;
+                    }
                 }
                 println!("Automatic updates disabled.");
             }
         }
         Ok(())
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    mod tests {
+        use super::*;
+        use std::os::unix::{
+            fs::{PermissionsExt, symlink},
+            net::UnixListener,
+        };
+
+        #[test]
+        fn bus_inference_requires_private_same_uid_socket_and_preserves_explicit_session() {
+            let directory = tempfile::tempdir().unwrap();
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let socket = directory.path().join("bus");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let uid = nix::unistd::geteuid().as_raw();
+            let inferred = |runtime, bus, owner| {
+                let mut command = Command::new("systemctl");
+                infer_bus(&mut command, runtime, bus, owner, directory.path()).unwrap();
+                command
+                    .get_envs()
+                    .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+                    .collect::<Vec<_>>()
+            };
+            let env = inferred(None, None, uid);
+            assert_eq!(env.len(), 2);
+            assert!(env.iter().any(|(key, value)| key == "XDG_RUNTIME_DIR"
+                && value.as_deref() == Some(directory.path().as_os_str())));
+            assert!(inferred(None, Some("unix:path=/explicit/bus".into()), uid).is_empty());
+            assert_eq!(
+                inferred(Some(directory.path().as_os_str().into()), None, uid).len(),
+                1
+            );
+            assert!(inferred(None, None, uid + 1).is_empty());
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(inferred(None, None, uid).is_empty());
+            fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            drop(listener);
+            fs::remove_file(&socket).unwrap();
+            fs::write(&socket, "not a bus").unwrap();
+            assert!(inferred(None, None, uid).is_empty());
+            fs::remove_file(&socket).unwrap();
+            symlink("elsewhere", &socket).unwrap();
+            assert!(inferred(None, None, uid).is_empty());
+        }
+
+        #[test]
+        fn malformed_explicit_bus_is_an_error_not_an_offline_manager() {
+            let output = Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .env("DBUS_SESSION_BUS_ADDRESS", "not-a-valid-dbus-address")
+                .env("LC_ALL", "C")
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(
+                !manager_unavailable(&output),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Real systemctl, isolated in a child to avoid changing the test runner's
+        // environment or contacting the host's user manager. No service is started.
+        #[test]
+        fn offline_install_repairs_owned_units_and_preserves_channel() {
+            const CHILD: &str = "NANOCODEX_TEST_OFFLINE_UPDATER";
+            if std::env::var_os(CHILD).is_none() {
+                let directory = tempfile::tempdir().unwrap();
+                let output = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "update::automatic::linux::tests::offline_install_repairs_owned_units_and_preserves_channel", "--nocapture"])
+                    .env(CHILD, "1").env("HOME", directory.path())
+                    .env("XDG_CONFIG_HOME", directory.path().join(".config"))
+                    .env("XDG_RUNTIME_DIR", directory.path().join("absent"))
+                    .env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}/absent/bus", directory.path().display()))
+                    .env_remove("SYSTEMD_UNIT_PATH")
+                    .output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("timer not started"));
+                return;
+            }
+            let home = home().unwrap();
+            let root = home.join("install");
+            fs::create_dir_all(root.join("updater")).unwrap();
+            fs::write(root.join("updater/nanocodex"), "unused").unwrap();
+            configure(AutoUpdate::Enable, &root, true).unwrap();
+            configure(AutoUpdate::Status, &root, false).unwrap();
+            let (service, timer) = paths(&home);
+            let link = timer
+                .parent()
+                .unwrap()
+                .join("timers.target.wants")
+                .join(TIMER);
+            assert_eq!(fs::canonicalize(&link).unwrap(), timer);
+            // Reproduce a previously written but not enabled installation.
+            fs::remove_file(&link).unwrap();
+            ensure_default(&root, false).unwrap();
+            assert_eq!(fs::canonicalize(&link).unwrap(), timer);
+            assert_eq!(
+                fs::read_to_string(&service).unwrap(),
+                render_service(&root, &home, true).unwrap()
+            );
+            ensure_default(&root, false).unwrap();
+            record_opt_out(&root).unwrap();
+            fs::remove_file(&link).unwrap();
+            ensure_default(&root, false).unwrap();
+            assert!(!entry_exists(&link).unwrap());
+            clear_opt_out(&root).unwrap();
+            // Disabling an offline timer must remove its next-login activation.
+            ensure_default(&root, false).unwrap();
+            configure(AutoUpdate::Disable, &root, false).unwrap();
+            assert!(!entry_exists(&link).unwrap());
+            assert!(!entry_exists(&timer).unwrap());
+            configure(AutoUpdate::Enable, &root, true).unwrap();
+            fs::remove_file(&link).unwrap();
+            // A conflicting enable link is a real failure, not an offline success.
+            fs::write(&link, "foreign").unwrap();
+            assert!(ensure_default(&root, false).is_err());
+            fs::remove_file(&link).unwrap();
+            fs::write(&service, "foreign unit").unwrap();
+            assert!(ensure_default(&root, false).is_err());
+        }
     }
 }
 
