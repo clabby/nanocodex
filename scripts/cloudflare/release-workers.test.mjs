@@ -5,7 +5,7 @@ import { existsSync, writeFileSync, readFileSync, statSync, mkdtempSync, rmSync 
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DeploymentLedgerError } from './deployment-ledger.mjs';
-import { releaseWorkers, releasePhases, prepareReleasePhase, guardedCommand, accountHealth } from './release-workers.mjs';
+import { releaseWorkers, releasePhases, prepareReleasePhase, guardedCommand, accountHealth, AccountHealthError } from './release-workers.mjs';
 function fixture(selected, overrides = {}) {
   const events = [], calls = [];
   const plan = { revision: 'b'.repeat(40), selected, fingerprints: Object.fromEntries(selected.map(name => [name, 'a'.repeat(64)])) };
@@ -340,4 +340,56 @@ test('freshness and completion failures retain safe stage diagnostics and block 
   };
   await assert.rejects(completion.release(), /managed completion receipt: .*GitHub HTTP 403/);
   assert.equal(completion.calls.length, 1);
+});
+
+test('health classifications retain strict checks without echoing remote data', async () => {
+  const valid={service:'nanocodex',runtime:'cloudflare-workers',status:'ok',deployment_sha:'b'.repeat(40)};
+  const cases=[
+    [new Response('SECRET_BODY',{status:503}),'http_status'],
+    [new Response('SECRET_INVALID_JSON'),'invalid_json'],
+    [Response.json(null),'invalid_shape'],
+    [Response.json({...valid,service:'SECRET_SERVICE'}),'service_mismatch'],
+    [Response.json({...valid,runtime:'SECRET_RUNTIME'}),'runtime_mismatch'],
+    [Response.json({...valid,status:'SECRET_STATUS'}),'status_mismatch'],
+    [Response.json({...valid,deployment_sha:null}),'revision_missing'],
+    [Response.json({...valid,deployment_sha:'SECRET_REVISION'}),'revision_mismatch'],
+  ];
+  for(const [response,category] of cases){
+    await assert.rejects(accountHealth(valid.deployment_sha,{request:async()=>response}),error=>{
+      assert.equal(error.category,category);assert.ok(!error.message.includes('SECRET'));return true;
+    });
+  }
+  for(const name of ['TimeoutError','Error']){
+    await assert.rejects(accountHealth(undefined,{request:async()=>{throw Object.assign(new Error('SECRET_NETWORK'),{name});}}),error=>{
+      assert.equal(error.category,name==='TimeoutError'?'timeout':'network');assert.ok(!error.message.includes('SECRET'));return true;
+    });
+  }
+  await accountHealth(valid.deployment_sha,{request:async()=>Response.json(valid)});
+});
+
+test('health annotation uses private fixed detail even after public fields change', async () => {
+  const error=new AccountHealthError('http_status',503);
+  error.message='SECRET_MESSAGE';error.category='SECRET_CATEGORY';error.httpStatus='SECRET_STATUS';
+  const messages=[];const original=console.error;console.error=(line)=>messages.push(line);
+  try{
+    const f=fixture(['account'],{health:async()=>{throw error;}});
+    await assert.rejects(f.release(),/Release phase failed/);
+    assert.ok(f.events.some(row=>row[0]==='failure'&&row[1]==='account'));
+    assert.ok(messages.some(line=>line.includes('HTTP 503')));
+    assert.ok(messages.every(line=>!line.includes('SECRET')));
+  }finally{console.error=original;}
+});
+
+test('health check classifies actual HTTP and stalled body failures', async () => {
+  const {createServer}=await import('node:http');
+  const server=createServer((req,res)=>{
+    if(req.url==='/stall'){res.writeHead(200,{'content-type':'application/json'});res.write('{');return;}
+    res.writeHead(502);res.end('SECRET_UPSTREAM_BODY');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const origin=`http://127.0.0.1:${server.address().port}`;
+  try{
+    await assert.rejects(accountHealth(undefined,{url:origin,timeoutMs:1000}),e=>e.category==='http_status'&&e.httpStatus===502&&!e.message.includes('SECRET'));
+    await assert.rejects(accountHealth(undefined,{url:origin+'/stall',timeoutMs:50}),e=>e.category==='timeout');
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
