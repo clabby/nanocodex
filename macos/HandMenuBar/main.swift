@@ -125,7 +125,10 @@ struct MenuPresentation {
             canRestart: !busy && failure == nil && localKnown && running,
             canSignIn: !busy && !signingIn && ["signed_out", "expired"].contains(accountState),
             stop: local?.loaded == true,
-            warning: failure != nil || (!checking && (local?.error != nil || ["expired", "network_error", "permission_denied", "unknown"].contains(accountState) || ["partial", "network_error", "permission_denied", "unknown"].contains(status?.inventory.state ?? "unknown"))))
+            // Checking is not evidence that the last observed warning cleared.
+            // Keep it until a new observation succeeds; initial checking has
+            // no prior observation to warn about.
+            warning: failure != nil || ((status != nil || !checking) && (local?.error != nil || ["expired", "network_error", "permission_denied", "unknown"].contains(accountState) || ["partial", "network_error", "permission_denied", "unknown"].contains(status?.inventory.state ?? "unknown"))))
     }
 
     private static func resource(_ hand: HandStatus.Inventory.Hand, complete: Bool) -> String {
@@ -246,7 +249,7 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Quit Hand", #selector(quitHand), enabled: !quitting && signInScript == nil && (!busy || pendingOperation == "menu-status"))
         updateMenu(menu, from: next)
         item?.button?.toolTip = view.summary.joined(separator: "\n")
-        item?.button?.setAccessibilityLabel("Nanocodex Hand · " + view.summary.dropFirst().joined(separator: ". "))
+        item?.button?.setAccessibilityLabel("Nanocodex Hand · " + (view.warning ? "Warning · " : "") + view.summary.dropFirst().joined(separator: ". "))
         item?.button?.image = NSImage(systemSymbolName: view.warning ? "exclamationmark.triangle" : "hand.raised.fill", accessibilityDescription: "Nanocodex Hand")
         item?.button?.image?.isTemplate = true
     }

@@ -28,23 +28,29 @@ closing the menu. `nanocodex hand menu-bar` installs, repairs, or reopens the ic
 See the [menu-bar companion](../../macos/HandMenuBar/README.md) for build and lifecycle
 details.
 
-The account-only `GET /v1/account/hands/inventory` combines retained account
-registrations with workspace publishers registered when their sessions hydrate
-or update their catalogs. Transient publication failures retry up to three times
-with a bounded deadline, without reconnecting the Hand. It excludes
-Connect-scoped routes and returns only
-names, IDs, kind and connection state. Discovery has a four-second deadline and
-eight concurrent workspace reads. Unavailable sources retain known identities
-as unknown. Definitively disconnected workspace publishers disappear; owner-verified
-deleted-session tombstones also reclaim their registry slots. Account-owned
-offline devices remain retained. Session publications are serialized, and polling
-prunes only the registry revision it read, protecting concurrent reconnects.
-The 64-session bound applies to retained live or uncertain sessions; overflow
-remains durably partial because rejected publishers may not have republished.
-A full registry marks coverage partial rather than
-silently presenting an incomplete list as complete. Older workspace sessions
-join this registry when next opened. Existing `/v1/account/hands` consumers
-retain their live-only contract; screen advertisements remain a separate source.
+The account-only `GET /v1/account/hands/inventory` combines live and retained
+account registrations. It excludes thread-local tool hosts and Connect-scoped
+routes and returns only names, IDs, kind and connection state. Discovery has a
+four-second deadline. Unavailable account sources retain known identities as
+unknown and mark the inventory incomplete; account-owned offline devices remain
+retained. The obsolete workspace registry and its overflow marker are removed
+when an account broker starts. The response retains the legacy
+`known_account_and_workspace` coverage token for released clients, while its
+data contains only account Hands. Existing `/v1/account/hands` consumers retain
+their live-only contract; screen advertisements remain a separate source.
+
+Both `nanocodex hand` and `nanocodex2 hand` expose `list`, `forget <id>`, and
+`prune`. Forget removes account routing, retaining runtime tombstones; it refuses
+connected or uncertain Hands unless `--force` is supplied. Prune removes only
+Hands confirmed offline and rechecks them before removal. The matching SDK
+methods are `client.hand.list()`, `client.hand.forget(id, { force: true })`, and
+`client.hand.prune()`. Mutations require direct account `agents:write` and
+`tools:use`; Connect grants cannot remove Hands.
+
+Run `pnpm --filter nanocodex-managed-service test:hand-inventory` for the real
+HTTP/WebSocket journey covering legacy-index retirement, account isolation,
+authorization, offline retention, and thread-local reconnects. Each run writes
+its request and catalog evidence under ignored `output/hand-inventory-journey/`.
 
 The broker durably claims each call before sending it once. The daemon owns execution; a socket carries requests and replies. Each admitted source call has one durable transport command ID. The living Hand keeps its running task or immutable terminal receipt until the broker records the result and acknowledges it.
 

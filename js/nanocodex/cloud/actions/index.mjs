@@ -4,6 +4,8 @@ export * as connector from "./connector.mjs";
 export * as connectors from "./connector.mjs";
 export * as connection from "./connection.mjs";
 export * as grant from "./grant.mjs";
+export * as hand from "./hand.mjs";
+export * as hands from "./hand.mjs";
 export * as machineUsd from "./machineUsd.mjs";
 export * as model from "./model.mjs";
 export * as mpp from "./mpp.mjs";

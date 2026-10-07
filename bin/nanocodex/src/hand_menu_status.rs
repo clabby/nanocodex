@@ -248,6 +248,11 @@ fn project_machines(value: &Value) -> std::result::Result<Vec<Value>, Failure> {
         .ok_or(UNKNOWN)?;
     let mut result = Vec::new();
     for machine in machines {
+        // Older servers may still return retired thread-local publishers.
+        // They no longer belong in the account Hand menu.
+        if machine["kind"] == "workspace" {
+            continue;
+        }
         let id = machine["id"].as_str().and_then(safe_text).ok_or(UNKNOWN)?;
         let name = machine["name"]
             .as_str()
@@ -257,7 +262,7 @@ fn project_machines(value: &Value) -> std::result::Result<Vec<Value>, Failure> {
             return Err(UNKNOWN);
         }
         let kind = match machine["kind"].as_str() {
-            Some(kind @ ("hand" | "workspace" | "vm")) => kind,
+            Some(kind @ ("hand" | "vm")) => kind,
             _ => return Err(UNKNOWN),
         };
         let (online, health, availability) =

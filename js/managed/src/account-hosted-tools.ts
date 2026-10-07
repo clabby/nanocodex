@@ -23,7 +23,7 @@ import type { SubagentToolContext } from "nanocodex-tools";
 
 import { isUserId } from "./account-auth";
 import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
-import { inventoryEntry, mergeInventory, WorkspaceHandRegistry, HAND_INVENTORY_DEADLINE_MS, WORKSPACE_INVENTORY_CONCURRENCY, type HandInventoryEntry, type HandInventory } from "./hand-inventory";
+import { inventoryEntry, mergeInventory, HAND_INVENTORY_DEADLINE_MS, type HandInventoryEntry, type HandInventory } from "./hand-inventory";
 import { HostedToolsBroker } from "./hosted-tools-broker";
 import { observeHandCall, observeHandSummary } from "./hand-call-observation";
 import { annotateToolSpan, traceToolInvocation } from "./tool-tracing";
@@ -128,6 +128,10 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       route_id TEXT PRIMARY KEY, candidate_id TEXT, publication_json TEXT
     )`);
     this.#region = ctx.storage.kv.get<HandRelayRegion>("regional_hand_region");
+    // Thread-local tool hosts are not account Hands. Retire their derived index,
+    // including overflow state, without changing any native routes or sessions.
+    ctx.storage.sql.exec("DROP TABLE IF EXISTS workspace_hand_inventory");
+    ctx.storage.kv.delete("workspace_hand_inventory_overflow");
     // Ownership is immutable; a new instance reloads it after eviction/restart.
     this.#ownerId = ctx.storage.kv.get<string>("owner_id");
     this.#diagnostics = new DiagnosticJournal(ctx.storage, "hand.broker");
@@ -177,59 +181,103 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       .map(({ machine }) => ({ id: machine.id, name: machine.name, capabilities: machine.capabilities, workspace: roots.get(machine.id)! }));
   }
 
-  /** Internal publication RPC; immutable account ownership fences the registry. */
-  registerWorkspaceHands(ownerId: string, sessionId: string, entries: readonly HandInventoryEntry[]): boolean {
-    // Session IDs include UUIDv7 and deterministic UUIDv8; account user IDs
-    // remain UUIDv4. Do not apply the narrower account identity validator here.
-    if (!isUserId(ownerId) || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(sessionId)
-      || !this.#claim(ownerId)) return false;
-    return new WorkspaceHandRegistry(this.ctx.storage).register(sessionId, entries);
-  }
-
   async handInventory(ownerId: string): Promise<HandInventory> {
     if (!isUserId(ownerId) || !this.#claim(ownerId)) return mergeInventory([], false);
-    const registry = new WorkspaceHandRegistry(this.ctx.storage);
-    const sessions = registry.entries();
-    let complete = registry.complete;
-    const sources: HandInventoryEntry[][] = [];
-    const deadline = Date.now() + HAND_INVENTORY_DEADLINE_MS;
-    const account = (async () => {
-      try {
-        const snapshot = await withHardDeadline("account Hand inventory", HAND_INVENTORY_DEADLINE_MS,
-          () => this.#snapshot());
-        const unknown = new Set(snapshot.inventory_unknown_ids ?? []);
-        if (unknown.size) complete = false;
-        sources.push(snapshot.machines.map(({ machine, online }) => inventoryEntry(machine, unknown.has(machine.id) ? null : online)));
-      } catch {
-        complete = false;
-        // Preserve retained identities when regional discovery itself failed.
-        const local = this.#localSnapshot().machines.map(({ machine }) => inventoryEntry(machine, null));
-        const retained = this.#directory.entries().map(({ machine }) => inventoryEntry(machine, null));
-        sources.push([...local, ...retained]);
+    try {
+      const snapshot = await withHardDeadline("account Hand inventory", HAND_INVENTORY_DEADLINE_MS,
+        () => this.#snapshot());
+      const unknown = new Set(snapshot.inventory_unknown_ids ?? []);
+      return mergeInventory([snapshot.machines.map(({ machine, online }) =>
+        inventoryEntry(machine, unknown.has(machine.id) ? null : online))], unknown.size === 0);
+    } catch {
+      // Preserve account identities when regional discovery itself failed.
+      const local = this.#localSnapshot().machines.map(({ machine }) => inventoryEntry(machine, null));
+      const retained = this.#directory.entries().map(({ machine }) => inventoryEntry(machine, null));
+      return mergeInventory([local, retained], false);
+    }
+  }
+
+  /**
+   * Owner-initiated removal of one Hand from the routed catalog and from
+   * regional routing. A Hand the owner no longer controls must still be
+   * evictable, so this never waits on the device; `force` is the caller's
+   * acknowledgement that a live Hand is about to lose its account routing.
+   */
+  async forgetMachine(ownerId: string, machineId: string, force: boolean) {
+    if (!isUserId(ownerId) || !this.#claim(ownerId)) return { error: "not_found" } as const;
+    // Serialize with publication admission. A publisher must not reappear
+    // between presence inspection and the account's removal fence.
+    const result = this.#publicationQueue.then(async () => {
+      const snapshot = await this.#snapshot(machineId);
+      if (!force && snapshot.inventory_unknown_ids?.includes(machineId)) return { error: "hand_unknown" } as const;
+      if (!force && snapshot.machines.some(entry => entry.machine.id === machineId && entry.online)) {
+        return { error: "hand_online" } as const;
       }
-    })();
-    let next = 0;
-    const workers = Array.from({ length: Math.min(WORKSPACE_INVENTORY_CONCURRENCY, sessions.length) }, async () => {
-      while (next < sessions.length) {
-        const retained = sessions[next++]!;
+      const selected = this.#directory.entries().find(entry => entry.machine.id === machineId);
+      if (selected?.pending && !force) return { error: "hand_unknown" } as const;
+      for (const publication of selected ? [selected, ...selected.previous] : []) {
+        if (publication.region === "legacy") continue;
         try {
-          if (!this.env.NANOCODEX_SESSIONS || Date.now() >= deadline) throw new Error("workspace inventory unavailable");
-          const result = await withHardDeadline("workspace Hand inventory", Math.max(1, deadline - Date.now()),
-            () => this.env.NANOCODEX_SESSIONS!.getByName(retained.sessionId).listWorkspaceHands(ownerId));
-          if (!result.complete) {
-            complete = false;
-            sources.push(retained.entries.map(entry => ({ ...entry, online: null, health: "unknown" })));
-          }
-          if (result.complete && result.data.length === 0) registry.prune(retained.sessionId, retained.revision);
-          sources.push(result.data);
+          if (!this.env.NANOCODEX_HAND_RELAYS) throw new Error("relay unavailable");
+          const status = await fetchResponseWithDeadline(
+            this.env.NANOCODEX_HAND_RELAYS.getByName(handRelayName(ownerId, publication.region)),
+            "https://account-tools.internal/regional/forget", {
+              method: "POST", headers: { [OWNER_ASSERTION]: ownerId, "content-type": "application/json" },
+              body: JSON.stringify({ machine_id: machineId, publication_id: publication.publication_id,
+                route_id: publication.route_id, runtime_id: publication.runtime_id, region: publication.region, force }),
+            }, 5_000, "forget regional Hand", async response => response.status);
+          if (status === 409) return { error: "hand_online" } as const;
+          if (status !== 200) throw new Error("relay removal unconfirmed");
         } catch {
-          complete = false;
-          sources.push(retained.entries.map(entry => ({ ...entry, online: null, health: "unknown" })));
+          if (!force) return { error: "hand_unknown" } as const;
+          // Forced removal withdraws account routing even if the device's relay
+          // cannot be reached. Retired runtime tombstones reject later claims.
         }
       }
+      return { forgotten: this.#forget(machineId) } as const;
     });
-    await Promise.all([account, ...workers]);
-    return mergeInventory(sources, complete);
+    this.#publicationQueue = result.then(() => {}, () => {});
+    return result;
+  }
+
+  /** Bulk eviction of Hands observed definitively offline; unknown stays put. */
+  async pruneMachines(ownerId: string) {
+    if (!isUserId(ownerId) || !this.#claim(ownerId)) return { error: "not_found" } as const;
+    const inventory = await this.handInventory(ownerId);
+    const forgotten: string[] = [];
+    let complete = inventory.complete;
+    for (const entry of inventory.data) {
+      if (entry.online !== false) continue;
+      // Presence can change while earlier removals await another relay.
+      const result = await this.forgetMachine(ownerId, entry.id, false);
+      if ("forgotten" in result && result.forgotten) forgotten.push(entry.id);
+      if ("error" in result && result.error === "hand_unknown") complete = false;
+    }
+    return { forgotten, complete } as const;
+  }
+
+  #forget(machineId: string): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      let removed = this.#directory.entries().some(entry => entry.machine.id === machineId);
+      for (const row of this.ctx.storage.sql.exec<{ route_id: string; machines_json: string }>(
+        "SELECT route_id,machines_json FROM hosted_tool_routes WHERE machines_json IS NOT NULL").toArray()) {
+        const machines = JSON.parse(row.machines_json) as HostedMachine[];
+        const kept = machines.filter(machine => machine.id !== machineId);
+        if (kept.length === machines.length) continue;
+        removed = true;
+        if (kept.length === 0) {
+          // Retire the publication, allowing a newly enrolled runtime to register.
+          // Directory runtime tombstones reject the forgotten publishers.
+          this.#broker.retireRoute(row.route_id, "Owner forgot this Hand");
+          this.ctx.storage.sql.exec("DELETE FROM regional_local_publications WHERE route_id=?", row.route_id);
+        } else {
+          this.ctx.storage.sql.exec("UPDATE hosted_tool_routes SET machines_json=? WHERE route_id=?",
+            JSON.stringify(kept), row.route_id);
+        }
+      }
+      this.#directory.forget(machineId);
+      return removed;
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -853,6 +901,25 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       });
       return Response.json({ retired: true, machine_id: body.machine_id, runtime_id: body.runtime_id,
         ...(unversioned ? { generation: body.generation } : {}) });
+    }
+    if (this.#regional && url.pathname === "/regional/forget") {
+      if (!validPublisherId(body.machine_id) || !validPublisherId(body.runtime_id) || !validPublisherId(body.publication_id)
+        || body.region !== this.#region || typeof body.route_id !== "string" || body.route_id.length > 512
+        || typeof body.force !== "boolean" || Object.keys(body).length !== 6) {
+        return Response.json({ error: "invalid_request" }, { status: 400 });
+      }
+      const publication: RetirementPublication = { machine: { id: body.machine_id }, runtime_id: body.runtime_id,
+        publication_id: body.publication_id, route_id: body.route_id, region: this.#region! };
+      const status = this.#regionalRetirementStatus(publication);
+      if (status.publication_changed || (!body.force && (status.online || status.pending_calls > 0))) {
+        return Response.json({ error: "regional_publication_not_inactive" }, { status: 409 });
+      }
+      this.ctx.storage.transactionSync(() => {
+        this.#fencePublication(publication);
+        this.#broker.retireRoute(publication.route_id, "Owner forgot this Hand");
+        if (body.force) this.#settleAbandonedCalls(body.machine_id as string, body.runtime_id as string);
+      });
+      return Response.json({ forgotten: true });
     }
     if (this.#regional && (url.pathname === "/regional/inspect" || url.pathname === "/regional/retire-inactive")) {
       const abandonPending = body.abandon_pending === true;

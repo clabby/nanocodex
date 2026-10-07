@@ -6553,6 +6553,7 @@ dependencies = [
  "crossterm 0.29.0",
  "dark-light",
  "dotenvy",
+ "eyre",
  "flate2",
  "fs2",
  "futures-util",

@@ -20,6 +20,8 @@ mod hand_login;
 mod hand_observability;
 mod hand_recording;
 mod hand_recording_control;
+#[path = "../hand_registry.rs"]
+mod hand_registry;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
@@ -254,6 +256,8 @@ enum HandNetwork {
     after_help = "Without a backend, connect this computer. Use --vm or --docker for an isolated Hand.\n\nExamples:\n  nanocodex2 hand --docker nanocodex-hand:local --volume my-workspace\n  nanocodex2 hand --vm root.ext4 --guest-runtime /path/to/nanocodex-vm-guest\n\nUse --network internet to give a Docker Hand internet access."
 )]
 struct Hand {
+    #[command(subcommand)]
+    registry: Option<hand_registry::Command>,
     /// Private identity directory for an explicitly selected native workspace.
     #[arg(long, conflicts_with_all = ["rootfs", "docker"])]
     state_dir: Option<PathBuf>,
@@ -746,6 +750,14 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::InstallHand) => return linux_hand_install::run().await,
         #[cfg(any(target_os = "linux", target_os = "macos", test))]
         Some(Command::UpdateHand) => return linux_hand_update::run().await,
+        Some(Command::Hand(command)) if command.registry.is_some() => {
+            return command
+                .registry
+                .unwrap()
+                .run()
+                .await
+                .map_err(|error| ManagedError::Configuration(error.to_string()));
+        }
         Some(Command::Hand(command)) if command.rootfs.is_none() && command.docker.is_none() => {
             return native_hand::serve_hand(command).await;
         }

@@ -14,6 +14,18 @@ use axum::{
 use serde_json::{Value, json};
 use tokio::{io::AsyncWriteExt, process::Command};
 
+fn cli_binary() -> PathBuf {
+    if let Some(binary) = option_env!("CARGO_BIN_EXE_nanocodex2") {
+        std::env::var_os("NANOCODEX2_TEST_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(binary))
+    } else {
+        std::env::var_os("NANOCODEX_TEST_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(option_env!("CARGO_BIN_EXE_nanocodex").unwrap()))
+    }
+}
+
 fn key() -> String {
     format!("ncx_live_{}_{}", "a".repeat(12), "b".repeat(43))
 }
@@ -140,10 +152,7 @@ impl Fixture {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let binary = option_env!("CARGO_BIN_EXE_nanocodex2")
-            .or(option_env!("CARGO_BIN_EXE_nanocodex"))
-            .unwrap();
-        let mut command = Command::new(binary);
+        let mut command = Command::new(cli_binary());
         if option_env!("CARGO_BIN_EXE_nanocodex2").is_none() {
             command.arg("account");
         }
@@ -480,9 +489,10 @@ async fn ctrl_c_during_mint_waits_for_the_result_and_revokes_without_saving() {
 #[tokio::test]
 async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let Some(binary) = option_env!("CARGO_BIN_EXE_nanocodex") else {
+    if option_env!("CARGO_BIN_EXE_nanocodex").is_none() {
         return;
-    };
+    }
+    let binary = cli_binary();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("account.json");
     // A project-scoped credential must not turn a signed-out menu into another
@@ -527,7 +537,7 @@ async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output(
                     json!({"id": "vm:build", "name": "Build VM", "kind": "vm", "online": true, "health": "connected"}),
                 ];
                 if mode == 7 { data[0]["name"] = key().into(); }
-                if mode == 8 { data[2]["online"] = Value::Null; data[2]["health"] = "unknown".into(); }
+                if mode == 8 { data[0]["online"] = Value::Null; data[0]["health"] = "unknown".into(); }
                 if mode == 9 { data[1]["online"] = true.into(); }
                 return axum::Json(json!({"data": data, "coverage": "known_account_and_workspace", "complete": mode != 8})).into_response();
             }
@@ -541,7 +551,7 @@ async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output(
         axum::serve(listener, app).await.unwrap();
     });
     let command = || {
-        let mut command = Command::new(binary);
+        let mut command = Command::new(&binary);
         command
             .args(["hand", "menu-status"])
             .current_dir(dir.path())
@@ -615,6 +625,13 @@ async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output(
             value["inventory"]["state"], expected_inventory,
             "scenario {scenario}: {value}"
         );
+        assert!(
+            !value["inventory"]["hands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hand| hand["kind"] == "workspace")
+        );
         let observed = seen.lock().unwrap().clone();
         assert_eq!(observed[0], "/v1/me");
         assert!(!observed.iter().any(|path| path == "/redirected"));
@@ -623,7 +640,7 @@ async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output(
         }
         if scenario == 0 {
             let hands = value["inventory"]["hands"].as_array().unwrap();
-            assert_eq!(hands.len(), 5);
+            assert_eq!(hands.len(), 4);
             let offline = hands
                 .iter()
                 .find(|hand| hand["id"] == "offline-laptop")
@@ -631,10 +648,7 @@ async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output(
             assert_eq!(offline["health"], "offline");
             assert_eq!(offline["online"], false);
             assert_eq!(offline["detail"], "Screen also advertised");
-            assert_eq!(
-                hands.iter().find(|hand| hand["id"] == "workspace").unwrap()["kind"],
-                "workspace"
-            );
+            assert!(!hands.iter().any(|hand| hand["id"] == "workspace"));
             assert_eq!(
                 hands
                     .iter()
@@ -651,14 +665,14 @@ async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output(
             assert_eq!(screen["transport"], "screen_frames");
         }
         if scenario == 8 {
-            let workspace = value["inventory"]["hands"]
+            let hand = value["inventory"]["hands"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|hand| hand["id"] == "workspace")
+                .find(|hand| hand["id"] == "synthetic-mac")
                 .unwrap();
-            assert_eq!(workspace["online"], Value::Null);
-            assert_eq!(workspace["health"], "unknown");
+            assert_eq!(hand["online"], Value::Null);
+            assert_eq!(hand["health"], "unknown");
         }
         assert_eq!(std::fs::read(&path).unwrap(), credential);
         assert_eq!(
@@ -675,4 +689,123 @@ async fn hand_menu_status_observes_real_http_without_mutations_or_secret_output(
     assert_eq!(disconnected["account"]["state"], "network_error");
     std::fs::remove_file(&path).unwrap();
     assert_eq!(run(command()).await["account"]["state"], "signed_out");
+}
+
+#[tokio::test]
+async fn hand_registry_lists_and_removes_through_authenticated_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("account.json");
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let requests = seen.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let expected_origin = origin.clone();
+    let app = Router::new().fallback(move |method: Method, uri: Uri, headers: HeaderMap| {
+        let seen = requests.clone();
+        let origin = expected_origin.clone();
+        async move {
+            assert_eq!(headers["authorization"], format!("Bearer {}", key()));
+            assert_eq!(headers["origin"], origin);
+            assert!(!headers.contains_key("cookie"));
+            seen.lock().unwrap().push(format!("{method} {uri}"));
+            let (status, body) = match (method, uri.path(), uri.query()) {
+                (Method::GET, "/v1/account/hands/inventory", None) => (
+                    200,
+                    json!({"data":[
+                    {"id":"vm:build", "name":"Build machine", "kind":"vm", "health":"offline"}
+                ],"complete":false}),
+                ),
+                (Method::DELETE, "/v1/account/hands/vm:build", None) => {
+                    (200, json!({"forgotten":true}))
+                }
+                (Method::DELETE, "/v1/account/hands/online", None) => {
+                    (409, json!({"error":"hand_online"}))
+                }
+                (Method::DELETE, "/v1/account/hands/unknown", None) => {
+                    (409, json!({"error":"hand_unknown"}))
+                }
+                (Method::DELETE, "/v1/account/hands/online", Some("force=1")) => {
+                    (200, json!({"forgotten":true}))
+                }
+                (Method::DELETE, "/v1/account/hands/revoked", None) => {
+                    (401, json!({"error":"unauthorized", "message":key()}))
+                }
+                (Method::POST, "/v1/account/hands/prune", None) => {
+                    (200, json!({"forgotten":["offline"],"complete":false}))
+                }
+                _ => panic!("Unexpected registry request: {uri}"),
+            };
+            (StatusCode::from_u16(status).unwrap(), axum::Json(body))
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({"version":1,"accounts":{&origin:{"api_key":key()}}})).unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let cases: &[(&[&str], bool, &str)] = &[
+        (&["list"], true, "Build machine"),
+        (&["forget", "vm:build"], true, "Forgot Hand vm:build"),
+        (&["forget", "online"], false, "connected right now"),
+        (
+            &["forget", "unknown"],
+            false,
+            "unconfirmed connection status",
+        ),
+        (&["forget", "online", "--force"], true, "Forgot Hand online"),
+        (&["forget", "revoked"], false, "401"),
+        (&["prune"], true, "Removed 1 offline Hand"),
+        (&["forget", "../invalid"], false, "Invalid Hand identifier"),
+    ];
+    for (args, succeeds, expected) in cases {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            Command::new(cli_binary())
+                .arg("hand")
+                .args(*args)
+                .current_dir(dir.path())
+                .env("HOME", dir.path())
+                .env("CODEX_HOME", dir.path())
+                .env("NANOCODEX_DIR", dir.path().join("install"))
+                .env("NANOCODEX_ACCOUNT_FILE", &path)
+                .env("NANOCODEX_MANAGED_URL", &origin)
+                .env_remove("NANOCODEX_API_KEY")
+                .env_remove("NC_API_KEY")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.status.success(), *succeeds, "{args:?}: {text}");
+        assert!(text.contains(expected), "{args:?}: {text}");
+        assert!(!text.contains(&key()), "credential leaked");
+        if *args == ["list"] {
+            assert!(text.contains("partial"));
+        }
+        if *args == ["prune"] {
+            assert!(text.contains("could not be read"));
+        }
+    }
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        7,
+        "No writes may be retried; invalid ID stays local"
+    );
+    assert!(
+        !dir.path().join("install").exists(),
+        "Registry commands must not install a Hand"
+    );
+    server.abort();
 }

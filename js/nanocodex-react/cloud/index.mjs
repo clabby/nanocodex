@@ -280,6 +280,30 @@ export function useRevokeGrant(parameters = {}) {
 }
 
 /**
+ * Removes one Hand from the account. Pass `force` to evict a Hand that is
+ * connected right now; without it a connected Hand is refused. Read the
+ * current registrations with `client.hand.list()`.
+ */
+export function useForgetHand(parameters = {}) {
+  const config = useConfig(parameters);
+  return useMutation({
+    ...parameters.mutation,
+    mutationKey: ["nanocodex", "forgetHand"],
+    mutationFn: ({ id, ...options }) => config.client.hand.forget(id, options),
+  });
+}
+
+/** Removes every Hand observed definitively offline. */
+export function usePruneHands(parameters = {}) {
+  const config = useConfig(parameters);
+  return useMutation({
+    ...parameters.mutation,
+    mutationKey: ["nanocodex", "pruneHands"],
+    mutationFn: () => config.client.hand.prune(),
+  });
+}
+
+/**
  * Renders requests produced by Dialog.memory and resolves them through the
  * dialog instance. The component renders nothing while there is no request.
  */

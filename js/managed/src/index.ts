@@ -1,7 +1,6 @@
 import { idempotentAgentId } from "nanocodex/cloudflare/managed-live";
 export { PhoneProvider } from "./phone-provider";
 import { routeAccountNavigation } from "./account-navigation";
-import { inventoryEntry, type HandInventoryEntry } from "./hand-inventory";
 import { CUA_JS_NAME, CUA_RESET_NAME } from "nanocodex-computer/contract";
 import { parseNativeVaultInjection } from "./browser-vault-injection";
 import type { VaultFieldResolution } from "./browser-vault-injection";
@@ -1842,6 +1841,45 @@ async function managedFetchRoute(
       const inventory = await timeHandStage(request, "route", () =>
         env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).handInventory(principal.userId));
       return json(inventory, { headers: { "cache-control": "no-store" } });
+    }
+    if (url.pathname === "/v1/account/hands/prune") {
+      if (request.method !== "POST" || url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      if (principal.connectGrant || !principal.capabilities.includes("agents:write")
+        || !principal.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
+      if (principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) {
+        return json({ error: "forbidden_origin" }, { status: 403 });
+      }
+      const pruned = await env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).pruneMachines(principal.userId);
+      if ("error" in pruned) return json(pruned, { status: 404 });
+      return json(pruned, { headers: { "cache-control": "no-store" } });
+    }
+    const forgetHand = request.method === "DELETE" ? /^\/v1\/account\/hands\/([^/]+)$/.exec(url.pathname) : null;
+    if (forgetHand) {
+      let machineId: string;
+      try { machineId = decodeURIComponent(forgetHand[1]); }
+      catch { return json({ error: "invalid_request" }, { status: 400 }); }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(machineId)) {
+        return json({ error: "invalid_request" }, { status: 400 });
+      }
+      const force = url.searchParams.get("force") === "1";
+      if (url.search !== "" && !(force && [...url.searchParams.keys()].join() === "force")) {
+        return json({ error: "invalid_request" }, { status: 400 });
+      }
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      if (principal.connectGrant || !principal.capabilities.includes("agents:write")
+        || !principal.capabilities.includes("tools:use")) return json({ error: "forbidden" }, { status: 403 });
+      if (principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) {
+        return json({ error: "forbidden_origin" }, { status: 403 });
+      }
+      const result = await env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId)
+        .forgetMachine(principal.userId, machineId, force);
+      if ("error" in result) {
+        return json(result, { status: result.error === "not_found" ? 404 : 409 });
+      }
+      return json(result, { headers: { "cache-control": "no-store" } });
     }
     if (url.pathname.startsWith("/v1/account/hands/")) {
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
@@ -4199,7 +4237,6 @@ export class DurableAgentSession extends DurableComputerObject {
       Date.now(),
     );
     this.#hostedTools = new HostedToolsBroker(this.ctx, {
-      onCatalogChanged: () => this.#registerWorkspaceHands(),
       onCallObservation: observation => this.#observeHandBoundary("hand.call.broker", observation),
       onConnectionObservation: observation => this.#observeHandBoundary("hand.connection", observation),
       entryAllowed: (entry, connectGrantId, appToolCatalogDigest, context) => (
@@ -4237,7 +4274,6 @@ export class DurableAgentSession extends DurableComputerObject {
       optionalPositiveInteger(this.env.MANAGED_REALTIME_ARCHIVE_RECENT_OPERATIONS),
     );
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
-    this.#registerWorkspaceHands();
     const retainedSession = this.#session();
     this.#streamError = retainedSession?.stream_error ?? undefined;
     const constructorSyncMs = roundMilliseconds(performance.now() - constructorStartedAt);
@@ -4321,74 +4357,6 @@ export class DurableAgentSession extends DurableComputerObject {
     return { subject, strategy: direct ? "session_v1" : "directory_v1",
       ...(accountId ? { chatgpt_account_id: accountId } : {}) };
     });
-  }
-
-  /** Account-only safe RPC. Read fresh broker state; Connect routes are excluded
-   * even if legacy retained rows predate the publisher's scope validation. */
-  listWorkspaceHands(ownerId: string): { data: HandInventoryEntry[]; complete: boolean } {
-    const session = this.#session();
-    // A durable deletion tombstone can confirm retirement only to its owner.
-    const ownership = this.#initializationOwnership();
-    if (ownership?.state === "deleted" && ownership.owner_id === ownerId) return { data: [], complete: true };
-    if (!session || session.owner_id !== ownerId || this.#deleted || this.#deleting
-      || this.#durabilityExported || this.#durabilityImportState === "pending") return { data: [], complete: false };
-    const rows = this.ctx.storage.sql.exec<{ machines_json: string; connect_grant_id: string | null }>(
-      "SELECT machines_json,connect_grant_id FROM hosted_tool_routes WHERE catalog_json IS NOT NULL AND machines_json IS NOT NULL")
-      .toArray();
-    const machines = new Map<string, import("nanocodex-tools/hosted").HostedMachine>();
-    const counts = new Map<string, number>();
-    for (const row of rows) for (const machine of JSON.parse(row.machines_json) as import("nanocodex-tools/hosted").HostedMachine[]) {
-      counts.set(machine.id, (counts.get(machine.id) ?? 0) + 1);
-      if (row.connect_grant_id === null) machines.set(machine.id, machine);
-    }
-    const online = new Map(this.#hostedTools.catalogSnapshot().machines().map(entry => [entry.machine.id, entry.online]));
-    let complete = true;
-    const data: HandInventoryEntry[] = [];
-    for (const machine of machines.values()) {
-      // A retained account identity cannot authorize a different Connect route
-      // with the same ID. Conflicts remain unknown and do not expose that route.
-      const ambiguous = counts.get(machine.id)! > 1;
-      if (ambiguous) complete = false;
-      const connected = online.get(machine.id);
-      if (!ambiguous && connected === false) continue;
-      // Absence from discovery is uncertainty, not proof of disconnection.
-      if (connected === undefined) complete = false;
-      data.push(inventoryEntry(machine, ambiguous ? null : connected ?? null, true));
-    }
-    return { data, complete };
-  }
-
-  #workspacePublicationQueue: Promise<void> = Promise.resolve();
-
-  #registerWorkspaceHands(): void {
-    // Broker construction can notify before the Session field is assigned.
-    // Serialize refreshes and read state inside the queue. Retirement belongs
-    // to account polling, which compares the revision before deleting.
-    this.#workspacePublicationQueue = this.#workspacePublicationQueue.then(async () => {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const session = this.#session();
-        if (!session) return;
-        const result = this.listWorkspaceHands(session.owner_id);
-        // Never send unversioned empty writes: an RPC that timed out may still
-        // arrive after a reconnect. Account polling reclaims empty sessions.
-        if (result.data.length === 0) return;
-        try {
-          const accepted = await withHardDeadline("workspace Hand registration", 4_000, () =>
-            this.env.NANOCODEX_ACCOUNT_TOOLS.getByName(session.owner_id)
-              .registerWorkspaceHands(session.owner_id, session.session_id, result.data));
-          console.info({ type: accepted ? "hand.inventory.registered" : "hand.inventory.registration_rejected",
-            thread_id: session.session_id, hand_count: result.data.length, attempt: attempt + 1 });
-          // Rejection is an ownership/registry fence, never a transient retry.
-          return;
-        } catch (error) {
-          if (attempt === 2) throw error;
-          // Deployment can reset the account broker between publisher hydration
-          // and index publication. Retry this safe write without reconnecting a Hand.
-          await new Promise<void>(resolve => setTimeout(resolve, attempt === 0 ? 250 : 1_000));
-        }
-      }
-    }).catch(error => console.warn({ type: "hand.inventory.registration_failed", error: String(error) }));
-    this.ctx.waitUntil(this.#workspacePublicationQueue);
   }
 
   #calendarPushQueue: Promise<unknown> = Promise.resolve();

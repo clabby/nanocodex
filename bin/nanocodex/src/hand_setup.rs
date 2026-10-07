@@ -66,6 +66,8 @@ enum HandCommand {
     Restart,
     /// Recover an interrupted coordinated CLI and device Hand update.
     Recover,
+    #[command(flatten)]
+    Registry(crate::hand_registry::Command),
 }
 
 pub(crate) fn ssh_target(value: &str) -> std::result::Result<String, String> {
@@ -433,7 +435,12 @@ async fn linux_service_action(action: &str) -> Result<()> {
 
 impl Hand {
     pub(crate) fn is_observation(&self) -> bool {
-        matches!(self.command, HandCommand::MenuStatus | HandCommand::Status)
+        matches!(
+            self.command,
+            HandCommand::MenuStatus
+                | HandCommand::Status
+                | HandCommand::Registry(crate::hand_registry::Command::List)
+        )
     }
 
     pub(crate) async fn run(self) -> Result<()> {
@@ -444,6 +451,9 @@ impl Hand {
                 | HandCommand::Status
                 | HandCommand::MenuStatus
                 | HandCommand::MenuBar
+                // Registry edits are account-side; they never touch this
+                // machine's service and must not queue behind its lock.
+                | HandCommand::Registry(_)
         ) {
             None
         } else {
@@ -484,6 +494,7 @@ impl Hand {
             }
             HandCommand::MenuBar => crate::hand_menu_bar::show().await,
             HandCommand::MenuStatus => crate::hand_menu_status::run().await,
+            HandCommand::Registry(command) => command.run().await,
             HandCommand::Status => {
                 #[cfg(target_os = "linux")]
                 {

@@ -39,7 +39,7 @@ func walk(_ element: AXUIElement, _ depth: Int, _ path: [String] = []) {
     let role = attribute(kAXRoleAttribute) as? String ?? ""
     let title = attribute(kAXTitleAttribute) as? String ?? ""
     if role == kAXMenuItemRole || role == kAXMenuBarItemRole {
-        rows.append(["role":role, "title":title, "depth":depth, "path":path, "enabled":attribute(kAXEnabledAttribute) as? Bool ?? false])
+        rows.append(["role":role, "title":title, "depth":depth, "path":path, "description":attribute(kAXDescriptionAttribute) as? String ?? "", "enabled":attribute(kAXEnabledAttribute) as? Bool ?? false])
         elements.append((role, title, element))
     }
     let childPath = role == kAXMenuItemRole ? path + [title] : path
@@ -49,7 +49,7 @@ walk(app, 0)
 if CommandLine.arguments.count > 2 && CommandLine.arguments[2] == "Verify Refresh" {
     guard rows.contains(where: { ($0["title"] as? String) == "Account: Checking…" }) else { exit(5) }
     let retained = elements.filter { $0.0 == kAXMenuItemRole && $0.1.contains(" · ") && !$0.1.hasPrefix("Nanocodex") && !$0.1.hasPrefix("Account:") && !$0.1.hasPrefix("Hands:") }
-    guard retained.count == 5 else { exit(6) }
+    guard retained.count == 4 else { exit(6) }
     let deadline = Date().addingTimeInterval(15)
     repeat {
         Thread.sleep(forTimeInterval: 0.05)
@@ -64,7 +64,20 @@ if CommandLine.arguments.count > 2 && CommandLine.arguments[2] == "Verify Refres
         if !rows.contains(where: { ($0["title"] as? String) == "Account: Checking…" }) { break }
     } while Date() < deadline
     guard rows.contains(where: { ($0["title"] as? String) == "Account: Signed in · Synthetic account" }),
-          rows.contains(where: { ($0["title"] as? String) == "Hands: 3 connected" }) else { exit(8) }
+          rows.contains(where: { ($0["title"] as? String) == "Hands: 2 connected" }) else { exit(8) }
+}
+else if CommandLine.arguments.count > 2 && CommandLine.arguments[2] == "Verify Warning" {
+    guard rows.contains(where: { ($0["title"] as? String) == "Account: Checking…" }) else { exit(9) }
+    let deadline = Date().addingTimeInterval(15)
+    while rows.contains(where: { ($0["title"] as? String) == "Account: Checking…" }) {
+        guard rows.contains(where: { ($0["description"] as? String ?? "").contains("Warning") }) else { exit(10) }
+        guard Date() < deadline else { exit(11) }
+        Thread.sleep(forTimeInterval: 0.05)
+        rows.removeAll()
+        elements.removeAll()
+        walk(app, 0)
+    }
+    guard !rows.contains(where: { ($0["description"] as? String ?? "").contains("Warning") }) else { exit(12) }
 }
 else if CommandLine.arguments.count > 2 && !(CommandLine.arguments[2] == "Open Menu" && elements.contains(where: { $0.0 == kAXMenuItemRole })) {
     let title = CommandLine.arguments[2]
@@ -126,7 +139,7 @@ def main():
                     if mode["name"] == "large":
                         data += [{"id": "extra-" + str(i), "name": f"Additional Mac {i:02d}", "kind": "hand", "online": False, "health": "offline"} for i in range(1, 41)]
                     if mode["name"] in ("twenty", "twenty-one", "duplicates"):
-                        count = 16 if mode["name"] == "twenty-one" else 15 if mode["name"] == "twenty" else 2
+                        count = 17 if mode["name"] == "twenty-one" else 16 if mode["name"] == "twenty" else 2
                         data += [{"id": "twin-" + str(i), "name": "Twin Mac", "kind": "hand", "online": True, "health": "connected"} for i in range(count)]
                     if mode["name"] == "partial":
                         data[3].update(online=None, health="unknown")
@@ -242,7 +255,7 @@ def main():
                     assert len(children) <= 20, f"{name}: submenu exceeds 20 entries"
                     return rows
 
-                hands = ["Build VM · Connected", "Project workspace · Connected", "Synthetic Mac · Connected",
+                hands = ["Build VM · Connected", "Synthetic Mac · Connected",
                          "Sleeping laptop · Disconnected", "Synthetic screen · Screen advertised — No connected tool Hand"]
                 open_menu()
                 expect("signed-out", ["Menu companion: Running", "Account: Signed out", "Sign in to view"], sign_in=True)
@@ -250,38 +263,36 @@ def main():
                 credential.write_text(json.dumps({"version": 1, "accounts": {origin: {"api_key": synthetic_key}}}))
                 credential.chmod(0o600)
                 refresh()
-                rows = expect("signed-in", ["Account: Signed in · Synthetic account", "Hands: 3 connected", *hands], sign_in=False)
+                rows = expect("signed-in", ["Account: Signed in · Synthetic account", "Hands: 2 connected", *hands], sign_in=False)
                 inventory_root(rows, hands)
                 mode["name"] = "slow"
                 refresh()
-                expect("refresh-started-while-open", ["Account: Checking…", "Hands: 3 connected · Refreshing…", *hands])
+                expect("refresh-started-while-open", ["Account: Checking…", "Hands: 2 connected · Refreshing…", *hands])
                 verified = subprocess.run([str(reader), str(process.pid), "Verify Refresh"], capture_output=True, check=True, timeout=20)
                 (evidence / "refresh-retained-ax-items.json").write_bytes(verified.stdout)
-                expect("refresh-while-open", ["Account: Signed in", "Hands: 3 connected", *hands], ["Checking…", "Refreshing…"])
+                expect("refresh-while-open", ["Account: Signed in", "Hands: 2 connected", *hands], ["Checking…", "Refreshing…"])
                 mode["name"] = "large"
                 refresh()
-                pages = ["Hands 1–20", "Hands 21–40", "Hands 41–45"]
-                rows = expect("large-inventory", ["Hands: 3 connected", *pages])
+                pages = ["Hands 1–20", "Hands 21–40", "Hands 41–44"]
+                rows = expect("large-inventory", ["Hands: 2 connected", *pages])
                 inventory_root(rows, pages)
-                all_hands = hands[:3] + [f"Additional Mac {i:02d} · Disconnected" for i in range(1, 41)] + hands[3:]
+                all_hands = hands[:2] + [f"Additional Mac {i:02d} · Disconnected" for i in range(1, 41)] + hands[2:]
                 for start in range(0, len(all_hands), 20):
                     end = min(start + 20, len(all_hands))
                     submenu(f"hands-page-{start + 1}-{end}", [f"Hands {start + 1}–{end}"], all_hands[start:end])
-                for scenario, count in [("duplicates", 2), ("twenty", 15), ("twenty-one", 16)]:
+                for scenario, count in [("duplicates", 2), ("twenty", 16), ("twenty-one", 17)]:
                     mode["name"] = scenario
                     refresh()
-                    entries = hands[:3] + ["Twin Mac · Connected"] * count + hands[3:]
+                    entries = hands[:2] + ["Twin Mac · Connected"] * count + hands[2:]
                     expected_root = entries if len(entries) <= 20 else ["Hands 1–20", "Hands 21–21"]
-                    rows = expect(scenario, [f"Hands: {3 + count} connected", *expected_root])
+                    rows = expect(scenario, [f"Hands: {2 + count} connected", *expected_root])
                     inventory_root(rows, expected_root)
                     if len(entries) > 20:
                         submenu("boundary-first-page", ["Hands 1–20"], entries[:20])
                         submenu("boundary-last-page", ["Hands 21–21"], entries[20:])
                 mode["name"] = "partial"
                 refresh()
-                partial_hands = ["Alpha workspace · Connected", "Build VM · Connected", "Synthetic Mac · Connected",
-                                 "Zeta workspace · Connected", "Archived workspace · Disconnected", "Dormant VM · Disconnected",
-                                 "Project workspace · Status unknown — Connection status unavailable", *hands[3:]]
+                partial_hands = [*hands[:2], "Dormant VM · Disconnected", *hands[2:]]
                 rows = expect("partial-inventory", ["Hands: Some connections unavailable", *partial_hands], ["Project workspace · Connected"])
                 inventory_root(rows, partial_hands)
                 mode["name"] = "network"
@@ -293,9 +304,12 @@ def main():
                 mode["name"] = "expired"
                 refresh()
                 expect("expired", ["Account: Sign-in expired", "Sign in again to view"], ["Synthetic Mac", "Build VM"], True)
-                mode["name"] = "ready"
+                mode["name"] = "slow"
                 refresh()
-                rows = expect("recovered", ["Hands: 3 connected", "Account: Signed in", *hands], sign_in=False)
+                expect("warning-refresh-started", ["Account: Checking…"])
+                verified = subprocess.run([str(reader), str(process.pid), "Verify Warning"], capture_output=True, check=True, timeout=20)
+                (evidence / "warning-retained-through-refresh.json").write_bytes(verified.stdout)
+                rows = expect("recovered", ["Hands: 2 connected", "Account: Signed in", *hands], sign_in=False)
                 inventory_root(rows, hands)
                 process.terminate()
                 process.wait(timeout=10)

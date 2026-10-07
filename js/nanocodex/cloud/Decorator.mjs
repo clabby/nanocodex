@@ -4,6 +4,7 @@ import * as agent from "./actions/agent.mjs";
 import * as connector from "./actions/connector.mjs";
 import * as connection from "./actions/connection.mjs";
 import * as grant from "./actions/grant.mjs";
+import * as hand from "./actions/hand.mjs";
 import * as machineUsd from "./actions/machineUsd.mjs";
 import * as model from "./actions/model.mjs";
 import * as mpp from "./actions/mpp.mjs";
@@ -31,6 +32,11 @@ export function connectActions() {
     },
     grant: {
       revoke: (options) => grant.revoke(client, options),
+    },
+    hand: {
+      list: () => hand.list(client),
+      forget: (id, options) => hand.forget(client, id, options),
+      prune: () => hand.prune(client),
     },
     machineUsd: {
       fund: (options) => machineUsd.fund(client, options),

@@ -3,6 +3,7 @@ import type { create as createAgent } from "./actions/agent.mjs";
 import type { request as connectorRequest } from "./actions/connector.mjs";
 import type { connect, disconnect, reconnect } from "./actions/connection.mjs";
 import type { revoke } from "./actions/grant.mjs";
+import type { forget as forgetHand, list as listHands, prune as pruneHands } from "./actions/hand.mjs";
 import type { fund, getConfig } from "./actions/machineUsd.mjs";
 import type { transport as modelTransport } from "./actions/model.mjs";
 import type { charge, getBalance } from "./actions/mpp.mjs";
@@ -26,6 +27,11 @@ export type ConnectActions<connection extends Connection | HostConnection = Conn
     reconnect(options?: reconnect.Options | undefined): Promise<connection | undefined>;
   };
   grant: { revoke(options: revoke.Options): revoke.ReturnType };
+  hand: {
+    list(): listHands.ReturnType;
+    forget(id: string, options?: forgetHand.Options | undefined): forgetHand.ReturnType;
+    prune(): pruneHands.ReturnType;
+  };
   machineUsd: {
     fund(options: fund.Options): fund.ReturnType;
     getConfig(options?: getConfig.Options | undefined): getConfig.ReturnType;

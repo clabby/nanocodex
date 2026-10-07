@@ -228,6 +228,39 @@ export function useRevokeGrant<
   context
 >;
 
+/** Variables for useForgetHand: the Hand id plus the forget options. */
+export type ForgetHandVariables = Readonly<{ id: string }> & Actions.hand.forget.Options;
+
+export function useForgetHand<
+  error = Error,
+  context = unknown,
+>(parameters?: UseConnectMutationParameters<
+  Awaited<Actions.hand.forget.ReturnType>,
+  ForgetHandVariables,
+  error,
+  context
+>): UseConnectMutationReturnType<
+  Awaited<Actions.hand.forget.ReturnType>,
+  ForgetHandVariables,
+  error,
+  context
+>;
+
+export function usePruneHands<
+  error = Error,
+  context = unknown,
+>(parameters?: UseConnectMutationParameters<
+  Awaited<Actions.hand.prune.ReturnType>,
+  void,
+  error,
+  context
+>): UseConnectMutationReturnType<
+  Awaited<Actions.hand.prune.ReturnType>,
+  void,
+  error,
+  context
+>;
+
 export type ConnectDialogRequest = Dialog.ConnectionRequest;
 
 export type MachineUsdFundDialogRequest = Dialog.FundingRequest;

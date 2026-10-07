@@ -271,6 +271,7 @@ pub(super) async fn serve_hand(command: super::Hand) -> Result<(), ManagedError>
         && command.machine_name.is_none()
         && command.vm_provider.is_none()
     {
+        let _observability = command.observability.install().map_err(configuration)?;
         let mut device = super::device_hand::DeviceHand::default();
         device.daemon = true;
         return super::device_hand::serve(device).await;

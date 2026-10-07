@@ -177,6 +177,9 @@ pub(crate) async fn run(
             backoff = Duration::from_millis(100);
         }
         connection_span.in_scope(|| {
+            if let ConnectionEnd::Failed(error) | ConnectionEnd::DetachFailed(error) = &end {
+                tracing::debug!(target: "nanocodex_oai_tools::attachment", %error, "attachment transport ended");
+            }
             tracing::info!(target: "nanocodex_oai_tools::attachment",
             stage = "attachment.socket.closed", reason_code = end.reason_code(),
             pending_calls = active.iter().filter(|call| !call.task.is_finished()).count(),

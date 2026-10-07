@@ -122,6 +122,19 @@ export class RegionalHandDirectory {
     if (!this.placement(machineId, runtimeId)) this.select(machineId, runtimeId, "legacy");
     this.storage.sql.exec("UPDATE regional_hand_placements SET retired=1 WHERE machine_id=? AND runtime_id=?", machineId, runtimeId);
   }
+  /**
+   * Owner-initiated removal. Unlike retirePublication this does not fence on a
+   * specific publication: the owner is discarding the Hand regardless of which
+   * runtime currently holds it. Placements stay behind as retired tombstones so
+   * a late runtime cannot reclaim the identity after the owner forgot it.
+   */
+  forget(machineId: string): void {
+    for (const row of this.storage.sql.exec<{ runtime_id: string }>(
+      "SELECT runtime_id FROM regional_hand_placements WHERE machine_id=?", machineId).toArray()) {
+      this.retire(machineId, row.runtime_id);
+    }
+    this.storage.sql.exec("DELETE FROM regional_hand_directory WHERE machine_id=?", machineId);
+  }
   retirePublication(publication: HandPublication): void {
     const current = this.entries().find(entry => entry.machine.id === publication.machine.id);
     if (!current || current.pending || current.publication_id !== publication.publication_id
