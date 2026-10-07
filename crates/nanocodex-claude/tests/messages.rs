@@ -158,25 +158,43 @@ async fn surfaces_http_and_truncated_stream_failures() {
 }
 
 #[test]
-fn compaction_retains_tool_use_with_result_at_boundary() {
+fn compaction_retains_tool_use_with_result_and_drops_invalidated_thinking() {
+    let thinking: ContentBlock = serde_json::from_value(
+        json!({"type":"thinking","thinking":"weather plan","signature":"prefix-bound"}),
+    )
+    .unwrap();
+    let tool_use = ContentBlock::tool_use("toolu_1", "weather", json!({"city":"Athens"}));
     let history = vec![
         Message::text(Role::User, "old"),
         Message::text(Role::Assistant, "old response"),
         Message::text(Role::User, "find weather"),
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::tool_use(
-                "toolu_1",
-                "weather",
-                json!({"city":"Athens"}),
-            )],
+            content: vec![thinking.clone(), tool_use.clone()],
         },
         Message::tool_results(vec![ContentBlock::tool_result("toolu_1", "Sunny", false)]),
-        Message::text(Role::Assistant, "Sunny"),
+        Message {
+            role: Role::Assistant,
+            content: vec![thinking],
+        },
     ];
+    let unchanged = compact_history(&history, usize::MAX, "");
+    assert_eq!(unchanged.messages, history);
+    assert_eq!(unchanged.dropped_messages, 0);
+
     let compacted = compact_history(&history, 2, "Earlier query resolved.");
-    assert_eq!(compacted.dropped_messages, 2);
-    assert_eq!(compacted.messages, history[2..]);
+    assert_eq!(compacted.dropped_messages, 3);
+    assert_eq!(
+        compacted.messages,
+        [
+            history[2].clone(),
+            Message {
+                role: Role::Assistant,
+                content: vec![tool_use],
+            },
+            history[4].clone(),
+        ]
+    );
     assert_eq!(compacted.summary, "Earlier query resolved.");
     assert!(
         compacted

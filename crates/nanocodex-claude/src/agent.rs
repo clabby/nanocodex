@@ -1518,6 +1518,12 @@ impl Conversation {
             )));
         }
         messages.extend(self.messages.clone());
+        if !self.summary.is_empty() {
+            // Retained thinking predates the local summary's replacement prefix.
+            // New responses commit this packed history and clear the summary,
+            // so their thinking remains replayable on subsequent turns.
+            crate::strip_thinking(&mut messages);
+        }
         for notice in &self.recovery_notices {
             if !messages.iter().any(|message| {
                 message
@@ -2725,11 +2731,12 @@ impl State {
             }
             crate::ClaudeLifecycleDecision::Continue => {}
         }
-        // Keep the entire latest assistant response and its following receipts.
-        // Splitting at the assistant boundary preserves signed/opaque blocks and
-        // every tool-use/result pair, including multimodal results. A pending
-        // server pause is retained in exactly the same way, without fake results.
+        // Keep the latest assistant response and its following receipts. Packing
+        // a local summary removes invalidated thinking; all other opaque blocks
+        // and tool-use/result pairs survive, including a pending server pause.
         let retained = if context.pending_continuation {
+            // A thinking-only response can disappear when a prior summary
+            // is packed, leaving no assistant content to retain.
             let start = unfinished_server_turn_start(&messages)
                 .or_else(|| current_server_turn_start(&messages))
                 .or_else(|| {
@@ -2737,7 +2744,7 @@ impl State {
                         .iter()
                         .rposition(|message| message.role == Role::Assistant)
                 })
-                .ok_or_else(|| provider_error("pending continuation has no assistant response"))?;
+                .unwrap_or(messages.len());
             messages.split_off(start)
         } else {
             Vec::new()
@@ -3947,8 +3954,8 @@ impl State {
                         .await?,
                 );
                 // A user continuation closes the interrupted assistant turn.
-                // Its signed content and completed effects remain lossless;
-                // only fully resolved tool boundaries can reach this point.
+                // Partial text and completed effects remain lossless; only
+                // fully resolved tool boundaries can reach this point.
                 conversation.messages.push(Message::text(
                     Role::User,
                     "Continue the current task from the interrupted response. The context window was exhausted. Do not repeat completed tool actions.",

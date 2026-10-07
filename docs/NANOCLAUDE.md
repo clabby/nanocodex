@@ -63,9 +63,9 @@ families. OpenAI tool definitions are not implicitly installed in Claude.
 The backend preserves signed thinking and opaque provider content, validates
 complete SSE responses before dispatch, and fails unsupported lifecycle
 operations explicitly. Compaction uses ordinary Messages requests with client
-summary replacement, retaining active tool boundaries. It does not reuse an
-OpenAI encrypted compaction item or claim the CLI's exact private summarization
-policy.
+summary replacement, retaining active tool boundaries and omitting thinking
+bound to the replaced prefix. It does not reuse an OpenAI encrypted compaction
+item or claim the CLI's exact private summarization policy.
 
 The native and WASM Rust libraries share this implementation. WASM compilation
 does not establish a JavaScript API, browser/Worker execution, product sign-in,
