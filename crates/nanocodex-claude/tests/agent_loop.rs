@@ -57,6 +57,117 @@ fn image_dimensions(block: &Value) -> Option<(u32, u32)> {
 }
 
 #[tokio::test]
+async fn calls_outside_the_catalog_get_paired_errors_and_the_turn_continues() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let unknown_name = "unknown界".repeat(10_000);
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let app = Router::new().route(
+        "/v1/messages",
+        post({
+            let requests = requests.clone();
+            let unknown_name = unknown_name.clone();
+            move |Json(body): Json<Value>| {
+                let requests = requests.clone();
+                let unknown_name = unknown_name.clone();
+                async move {
+                    let index = {
+                        let mut log = requests.lock().unwrap();
+                        log.push(body);
+                        log.len()
+                    };
+                    let (blocks, stop) = match index {
+                        1 => (vec![
+                            json!({"type":"tool_use","id":"denied-plan","name":"update_plan","input":{}}),
+                            json!({"type":"tool_use","id":"denied-long-name","name":unknown_name,"input":{}}),
+                        ], "tool_use"),
+                        2 => (vec![json!({"type":"tool_use","id":"corrected","name":"exec","input":{}})], "tool_use"),
+                        3 => (vec![json!({"type":"text","text":"corrected and completed"})], "end_turn"),
+                        _ => (vec![json!({"type":"tool_use","id":"denied-plan","name":"exec","input":{}})], "tool_use"),
+                    };
+                    ([("content-type", "text/event-stream")], stream(blocks, stop))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counter = effects.clone();
+    let (agent, _) = Nanocodex::builder(Claude::new(
+        ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic"),
+        "test",
+    ))
+    .tool(
+        ToolDefinition {
+            name: "exec".into(),
+            description: "Synthetic admitted effect".into(),
+            input_schema: json!({"type":"object"}),
+            strict: None,
+            defer_loading: false,
+        },
+        move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { Ok("committed once".into()) }
+        },
+    )
+    .build()
+    .unwrap();
+    let outcome = agent
+        .prompt("complete using the admitted tool")
+        .await
+        .unwrap()
+        .result()
+        .await;
+    assert_eq!(outcome.unwrap().final_message(), "corrected and completed");
+    let log = requests.lock().unwrap().clone();
+    assert_eq!(log.len(), 3);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    let denied = &log[1]["messages"];
+    for (index, (id, name)) in [
+        ("denied-plan", "update_plan"),
+        ("denied-long-name", unknown_name.as_str()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(denied[1]["content"][index]["id"], id);
+        let result = &denied[2]["content"][index];
+        assert_eq!(result["tool_use_id"], id);
+        assert_eq!(result["is_error"], true);
+        let reason = result["content"].as_str().unwrap();
+        assert!(reason.len() <= 256, "denial must have a bounded reason");
+        assert!(
+            !reason.contains(name),
+            "denial must not echo the requested name"
+        );
+    }
+    let success = &log[2]["messages"][4]["content"][0];
+    assert_eq!(success["tool_use_id"], "corrected");
+    assert_eq!(success["content"], "committed once");
+
+    let reused = agent
+        .prompt("reuse the denied identity")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap_err();
+    assert!(
+        reused
+            .to_string()
+            .contains("reused an admitted tool_use id")
+    );
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        1,
+        "a denied identity cannot later authorize an effect"
+    );
+    agent.shutdown().await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
 async fn sonnet_55_uses_its_million_token_window_before_compacting() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let calls = Arc::new(AtomicUsize::new(0));

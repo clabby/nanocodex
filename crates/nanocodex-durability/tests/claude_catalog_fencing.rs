@@ -119,8 +119,8 @@ async fn reopened_pending_turn_cannot_dispatch_a_tool_outside_its_frozen_catalog
         let log = requests.lock().unwrap().clone();
         assert_eq!(
             log.len(),
-            3,
-            "exactly one catalog recovery, including reopen"
+            block_index + 2,
+            "unknown tools continue through paired receipts, including reopen"
         );
         assert_eq!(
             log[block_index - 1],
@@ -131,18 +131,16 @@ async fn reopened_pending_turn_cannot_dispatch_a_tool_outside_its_frozen_catalog
             log[1]["tools"], log[2]["tools"],
             "retry cannot expand the admitted catalog"
         );
-        if block_index == 1 {
-            assert_eq!(outcome.as_ref().unwrap().final_message(), "done");
-        } else {
-            assert!(
-                outcome
-                    .as_ref()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("after one recovery"),
-                "the recovery budget must survive reopening: {outcome:?}"
-            );
-        }
+        assert_eq!(outcome.as_ref().unwrap().final_message(), "done");
+        let receipts: Vec<_> = log.last().unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .filter(|block| block["type"] == "tool_result")
+            .collect();
+        assert_eq!(receipts.len(), block_index);
+        assert!(receipts.iter().all(|receipt| receipt["is_error"] == true));
         assert!(
             log[1]["tools"].as_array().is_none_or(Vec::is_empty),
             "the admitted request has no tools"

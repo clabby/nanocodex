@@ -86,12 +86,12 @@ fn effect() -> ToolDefinition {
     }
 }
 #[tokio::test]
-async fn rejected_batch_recovers_without_replaying_completed_effects_or_expanding_catalog() {
+async fn unknown_call_is_paired_without_blocking_admitted_effects_or_expanding_catalog() {
     for name in ["Write", "memories__write"] {
         let (client, log, server) = fixture(vec![
             response(vec![tool("completed", "effect")], "tool_use"),
             response(
-                vec![tool("wrong", name), tool("also-rejected", "effect")],
+                vec![tool("wrong", name), tool("also-admitted", "effect")],
                 "tool_use",
             ),
             response(vec![json!({"type":"text","text":"recovered"})], "end_turn"),
@@ -114,7 +114,7 @@ async fn rejected_batch_recovers_without_replaying_completed_effects_or_expandin
             .await
             .unwrap();
         assert_eq!(result.final_message(), "recovered");
-        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        assert_eq!(effects.load(Ordering::SeqCst), 2);
         let requests = log.lock().unwrap();
         assert_eq!(requests.len(), 3);
         assert!(requests.iter().all(|r| r["tools"] == requests[0]["tools"]));
@@ -127,9 +127,9 @@ async fn rejected_batch_recovers_without_replaying_completed_effects_or_expandin
         assert_eq!(receipts.len(), 3);
         assert!(!receipts[0]["is_error"].as_bool().unwrap_or(false));
         assert_eq!(receipts[1]["is_error"], true);
-        assert_eq!(receipts[2]["is_error"], true);
+        assert!(!receipts[2]["is_error"].as_bool().unwrap_or(false));
         eprintln!(
-            "catalog={name}; requests=3; effect executions=1; recovered={}",
+            "catalog={name}; requests=3; effect executions=2; recovered={}",
             result.final_message()
         );
         drop(requests);
@@ -138,7 +138,7 @@ async fn rejected_batch_recovers_without_replaying_completed_effects_or_expandin
     }
 }
 #[tokio::test]
-async fn repeated_catalog_failure_is_bounded_and_ids_cannot_be_replayed() {
+async fn repeated_unknown_calls_continue_but_ids_cannot_be_replayed() {
     for reuse in [false, true] {
         let (client, log, server) = fixture(vec![
             response(vec![tool("rejected", "Write")], "tool_use"),
@@ -164,36 +164,39 @@ async fn repeated_catalog_failure_is_bounded_and_ids_cannot_be_replayed() {
             })
             .build()
             .unwrap();
-        let error = agent
-            .prompt("finish")
-            .await
-            .unwrap()
-            .result()
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains(if reuse {
-                "reused an admitted"
-            } else {
-                "after one recovery"
-            }),
-            "{error}"
-        );
-        assert_eq!(log.lock().unwrap().len(), 2);
+        let outcome = agent.prompt("finish").await.unwrap().result().await;
+        if reuse {
+            assert!(
+                outcome
+                    .unwrap_err()
+                    .to_string()
+                    .contains("reused an admitted")
+            );
+            assert_eq!(log.lock().unwrap().len(), 2);
+            let result = agent
+                .prompt("continue safely")
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap();
+            assert_eq!(result.final_message(), "new turn works");
+        } else {
+            assert_eq!(outcome.unwrap().final_message(), "new turn works");
+            assert_eq!(log.lock().unwrap().len(), 3);
+            let requests = log.lock().unwrap();
+            let receipts: Vec<_> = requests[2]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["content"].as_array().unwrap())
+                .filter(|block| block["type"] == "tool_result")
+                .collect();
+            assert_eq!(receipts.len(), 2);
+            assert!(receipts.iter().all(|receipt| receipt["is_error"] == true));
+        }
         assert_eq!(effects.load(Ordering::SeqCst), 0);
-        let result = agent
-            .prompt("continue safely")
-            .await
-            .unwrap()
-            .result()
-            .await
-            .unwrap();
-        assert_eq!(result.final_message(), "new turn works");
-        eprintln!(
-            "reuse={reuse}; rejected after 2 requests; executions=0; next turn={}",
-            result.final_message()
-        );
+        eprintln!("reuse={reuse}; unknown calls paired; reused IDs rejected; executions=0");
         agent.shutdown().await.unwrap();
         server.abort();
     }
@@ -245,9 +248,10 @@ async fn undiscovered_tool_must_be_searched_before_recovery_can_execute_it() {
     server.abort();
 }
 #[tokio::test]
-async fn server_effect_before_catalog_failure_is_not_automatically_retried() {
+async fn server_effect_before_invalid_response_is_not_automatically_retried() {
     let (client, log, server) = fixture(vec![response(vec![
         json!({"type":"server_tool_use","id":"server","name":"web_search","input":{"query":"synthetic"}}),
+        tool("wrong", "Write"),
         tool("wrong", "Write"),
     ], "tool_use")]).await;
     let (agent, _events) = Nanocodex::builder(Claude::new(client, "test"))
@@ -261,9 +265,12 @@ async fn server_effect_before_catalog_failure_is_not_automatically_retried() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("outside the admitted catalog"), "{error}");
+    assert!(
+        error.contains("duplicate or empty Claude tool_use id"),
+        "{error}"
+    );
     assert_eq!(log.lock().unwrap().len(), 1);
-    eprintln!("server effect + catalog rejection: requests=1; caller reconciliation required");
+    eprintln!("server effect + duplicate call ID: requests=1; caller reconciliation required");
     agent.shutdown().await.unwrap();
     server.abort();
 }
