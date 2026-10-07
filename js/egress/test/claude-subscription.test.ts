@@ -1,6 +1,6 @@
 import { env, exports } from 'cloudflare:workers';
 import { SELF, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { EgressEnv } from '../src/egress';
 
 const worker = env as unknown as EgressEnv;
@@ -214,6 +214,67 @@ describe('real workerd broker and Rust WASM Claude account journeys', () => {
     expect((await privateModel.fetch(messages(other))).status).toBe(503);
     expect(await trace('message-uncertain')).toEqual({exchange:1,profile:1,messages:1});
     console.info('CLAUDE_JOURNEY',{journey:'refresh/uncertain-model',refreshCalls:await trace('refresh'),uncertainCalls:await trace('message-uncertain')});
+  });
+  it('reports secret-safe failure phases through Messages without retrying uncertain dispatch',async()=>{
+    const failureLogs=vi.spyOn(console,'error').mockImplementation(()=>{});
+    const records: Record<string,unknown>[]=[];
+    try {
+      for (const scenario of ['rpc','wire','transport']) {
+        const user=`claude-diagnostic-${scenario}`;
+        await login(user,`diagnostic-${scenario}`);
+        const stub=worker.USER_CREDENTIALS.getByName(user);
+        if (scenario==='rpc') await runInDurableObject(stub,instance=>{
+          // Fault only the external credential RPC; keep the Worker HTTP
+          // boundary, subscription persistence and provider transport real.
+          Object.defineProperty(instance,'resolveClaudeCredential',{configurable:true,value:async()=>{
+            const error=new Error('synthetic-private-diagnostic');
+            error.name='synthetic-private-error-name'; throw error;
+          }});
+        });
+        const originalFetch=globalThis.fetch;
+        const transportFault=scenario==='transport'?vi.spyOn(globalThis,'fetch').mockImplementation(async(input,init)=>{
+          const response=await originalFetch(input,init);
+          const url=typeof input==='string'?input:input instanceof URL?input.href:input.url;
+          if(url==='https://api.anthropic.com/v1/messages?beta=true') {
+            // The external fixture has accepted and counted this actual POST.
+            // Lose its response before the gateway learns its outcome.
+            await response.body?.cancel();
+            const error=new TypeError('synthetic-private-diagnostic');
+            error.name='synthetic-private-error-name'; throw error;
+          }
+          return response;
+        }):undefined;
+        let response: Response;
+        try {
+          response=await privateModel.fetch(messages(user,scenario==='wire'
+            ? {'user-agent':'synthetic-private-diagnostic'} : {}));
+        } finally {
+          transportFault?.mockRestore();
+          if (scenario==='rpc') await runInDurableObject(stub,instance=>{
+            Reflect.deleteProperty(instance,'resolveClaudeCredential');
+          });
+        }
+        expect(response.status).toBe(502);
+        const body=await response.json<{error:string;egress_request_id:string}>();
+        expect(body.error).toBe('claude_upstream_unavailable');
+        expect(body.egress_request_id).toMatch(/^[0-9a-f-]{36}$/);
+        expect(response.headers.get('x-nanocodex-egress-request-id')).toBe(body.egress_request_id);
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        const record=failureLogs.mock.calls.flat().find(value=>value?.egress_request_id===body.egress_request_id);
+        expect(record).toMatchObject({type:'egress.claude.failure',status:502,
+          phase:scenario==='rpc'?'credential_resolution':scenario==='wire'?'request_construction':'upstream_dispatch',
+          outcome:scenario==='transport'?'unknown':'not_dispatched',
+          upstream_attempts:scenario==='transport'?1:0});
+        expect(['Error','TypeError','RangeError','SyntaxError','non_error']).toContain(record.error_kind);
+        const serialized=JSON.stringify({body,record,headers:[...response.headers]});
+        for (const secret of ['synthetic-private-diagnostic','synthetic-private-error-name',
+          `synthetic-claude-diagnostic-${scenario}`,user]) expect(serialized).not.toContain(secret);
+        expect(await trace(`diagnostic-${scenario}`)).toEqual({exchange:1,profile:1,
+          ...(scenario==='transport'?{messages:1}:{})});
+        records.push(record);
+      }
+    } finally { failureLogs.mockRestore(); }
+    console.info('CLAUDE_JOURNEY',{journey:'failure-phase/correlation/no-replay',records});
   });
   it('fences uncertain refresh until a new login or disconnect',async()=>{
     const user='claude-refresh-uncertain'; await login(user,'refresh-uncertain');

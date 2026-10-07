@@ -168,6 +168,15 @@ and durable-state recovery after failures.
 `upstream_ms` includes our
 subscription relay and must not be interpreted as provider-only latency.
 
+Caught Claude Messages failures emit `egress.claude.failure` with a random
+`egress_request_id`, failure phase, built-in error class and upstream attempt
+count, plus a validated deployment SHA when available. The response includes the same ID in
+`x-nanocodex-egress-request-id` and the error body. `not_dispatched` means no
+Messages fetch was attempted; `rejected` means a definitive 401 preceded a
+refresh failure; `unknown` preserves uncertainty after a fetch attempt. These
+diagnostics exclude exception messages, request data and credentials. They do
+not authorize retry: only an explicit upstream 401 permits the existing replay.
+
 Model traffic accepts only the fixed internal URLs, methods, headers, and
 credential placeholder. The broker resolves the subject, chooses that user's
 active credential, injects it only for the approved upstream or configured

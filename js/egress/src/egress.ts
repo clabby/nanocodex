@@ -2751,12 +2751,17 @@ async function handleClaudeMessages(
   let body: string;
   try { body = await readBoundedText(request, MAX_MODEL_BODY_BYTES); }
   catch { return jsonError(413, "model_request_too_large"); }
+  const egressRequestId = crypto.randomUUID();
+  let phase = "credential_resolution";
+  let dispatches = 0;
+  let rejected = false;
   try {
     let result = consumeRpcData(await userBroker(env, authority.owner).resolveClaudeCredential());
     if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
     let credential = result.credential;
     const secrets = [credential.headers.authorization?.replace(/^Bearer /, "") ?? ""];
     const dispatch = () => {
+      phase = "request_construction";
       // The native profile finalized body/identity before durable freezing.
       // Forward only bounded public profile headers; never rewrite those bytes.
       const agent = request.headers.get("user-agent");
@@ -2775,22 +2780,30 @@ async function handleClaudeMessages(
       }
       if (beta) headers.set("anthropic-beta", [...new Set((beta + "," + headers.get("anthropic-beta")).split(","))].join(","));
       headers.set("accept", request.headers.get("accept") === "text/event-stream" ? "text/event-stream" : "application/json");
-      return upstreamFetch(new Request("https://api.anthropic.com/v1/messages?beta=true", {
+      const upstreamRequest = new Request("https://api.anthropic.com/v1/messages?beta=true", {
         method: "POST", body, headers, redirect: "manual", signal: request.signal,
-      }));
+      });
+      phase = "upstream_dispatch";
+      dispatches++;
+      rejected = false;
+      return upstreamFetch(upstreamRequest);
     };
     let response = await dispatch();
     // A definitive unauthorized response is the only replay permission. Never
     // retry transport failures, redirects, overloads, or uncertain Messages POSTs.
     if (response.status === 401) {
+      rejected = true;
+      phase = "response_processing";
       await cancelResponseBody(response);
+      phase = "credential_refresh";
       result = consumeRpcData(await userBroker(env, authority.owner).resolveClaudeCredential(true, credential.revision));
       if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
       credential = result.credential;
       secrets.push(credential.headers.authorization?.replace(/^Bearer /, "") ?? "");
       response = await dispatch();
     }
-    const headers = new Headers({ "cache-control": "no-store" });
+    phase = "response_processing";
+    const headers = new Headers({ "cache-control": "no-store", "x-nanocodex-egress-request-id": egressRequestId });
     for (const name of ["content-type", "request-id", "retry-after"]) {
       const value = response.headers.get(name);
       if (value && value.length <= 256 && !secrets.some(secret => secret && value.includes(secret))
@@ -2802,7 +2815,27 @@ async function handleClaudeMessages(
         { status: REDIRECT_STATUS.has(response.status) ? 502 : response.status, headers });
     }
     return new Response(privateClaudeStream(response.body, secrets), { status: response.status, headers });
-  } catch { return jsonError(request.signal.aborted ? 499 : 502, "claude_upstream_unavailable"); }
+  } catch (error) {
+    const status = request.signal.aborted ? 499 : 502;
+    // Error names/messages and RPC causes may contain credentials or request
+    // data. Classify known built-ins without reflecting arbitrary properties.
+    const errorKind = error instanceof TypeError ? "TypeError"
+      : error instanceof RangeError ? "RangeError"
+        : error instanceof SyntaxError ? "SyntaxError"
+          : error instanceof Error ? "Error" : "non_error";
+    const outcome = dispatches === 0 ? "not_dispatched" : rejected ? "rejected" : "unknown";
+    const detail = { type: "egress.claude.failure", egress_request_id: egressRequestId,
+      phase, outcome, upstream_attempts: dispatches, error_kind: errorKind, status,
+      ...(typeof env.DEPLOYMENT_SHA === "string" && /^[0-9a-f]{40}$/.test(env.DEPLOYMENT_SHA)
+        ? { deployment_sha: env.DEPLOYMENT_SHA } : {}) };
+    console.error(detail);
+    try { annotateActiveSpan({ "nanocodex.egress_request_id": egressRequestId,
+      "nanocodex.claude.phase": phase, "nanocodex.claude.outcome": outcome,
+      "http.response.status_code": status }); }
+    catch { /* Diagnostics must not replace the provider failure. */ }
+    return Response.json({ error: "claude_upstream_unavailable", egress_request_id: egressRequestId },
+      { status, headers: { "cache-control": "no-store", "x-nanocodex-egress-request-id": egressRequestId } });
+  }
 }
 
 /** Fence accidental provider reflection, including tokens split across SSE chunks. */
