@@ -1,6 +1,9 @@
+use std::time::{Duration, Instant};
+
 use eyre::{Result, eyre};
 use nanocodex_oai_api::{
-    OpenAi,
+    Model, OpenAi,
+    pricing::ServiceTier,
     session::ResponseInput,
     transport::{ResponsesError, ResponsesTransport},
 };
@@ -117,6 +120,74 @@ async fn https_invalid_tool_schema_identifies_the_failed_request_definition() ->
 }
 
 #[tokio::test]
+async fn service_tier_selects_the_wire_tier_and_estimate_supported_by_each_model() -> Result<()> {
+    // Each case requests Ultrafast, then optionally applies the legacy boolean switch:
+    // (model, fast_mode override, wire tier, estimated tier, estimated USD)
+    let cases = [
+        (
+            Model::Astra,
+            None,
+            Some("ultrafast"),
+            ServiceTier::Ultrafast,
+            "9",
+        ),
+        (Model::Sol, None, Some("priority"), ServiceTier::Fast, "0.6"),
+        (Model::Glm53, None, None, ServiceTier::Standard, "0.184"),
+        (
+            Model::Astra,
+            Some(false),
+            None,
+            ServiceTier::Standard,
+            "1.5",
+        ),
+    ];
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let api_base_url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        for (model, _, wire_tier, _, _) in cases {
+            let request = read_http_json(&listener).await?;
+            assert_eq!(request.body["model"], model.as_str());
+            assert_eq!(
+                request.body.get("service_tier").and_then(Value::as_str),
+                wire_tier
+            );
+            let mut response = completed_response("resp-tier", "tier accepted");
+            response["response"]["usage"] = json!({
+                "input_tokens": 100_000, "output_tokens": 10_000, "total_tokens": 110_000
+            });
+            send_http_events(request.stream, None, [response]).await?;
+        }
+        Result::<()>::Ok(())
+    });
+
+    for (model, fast_mode, _, estimated_tier, usd) in cases {
+        let mut builder = OpenAi::builder("test-key")
+            .model(model)
+            .service_tier(ServiceTier::Ultrafast);
+        if let Some(enabled) = fast_mode {
+            builder = builder.fast_mode(enabled);
+        }
+        let openai = builder
+            .transport(ResponsesTransport::Https)
+            .api_base_url(api_base_url.clone())
+            .build()?;
+        let mut session = openai.instructions("Answer briefly.").build()?;
+        let response = session.turn().create("Which tier?").await?;
+        let cost = response
+            .estimated_cost()
+            .ok_or_else(|| eyre!("reported usage must produce an estimate"))?;
+        assert_eq!(
+            (cost.service_tier(), cost.amount().decimal().as_str()),
+            (estimated_tier, usd)
+        );
+    }
+    timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .map_err(|_| eyre!("mock HTTPS tier server did not finish"))???;
+    Ok(())
+}
+
+#[tokio::test]
 async fn https_turn_state_is_scoped_to_one_logical_turn_and_survives_retry() -> Result<()> {
     assert_https_turn_state_survives_retry(HttpsRetryFailure::ServerError).await
 }
@@ -152,8 +223,14 @@ async fn assert_https_turn_state_survives_retry(failure: HttpsRetryFailure) -> R
         );
         observed.push(turn_state(&continuation.headers));
         failure.fail(continuation.stream).await?;
+        let failed_at = Instant::now();
 
         let retry = read_http_json(&listener).await?;
+        let waited = failed_at.elapsed();
+        assert!(
+            waited >= Duration::from_millis(900),
+            "the first transient retry must back off for about one second, waited {waited:?}"
+        );
         assert!(
             retry.body.get("previous_response_id").is_none(),
             "the SDK-owned retry must still switch to full-history replay"

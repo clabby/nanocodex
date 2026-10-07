@@ -88,7 +88,7 @@ async fn explicitly_opted_in_claude_tools_never_expose_codex_catalog() {
 }
 
 #[tokio::test]
-async fn completed_file_write_survives_followup_transport_error_in_session() {
+async fn completed_file_write_survives_rejected_followup_in_session() {
     use axum::{http::StatusCode, response::IntoResponse};
     let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().unwrap();
@@ -101,7 +101,7 @@ async fn completed_file_write_survives_followup_transport_error_in_session() {
             let index={let mut l=log.lock().unwrap();l.push(body);l.len()};
             match index {
                 1 => ([ ("content-type","text/event-stream") ],sse(json!({"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"effect.txt","content":"written once"}}),"tool_use")).into_response(),
-                2 => (StatusCode::BAD_GATEWAY,"synthetic follow-up failure").into_response(),
+                2 => (StatusCode::BAD_REQUEST,"synthetic follow-up rejection").into_response(),
                 _ => ([ ("content-type","text/event-stream") ],sse(json!({"type":"text","text":"resumed"}),"end_turn")).into_response(),
             }
         }

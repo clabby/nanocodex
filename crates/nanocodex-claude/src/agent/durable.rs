@@ -77,6 +77,8 @@ pub(super) struct Cursor {
     // The retry budget belongs to the admitted turn, including durable replay.
     #[serde(default)]
     pub(super) context_recovery_attempted: bool,
+    #[serde(default)]
+    pub(super) output_continuations: u32,
 }
 impl Cursor {
     pub(super) fn effect<'a>(&'a self, state: &'a State, step: &str) -> Option<Effect<'a>> {
@@ -300,6 +302,7 @@ impl State {
             model_step_offset: 1,
             model_receipt_start: Some(0),
             context_recovery_attempted: false,
+            output_continuations: 0,
         };
         // Task state snapshots and receipts must advance in the same order.
         #[cfg(all(feature = "tools", not(target_family = "wasm")))]

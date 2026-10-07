@@ -24,6 +24,7 @@ use nanocodex_oai_api::{
 use nanocodex_oai_api::{
     Model, Prompt, Thinking,
     events::{AgentEvent, AgentEvents},
+    pricing::ServiceTier,
 };
 #[cfg(feature = "openai")]
 use nanocodex_oai_tools::Tools;

@@ -209,7 +209,7 @@ async fn stream_tool_once_compact_and_failed_turn_preserves_history() {
         let requests = requests.clone();
         async move {
             let index = { let mut r = requests.lock().unwrap(); r.push(body.clone()); r.len() };
-            if index == 5 { return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "synthetic failure".to_string()).into_response(); }
+            if index == 5 { return (axum::http::StatusCode::BAD_REQUEST, "synthetic failure".to_string()).into_response(); }
             let (blocks, reason) = match index {
                 1 => (vec![json!({"type":"text","text":"Hello "}),json!({"type":"text","text":"world"})], "end_turn"),
                 2 => (vec![json!({"type":"thinking","thinking":"","signature":"signed-tool-turn","binding":"opaque"}),json!({"type":"tool_use","id":"tool-1","name":"lookup","input":{"key":"x"}})], "tool_use"),
@@ -389,7 +389,7 @@ async fn failed_compaction_and_cancelled_turn_keep_previous_context() {
                     };
                     match index {
                         2 => (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::http::StatusCode::BAD_REQUEST,
                             "synthetic compact failure".to_string(),
                         )
                             .into_response(),

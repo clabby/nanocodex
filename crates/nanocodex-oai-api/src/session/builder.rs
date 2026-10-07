@@ -7,6 +7,7 @@ use crate::{
     EventSink, Model, OpenAi, ResponseItem, ResponsesAttempt, ResponsesClient,
     ResponsesServiceResponse, Thinking, ToolDefinition, TransportStats,
     openai::{ResponsesServiceFactory, StandardServiceFactory},
+    pricing::ServiceTier,
     responses::RequestProfile,
 };
 
@@ -138,7 +139,7 @@ where
             next_logical_turn: 1,
             model: config.model,
             thinking: config.thinking,
-            fast_mode: config.fast_mode,
+            service_tier: config.service_tier,
             context_window_tokens: config.context_window_tokens,
             transport_stats: Arc::new(TransportStats::default()),
         })
@@ -174,7 +175,7 @@ pub struct Session<S> {
     next_logical_turn: u64,
     pub(super) model: Model,
     pub(super) thinking: Thinking,
-    pub(super) fast_mode: bool,
+    pub(super) service_tier: ServiceTier,
     pub(super) context_window_tokens: u64,
     pub(super) transport_stats: Arc<TransportStats>,
 }
