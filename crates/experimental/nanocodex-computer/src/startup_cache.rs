@@ -254,7 +254,10 @@ impl CatalogCache {
 
     fn key(&self, config: &ComputerConfig) -> Option<String> {
         // Public launch configuration can be changed after discovery. Such a
-        // change, including inherited OS environment, invalidates this catalog.
+        // change, including inherited catalog-affecting OS environment,
+        // invalidates this catalog. The managed provider and its Node runtime
+        // are absolute and version-bound, so inherited PATH does not select
+        // their catalog. Explicit configuration environment remains part of it.
         if self.identity.len() != 64 || !self.identity.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return None;
@@ -267,6 +270,9 @@ impl CatalogCache {
             part(&mut digest, arg.as_os_str().as_bytes());
         }
         for name in crate::PROVIDER_ENVIRONMENT {
+            if *name == "PATH" {
+                continue;
+            }
             part(&mut digest, name.as_bytes());
             match std::env::var_os(name) {
                 Some(value) => {
