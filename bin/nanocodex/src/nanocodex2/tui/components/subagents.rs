@@ -307,11 +307,12 @@ impl SubagentTree {
                 .update(TranscriptEvent::Record(Arc::new(local)));
             changed = true;
         }
-        if record.kind() == "tool.call" && payload["tool"] == "spawn_agent" {
-            if let Some(call) = payload["call_id"].as_str() {
-                self.pending_spawns
-                    .insert(call.to_owned(), (payload["arguments"].clone(), child));
-            }
+        if record.kind() == "tool.call"
+            && payload["tool"] == "spawn_agent"
+            && let Some(call) = payload["call_id"].as_str()
+        {
+            self.pending_spawns
+                .insert(call.to_owned(), (payload["arguments"].clone(), child));
         }
         if record.kind() != "tool.result"
             || !matches!(payload["status"].as_str(), Some("success" | "completed"))
