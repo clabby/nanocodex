@@ -45,6 +45,11 @@
       "entrypoint": "SessionModelEgress"
     },
     {
+      "binding": "NANOCODEX_SESSION_TOOL_EGRESS",
+      "service": "nanocodex-egress",
+      "entrypoint": "SessionToolEgress"
+    },
+    {
       "binding": "NANOCODEX_CHIEF_EGRESS",
       "service": "nanocodex-egress",
       "entrypoint": "ChiefOfStaffEgress"
