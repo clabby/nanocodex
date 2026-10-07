@@ -262,6 +262,10 @@ impl ReleaseAsset {
 
 impl Update {
     pub(crate) async fn run(self) -> Result<()> {
+        self.run_with_install_tag(None).await
+    }
+
+    async fn run_with_install_tag(self, install_tag: Option<&str>) -> Result<()> {
         let manager_version = Version::parse(env!("CARGO_PKG_VERSION"))
             .wrap_err("the installed Nanocodex version is invalid")?;
         let store = VersionStore::discover()?;
@@ -349,7 +353,9 @@ impl Update {
 
         // Complete cached releases can still be selected offline. A legacy
         // binary-only cache must consult release metadata to discover voice.
-        if let Some(requested) = &self.version {
+        if let Some(requested) = &self.version
+            && install_tag.is_none()
+        {
             let key = requested.to_string();
             if !self.force
                 && store.is_cached_bundle(&key, false)?
@@ -371,10 +377,22 @@ impl Update {
             .build()
             .wrap_err("failed to create the update client")?;
         let release_description = self.release_description();
-        let release_api = release_api(self.nightly, self.version.as_ref());
+        let release_api = install_tag.map_or_else(
+            || release_api(self.nightly, self.version.as_ref()),
+            |tag| Cow::Owned(format!("{TAGGED_RELEASE_API}/{tag}")),
+        );
         let mut release =
             fetch_release(&client, release_api.as_ref(), &release_description).await?;
-        if self.nightly {
+        if let Some(tag) = install_tag {
+            if self.nightly {
+                validate_immutable_nightly(&release, tag)?;
+            } else if release.tag_name != tag {
+                bail!(
+                    "GitHub returned release {} for requested tag {tag}",
+                    release.tag_name
+                );
+            }
+        } else if self.nightly {
             release = fetch_immutable_nightly(&client, &release).await?;
         }
 
@@ -494,9 +512,33 @@ impl Update {
 /// The curl bootstrap downloads only that CLI; this native updater owns every
 /// companion binary, voice resource, activation, and automatic-update detail.
 pub(crate) async fn install_latest() -> Result<PathBuf> {
+    let tag = std::env::var("NANOCODEX_RELEASE_TAG")
+        .ok()
+        .filter(|tag| !tag.is_empty());
+    let nightly = tag
+        .as_deref()
+        .is_some_and(|tag| tag.starts_with("nightly-"));
+    let requested = match tag.as_deref() {
+        Some(tag) if nightly => {
+            let sha = &tag["nightly-".len()..];
+            if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                bail!("expected nightly-<full 40-hex commit> release tag");
+            }
+            None
+        }
+        Some(tag) => {
+            let version = parse_release_version(tag)?;
+            if tag != format!("v{version}") || !version.pre.is_empty() || !version.build.is_empty()
+            {
+                bail!("expected a stable vMAJOR.MINOR.PATCH release tag");
+            }
+            Some(version)
+        }
+        None => None,
+    };
     Update {
-        version: None,
-        nightly: false,
+        version: requested,
+        nightly,
         branch: None,
         pr: None,
         path: None,
@@ -508,7 +550,7 @@ pub(crate) async fn install_latest() -> Result<PathBuf> {
         background: false,
         restart_hand: false,
     }
-    .run()
+    .run_with_install_tag(tag.as_deref())
     .await?;
     let store = VersionStore::discover()?;
     if cfg!(windows) {

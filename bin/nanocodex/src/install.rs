@@ -29,7 +29,7 @@ struct ProfileEdit {
 
 impl Install {
     pub(crate) async fn run(self) -> Result<()> {
-        eprintln!("Installing the latest verified Nanocodex release…");
+        eprintln!("Installing the verified Nanocodex release…");
         let root = crate::update::install_latest().await?;
         let bin = root.join("bin");
         let executable = bin.join(if cfg!(windows) {

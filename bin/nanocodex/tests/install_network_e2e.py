@@ -3,7 +3,7 @@
 
 python3 bin/nanocodex/tests/install_network_e2e.py CLI HAND [OUTPUT_DIR]
 Requires Python 3, OpenSSL and strip. Uses process-local CA trust and a loopback
-CONNECT proxy that rejects every destination except the two GitHub fixture hosts.
+CONNECT proxy that rejects every destination except the three GitHub fixture hosts.
 Never invokes setup, enables automatic updates, or requests a Hand restart.
 The voice archive is structural test data, not a working voice runtime.
 """
@@ -28,6 +28,8 @@ from urllib.parse import urlsplit
 CLI = 'nanocodex-x86_64-unknown-linux-gnu'
 HAND = 'nanocodex2-x86_64-unknown-linux-gnu'
 VOICE = 'nanocodex-voice-x86_64-unknown-linux-gnu.tar.gz'
+GUEST = 'nanocodex-vm-guest-x86_64-unknown-linux-musl'
+PUBLIC_INSTALL = 'https://raw.githubusercontent.com/gakonst/nanocodex/master/install'
 
 
 def digest(path):
@@ -49,18 +51,34 @@ class QuietHandler(http.server.BaseHTTPRequestHandler):
 
 
 class Origin(QuietHandler):
+    def do_HEAD(self):
+        self.server.events.append({'case': self.server.fixture['case'], 'path': self.path,
+                                   'host': self.headers.get('Host'), 'method': 'HEAD'})
+        if self.path != '/gakonst/nanocodex/releases/latest':
+            self.send_error(404)
+            return
+        self.send_response(302)
+        self.send_header('Location', 'https://github.com/gakonst/nanocodex/releases/tag/' + self.server.fixture['tag'])
+        self.end_headers()
+
     def do_GET(self):
         fixture = self.server.fixture
         name = Path(urlsplit(self.path).path).name
         event = {'case': fixture['case'], 'path': self.path,
                  'host': self.headers.get('Host'), 'start': time.monotonic()}
         self.server.events.append(event)
-        if self.path == '/repos/gakonst/nanocodex/releases/latest':
+        path = urlsplit(self.path).path
+        tag = fixture.get('tag', fixture['release']['tag_name'])
+        if path in ('/repos/gakonst/nanocodex/releases/latest',
+                    '/repos/gakonst/nanocodex/releases/tags/' + tag):
             payload = json.dumps(fixture['release']).encode()
-        elif name == 'SHA256SUMS':
-            payload = fixture['manifest']
+        elif path in ('/gakonst/nanocodex/master/install',
+                      '/gakonst/nanocodex/refs/tags/' + tag + '/install'):
+            payload = fixture.get('installer')
+        elif path.startswith('/gakonst/nanocodex/releases/download/' + tag + '/'):
+            payload = fixture['manifest'] if name == 'SHA256SUMS' else fixture['payloads'].get(name)
         else:
-            payload = fixture['payloads'].get(name)
+            payload = None
         if payload is None:
             self.send_error(404)
             event['error'] = 'unexpected request'
@@ -92,7 +110,7 @@ class Origin(QuietHandler):
 
 class Proxy(QuietHandler):
     def do_CONNECT(self):
-        if self.path not in ('api.github.com:443', 'github.com:443'):
+        if self.path not in ('api.github.com:443', 'github.com:443', 'raw.githubusercontent.com:443'):
             self.server.events.append({'blocked_connect': self.path})
             self.send_error(403)
             return
@@ -164,7 +182,7 @@ def main():
                  '-CAkey', str(root / 'ca.key'), '-CAcreateserial', '-days', '1',
                  '-extfile', str(root / 'leaf.ext'), '-out', str(root / 'leaf.pem')],
             ]
-            (root / 'leaf.ext').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:github.com,DNS:api.github.com\n')
+            (root / 'leaf.ext').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:github.com,DNS:api.github.com,DNS:raw.githubusercontent.com\n')
             for command in commands:
                 subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
@@ -184,7 +202,7 @@ def main():
             env = {'PATH': '/usr/bin:/bin', 'HOME': str(home), 'USERPROFILE': str(home),
                    'XDG_CONFIG_HOME': str(home / '.config'), 'NANOCODEX_DIR': str(store),
                    'NANOCODEX_ACCOUNT_FILE': str(account), 'NO_COLOR': '1',
-                   'SSL_CERT_FILE': str(cert), 'SSL_CERT_DIR': str(root / 'no-system-certs'),
+                   'CURL_CA_BUNDLE': str(cert), 'SSL_CERT_FILE': str(cert), 'SSL_CERT_DIR': str(root / 'no-system-certs'),
                    'HTTPS_PROXY': proxy, 'HTTP_PROXY': proxy, 'ALL_PROXY': proxy,
                    'https_proxy': proxy, 'http_proxy': proxy, 'all_proxy': proxy,
                    'NO_PROXY': '', 'no_proxy': ''}
@@ -291,6 +309,86 @@ def main():
                 for version in (store / 'versions').iterdir():
                     if version.name not in (Path(state()['current']).name, (state()['pending-update'] or '').strip()):
                         shutil.rmtree(version)
+            # Exercise the shipped public shell and actual CLI against HTTPS fixtures.
+            # Each starts with an empty installation directory; no helper replaces either stage.
+            installer = Path(__file__).resolve().parents[3] / 'install'
+            guest = b'synthetic VM guest installation fixture\n'
+            summary['limitations'].append('Synthetic VM guest payload; guest execution is not tested.')
+            for case in ('curl-default', 'native-stable-pin', 'curl-stable-pin',
+                         'native-nightly-pin', 'curl-nightly-pin',
+                         'native-nightly-mismatch', 'curl-nightly-mismatch'):
+                nightly = 'nightly' in case
+                mismatch = 'mismatch' in case
+                tag = 'nightly-' + 'a' * 40 if nightly else 'v99.1.0'
+                store = root / case
+                store.mkdir()
+                (store / 'automatic-updates-disabled').write_text('')
+                env['NANOCODEX_DIR'] = str(store)
+                if case == 'curl-default':
+                    env.pop('NANOCODEX_RELEASE_TAG', None)
+                else:
+                    env['NANOCODEX_RELEASE_TAG'] = tag
+                payloads = dict(packed)
+                manifest = dict(hashes)
+                if nightly:
+                    payloads[GUEST] = guest
+                    manifest[GUEST] = hashlib.sha256(guest).hexdigest()
+                assets = ['SHA256SUMS', CLI, HAND, *payloads]
+                server.fixture = {'case': case, 'tag': tag, 'installer': installer,
+                                  'payloads': payloads,
+                                  'manifest': ''.join(f'{sha}  {name}\n' for name, sha in manifest.items()).encode(),
+                                  'release': {'tag_name': tag,
+                                              'target_commitish': ('b' if mismatch else 'a') * 40,
+                                              'assets': [{'id': i + 1, 'name': name,
+                                                          'browser_download_url': f'https://github.com/gakonst/nanocodex/releases/download/{tag}/{name}'}
+                                                         for i, name in enumerate(assets)]}}
+                start_event = len(server.events)
+                if case.startswith('curl-'):
+                    result = run(['/bin/bash', '-o', 'pipefail', '-c',
+                                  'curl --fail --silent --show-error ' + PUBLIC_INSTALL +
+                                  ' | sh -s -- --no-setup --no-modify-path'])
+                else:
+                    result = run([str(cli), 'install', '--no-setup', '--no-modify-path'])
+                events = server.events[start_event:]
+                paths = [urlsplit(e.get('path', '')).path for e in events]
+                names = [Path(path).name for path in paths]
+                check(not any(e.get('blocked_connect') or e.get('tls_error') or e.get('error') for e in events),
+                      f'{case}: unexpected HTTPS request: {events}')
+                check((result.returncode == 0) == (not mismatch), f'{case}: {result.stderr}')
+                check('/repos/gakonst/nanocodex/releases/tags/' + tag in paths, f'{case}: exact metadata not fetched')
+                check('/repos/gakonst/nanocodex/releases/latest' not in paths and 'nightly' not in names,
+                      f'{case}: fetched moving release metadata')
+                if case != 'curl-default':
+                    check('latest' not in names, f'{case}: resolved latest despite pin')
+                if case.startswith('curl-'):
+                    check('/gakonst/nanocodex/master/install' in paths, 'public installer not fetched')
+                    check('/gakonst/nanocodex/refs/tags/' + tag + '/install' in paths, 'exact installer not fetched')
+                    check(names.count(CLI + '.gz') == 1, 'bootstrap download not reused by native install')
+                if mismatch:
+                    check('targets' in result.stderr and 'expected' in result.stderr, 'missing commit mismatch diagnostic')
+                    check(HAND + '.gz' not in names and VOICE not in names and GUEST not in names,
+                          'mismatched nightly downloaded companion payloads')
+                    check(state()['pending-update'] is None, 'mismatched nightly staged')
+                    check(not any(p.name.startswith('nightly-') for p in (store / 'versions').iterdir()),
+                          'mismatched nightly candidate persisted')
+                else:
+                    key = ('nightly-' + 'a' * 40 + '-' + '-'.join(str(assets.index(name) + 1)
+                           for name in (CLI + '.gz', HAND + '.gz', GUEST))) if nightly else '99.1.0'
+                    candidate = store / 'versions' / key
+                    check(digest(candidate / 'nanocodex') == cli_hash, 'pinned CLI bytes differ')
+                    check(digest(candidate / 'nanocodex2') == hand_hash, 'pinned Hand bytes differ')
+                    check((candidate / 'nanocodex-voice.archive.sha256').read_text().strip() == hashes[VOICE],
+                          'pinned voice digest differs')
+                    if nightly:
+                        check((candidate / 'nanocodex-vm-guest').read_bytes() == guest, 'pinned guest bytes differ')
+                    check((state()['pending-update'] or '').strip() == key if has_owner else Path(state()['current']).name == key,
+                          'exact pinned bundle not staged/activated')
+                check(account.read_bytes() == original_account, 'synthetic account changed')
+                observation = {'case': case, 'exit': result.returncode, 'requests': paths, 'state': state()}
+                summary['cases'].append(observation)
+                print(json.dumps(observation), flush=True)
+                shutil.rmtree(store)
+            env.pop('NANOCODEX_RELEASE_TAG', None)
             after_status = run([str(cli), 'hand', 'status'])
             check(after_status.returncode == 0, after_status.stderr)
             check(json.loads(after_status.stdout) == owner, 'native Hand service changed')

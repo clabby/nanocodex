@@ -29,35 +29,45 @@ if [ -z "$release_tag" ]; then
   )"
   release_tag=${release_redirect##*/}
 fi
-version=${release_tag#v}
-major=${version%%.*}
-remainder=${version#*.}
-minor=${remainder%%.*}
-patch=${remainder#*.}
-case "$release_tag" in v*) ;; *) release_tag= ;; esac
-if [ "$remainder" = "$version" ] || [ "$patch" = "$remainder" ]; then
-  release_tag=
-fi
-case "$major" in ''|*[!0-9]*) release_tag= ;; esac
-case "$minor" in ''|*[!0-9]*) release_tag= ;; esac
-case "$patch" in ''|*[!0-9]*) release_tag= ;; esac
+case "$release_tag" in
+  nightly-*)
+    commit=${release_tag#nightly-}
+    case "$commit" in ''|*[!0-9a-fA-F]*) release_tag= ;; esac
+    if [ "${#commit}" -ne 40 ]; then release_tag=; fi
+    ;;
+  v*)
+    version=${release_tag#v}
+    major=${version%%.*}
+    remainder=${version#*.}
+    minor=${remainder%%.*}
+    patch=${remainder#*.}
+    if [ "$remainder" = "$version" ] || [ "$patch" = "$remainder" ]; then release_tag=; fi
+    case "$major" in ''|*[!0-9]*) release_tag= ;; esac
+    case "$minor" in ''|*[!0-9]*) release_tag= ;; esac
+    case "$patch" in ''|*[!0-9]*) release_tag= ;; esac
+    ;;
+  *) release_tag= ;;
+esac
 if [ -z "$release_tag" ]; then
-  echo "nanocodex: could not resolve the latest stable release" >&2
+  echo "nanocodex: expected a stable vMAJOR.MINOR.PATCH or nightly-<full 40-hex commit> release tag" >&2
   exit 1
 fi
+# Preserve the selected release through the native installation stage too.
+NANOCODEX_RELEASE_TAG=$release_tag
+export NANOCODEX_RELEASE_TAG
 
 # The public URL follows master, while native artifacts are published from a
-# stable tag. Load the install contract from that tag first so a merge can
+# release tag. Load the install contract from that tag first so a merge can
 # never pair a newer script with an older binary. Tagged installers set the
 # stage marker for their second pass and download from the exact same tag.
 if [ "${NANOCODEX_RELEASE_BOOTSTRAP:-0}" != 1 ]; then
-  stable_installer="$temporary_dir/install"
+  tagged_installer="$temporary_dir/install"
   curl --fail --silent --show-error --location \
     "https://raw.githubusercontent.com/$repository/refs/tags/$release_tag/install" \
-    --output "$stable_installer"
-  chmod 755 "$stable_installer"
+    --output "$tagged_installer"
+  chmod 755 "$tagged_installer"
   NANOCODEX_RELEASE_BOOTSTRAP=1 NANOCODEX_RELEASE_TAG="$release_tag" \
-    "$stable_installer" "$@"
+    "$tagged_installer" "$@"
   exit
 fi
 

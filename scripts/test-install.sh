@@ -55,6 +55,7 @@ make_bootstrap() {
   cat > "$path" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$NANOCODEX_DIR" "$@" > "$TEST_INSTALL_RECORD"
+printf '%s\n' "$NANOCODEX_RELEASE_TAG" > "$TEST_INSTALL_RECORD.tag"
 EOF
   chmod +x "$path"
 }
@@ -72,8 +73,9 @@ EOF
 }
 
 run_case() {
-  local format="$1" os="${2:-Linux}" arch="${3:-x86_64}"
-  local case_root="$temporary_root/$format-$os-$arch"
+  local format="$1" os="${2:-Linux}" arch="${3:-x86_64}" pin="${4:-}"
+  local expected_tag="${pin:-v1.2.3}"
+  local case_root="$temporary_root/$format-$os-$arch-$pin"
   local fixture="$case_root/fixture" downloads="$case_root/downloads"
   local target binary asset source
   mkdir -p "$fixture"
@@ -99,7 +101,7 @@ run_case() {
   make_stable_installer "$fixture/install"
 
   PATH="$mock_bin:$PATH" HOME="$case_root/home" NANOCODEX_DIR="$case_root/install" \
-    NANOCODEX_INSTALL_NO_SETUP=1 TEST_INSTALL_FIXTURE="$fixture" \
+    NANOCODEX_RELEASE_TAG="$pin" NANOCODEX_INSTALL_NO_SETUP=1 TEST_INSTALL_FIXTURE="$fixture" \
     TEST_INSTALL_OS="$os" TEST_INSTALL_ARCH="$arch" TEST_INSTALL_DOWNLOADS="$downloads" \
     TEST_INSTALL_URLS="$case_root/urls" \
     TEST_INSTALL_CURRENT_INSTALL="$workspace_root/install" \
@@ -107,16 +109,26 @@ run_case() {
     sh "$workspace_root/install" --no-modify-path >/dev/null
 
   [[ "$(cat "$case_root/record")" == "$case_root/install"$'\ninstall\n--no-modify-path' ]]
+  [[ "$(cat "$case_root/record.tag")" == "$expected_tag" ]]
   [[ "$(cat "$downloads")" == $'install\nSHA256SUMS\n'"$asset" ]]
-  grep -Fxq "https://raw.githubusercontent.com/gakonst/nanocodex/refs/tags/v1.2.3/install" \
+  grep -Fxq "https://raw.githubusercontent.com/gakonst/nanocodex/refs/tags/$expected_tag/install" \
     "$case_root/urls"
-  grep -Fxq "https://github.com/gakonst/nanocodex/releases/download/v1.2.3/$asset" \
+  grep -Fxq "https://github.com/gakonst/nanocodex/releases/download/$expected_tag/$asset" \
     "$case_root/urls"
 }
 
 run_case raw
 run_case gzip
 run_case raw Darwin arm64
+run_case gzip Linux x86_64 v9.8.7
+run_case gzip Linux x86_64 nightly-0123456789abcdef0123456789abcdef01234567
+for invalid in nightly nightly-deadbeef nightly-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz v1.2.3/other; do
+  if NANOCODEX_RELEASE_TAG="$invalid" sh "$workspace_root/install" >"$temporary_root/invalid" 2>&1; then
+    echo "test-install: accepted invalid release tag $invalid" >&2
+    exit 1
+  fi
+  grep -Fq 'expected a stable' "$temporary_root/invalid"
+done
 
 rejected="$temporary_root/rejected"
 mkdir -p "$rejected/fixture"
