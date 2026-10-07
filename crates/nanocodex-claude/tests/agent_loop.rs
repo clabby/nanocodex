@@ -948,6 +948,47 @@ async fn tool_images_fit_many_image_limit_before_history_crosses_twenty() {
     server.abort();
 }
 
+/// Tool lifecycle events through the end of one run, plus any immediate stragglers.
+/// Each entry is `(is_result, payload)`; unrelated events are ignored.
+async fn tool_lifecycle_until_run_end(
+    events: &mut nanocodex_agent::AgentEvents,
+) -> Vec<(bool, Value)> {
+    use std::time::Duration;
+    let mut seen = Vec::new();
+    let mut observe = |event: nanocodex_agent::events::AgentEvent| {
+        let is_result = match event.kind {
+            AgentEventKind::ToolCall => false,
+            AgentEventKind::ToolResult => true,
+            _ => return false,
+        };
+        seen.push((
+            is_result,
+            serde_json::from_str::<Value>(event.payload.get()).unwrap(),
+        ));
+        false
+    };
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("run end event")
+            .expect("event stream stays open");
+        let ended = matches!(
+            event.kind,
+            AgentEventKind::RunFailed | AgentEventKind::RunCompleted
+        );
+        observe(event);
+        if ended {
+            break;
+        }
+    }
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+    {
+        observe(event);
+    }
+    seen
+}
+
 async fn cancelled_tool_batch_retains_completed_and_unknown_results(parallel: bool) {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -988,7 +1029,7 @@ async fn cancelled_tool_batch_retains_completed_and_unknown_results(parallel: bo
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
         .parallel_tools(parallel)
         .tool(
             ToolDefinition {
@@ -1030,6 +1071,41 @@ async fn cancelled_tool_batch_retains_completed_and_unknown_results(parallel: bo
     turn.cancel().await.unwrap();
     assert!(turn.result().await.is_err());
     assert_eq!(effect_count.load(Ordering::SeqCst), 1);
+    // Both handlers began, so each call must close exactly once: the committed
+    // effect normally, the pending one as cancelled with an unknown outcome.
+    let lifecycle = tool_lifecycle_until_run_end(&mut events).await;
+    for id in ["toolu_a", "toolu_b"] {
+        let of = |result: bool| {
+            lifecycle
+                .iter()
+                .filter(|(is_result, payload)| *is_result == result && payload["call_id"] == id)
+                .map(|(_, payload)| payload)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(of(false).len(), 1, "{id} must publish one tool.call");
+        let results = of(true);
+        assert_eq!(
+            results.len(),
+            1,
+            "{id} must publish exactly one tool.result"
+        );
+        assert_eq!(results[0]["turn_id"], of(false)[0]["turn_id"]);
+        if id == "toolu_a" {
+            assert_eq!(results[0]["status"], "completed");
+            assert!(results[0].get("outcome_unknown").is_none());
+        } else {
+            assert_eq!(results[0]["status"], "cancelled");
+            assert_eq!(results[0]["outcome_unknown"], true);
+            assert!(results[0]["duration_ns"].is_u64());
+            assert!(
+                results[0]["result"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("outcome unknown")
+            );
+        }
+    }
+    assert_eq!(lifecycle.len(), 4, "no duplicate or extra lifecycle events");
     assert_eq!(
         agent
             .prompt("continue without repeating the interrupted operation")
@@ -1317,7 +1393,7 @@ async fn cancellation_at_completed_handler_boundary(parallel: bool) {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
         .parallel_tools(parallel)
         .tool(
             ToolDefinition {
@@ -1359,6 +1435,16 @@ async fn cancellation_at_completed_handler_boundary(parallel: bool) {
         1,
         "second side effect must not start after cancellation"
     );
+    // The unstarted call has no tool.call, so it must not get a lone tool.result.
+    let lifecycle = tool_lifecycle_until_run_end(&mut events).await;
+    assert_eq!(
+        lifecycle
+            .iter()
+            .map(|(is_result, payload)| (*is_result, payload["call_id"].as_str().unwrap()))
+            .collect::<Vec<_>>(),
+        [(false, "a"), (true, "a")]
+    );
+    assert_eq!(lifecycle[1].1["status"], "completed");
     agent
         .prompt("recover")
         .await

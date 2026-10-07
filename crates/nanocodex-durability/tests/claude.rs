@@ -320,6 +320,105 @@ async fn completed_effect_and_opaque_compaction_suffix_survive_reopen() {
 }
 
 #[tokio::test]
+async fn cancelled_started_tool_publishes_one_unknown_terminal_event() {
+    use nanocodex_agent::events::AgentEventKind;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite");
+    let (client, requests, server) = server(|index, _| match index {
+        1 => sse(signed_round(), "tool_use", 10),
+        _ => sse(text("unreachable after cancellation"), "end_turn", 10),
+    })
+    .await;
+    let effects = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let (counter, notify) = (effects.clone(), started.clone());
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+        .tool(tool(), move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            notify.notify_one();
+            std::future::pending::<Result<String, String>>()
+        })
+        .durability(reopen(&path).await)
+        .await
+        .unwrap()
+        .build()
+        .unwrap();
+    let turn = agent
+        .prompt(PromptRequest::new("perform effect once").request_id("terminal-event"))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    turn.cancel().await.unwrap();
+    assert!(turn.result().await.is_err());
+    let mut lifecycle = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ended = matches!(
+            event.kind,
+            AgentEventKind::RunFailed | AgentEventKind::RunCompleted
+        );
+        if matches!(
+            event.kind,
+            AgentEventKind::ToolCall | AgentEventKind::ToolResult
+        ) {
+            lifecycle.push((
+                event.kind == AgentEventKind::ToolResult,
+                serde_json::from_str::<Value>(event.payload.get()).unwrap(),
+            ));
+        }
+        if ended {
+            break;
+        }
+    }
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+    {
+        assert!(
+            !matches!(
+                event.kind,
+                AgentEventKind::ToolCall | AgentEventKind::ToolResult
+            ),
+            "no lifecycle event may follow the run end"
+        );
+    }
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        lifecycle.len(),
+        2,
+        "one start and one terminal event: {lifecycle:?}"
+    );
+    let ((call_is_result, call), (result_is_result, result)) = (&lifecycle[0], &lifecycle[1]);
+    assert!(!call_is_result && *result_is_result);
+    assert_eq!(call["call_id"], "effect-once");
+    assert_eq!(result["call_id"], "effect-once");
+    assert_eq!(result["tool"], "effect");
+    assert_eq!(result["turn_id"], call["turn_id"]);
+    assert_eq!(result["status"], "cancelled");
+    assert_eq!(result["outcome_unknown"], true);
+    assert!(result["duration_ns"].is_u64());
+    // The terminal event describes uncertainty; it must not claim "no effect".
+    let text = result["result"]["text"].as_str().unwrap();
+    assert!(text.contains("outcome unknown") && text.contains("Do not assume it did not run"));
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "cancellation stops the model loop"
+    );
+    agent.shutdown().await.unwrap();
+    drop((agent, events));
+    server.abort();
+}
+
+#[tokio::test]
 async fn live_interrupted_effect_is_unknown_after_compaction_and_reopen() {
     use std::{
         sync::atomic::{AtomicUsize, Ordering},

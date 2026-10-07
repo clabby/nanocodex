@@ -1916,6 +1916,40 @@ impl Drop for DispatchForkBoundary<'_> {
     }
 }
 
+/// Closes the observable lifecycle of a tool whose `tool.call` was published.
+///
+/// Cancellation drops the handler future without running its completion code.
+/// This guard turns that drop into exactly one terminal event for calls that
+/// actually started. It deliberately reports an unknown outcome: the handler
+/// may already have performed (or yielded) an external effect.
+struct StartedToolCall<'a> {
+    state: &'a State,
+    events: &'a AgentEventPublisher,
+    id: &'a str,
+    name: &'a str,
+    began: Instant,
+    open: bool,
+}
+impl StartedToolCall<'_> {
+    const REASON: &'static str = "Tool execution interrupted; outcome unknown. Do not assume it did not run or automatically repeat it.";
+}
+impl Drop for StartedToolCall<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.state.emit(
+                self.events,
+                AgentEventKind::ToolResult,
+                json!({
+                    "call_id": self.id, "tool": self.name, "status": "cancelled",
+                    "duration_ns": self.began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    "started_after_ns": null, "result": {"text": Self::REASON},
+                    "outcome_unknown": true,
+                }),
+            );
+        }
+    }
+}
+
 struct PendingSteer {
     prompt: Prompt,
     message_id: Option<String>,
@@ -3072,6 +3106,14 @@ impl State {
             json!({"call_id":id,"tool":name,"arguments":input,"model_call_index":index}),
         );
         let began = Instant::now();
+        let mut started = StartedToolCall {
+            state: self,
+            events,
+            id,
+            name,
+            began,
+            open: true,
+        };
         let invocation = ClaudeToolInvocation {
             model: cursor.template.model.clone(),
             session_id: self.session_id.clone(),
@@ -3098,6 +3140,9 @@ impl State {
                 }
                 Err(reason) => (ToolResultContent::Text(reason), true, None, None),
             };
+        // The handler returned a settled result; the normal event below is the
+        // terminal one. A host interruption above leaves the guard open.
+        started.open = false;
         // Code Mode receipts retain nested calls at every exec/wait observation.
         // Publish them on the originating Claude event stream so canonical child
         // attribution, durable event history and result consumers see real tools.
@@ -3764,17 +3809,12 @@ impl State {
                 cursor.template.system = self.current_system();
             }
             if interrupted {
-                for (position, (id, name, _, _)) in tool_calls.iter().enumerate() {
+                for (position, (id, _, _, _)) in tool_calls.iter().enumerate() {
                     if results[position].is_none() {
-                        let reason = "Tool execution interrupted; outcome unknown. Do not assume it did not run or automatically repeat it.";
-                        self.emit(
-                            &request.events,
-                            AgentEventKind::ToolResult,
-                            json!({
-                                "call_id": id, "tool": name, "status": "failed",
-                                "result": {"text": reason}, "outcome_unknown": true,
-                            }),
-                        );
+                        // Started calls already published their terminal event
+                        // when their future was dropped. Calls that never began
+                        // have no `tool.call`, so they must not publish a result.
+                        let reason = StartedToolCall::REASON;
                         results[position] = Some(ContentBlock::tool_result_content(
                             id.as_str(),
                             ToolResultContent::Text(reason.into()),

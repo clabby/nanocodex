@@ -90,6 +90,10 @@ export class ManagedRecoverySafety {
         "SELECT model_call_index FROM managed_recovery_call_indices WHERE turn_id = ? AND call_id = ?", id, callId,
       ).toArray()[0]?.model_call_index;
       this.storage.sql.exec("DELETE FROM managed_recovery_call_indices WHERE turn_id = ? AND call_id = ?", id, callId);
+      // An unknown-outcome terminal (cancelled or host-interrupted handler)
+      // closes the started call, but proves no settled effect: never treat it
+      // as durable progress or replenish the abrupt-loss budget.
+      if (event.payload.outcome_unknown === true) return;
       // Rust result events may omit the model ordinal. An unproved result is
       // not permission to replenish the recovery budget; projected IDs aren't
       // an identity, and a cached same-index result must not reset it again.

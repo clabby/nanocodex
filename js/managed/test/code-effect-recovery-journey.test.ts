@@ -370,6 +370,71 @@ it("replenishes recovery only for a new model ordinal's real receipt, not a repl
   });
 }, 30_000);
 
+it("closes unknown-outcome tool results without counting them as recovery progress", async () => {
+  await runInDurableObject(sessions().getByName(crypto.randomUUID()), async (_instance, ctx) => {
+    const safety = new ManagedRecoverySafety(ctx.storage);
+    let seq = 0;
+    const event = (type: string, payload: Record<string, unknown>) => ({
+      protocol_version: 1, request_id: "projected-runtime-id", seq: ++seq, type, payload,
+    }) as unknown as AgentEvent;
+    const attempts = () => ctx.storage.sql.exec<{ abrupt_attempts: number; stopped: number }>(
+      "SELECT abrupt_attempts, stopped FROM managed_recovery_safety WHERE turn_id = 'original'").one();
+    const progress = () => ctx.storage.sql.exec(
+      "SELECT progress_key FROM managed_recovery_progress WHERE turn_id = 'original'").toArray();
+    const indices = () => ctx.storage.sql.exec(
+      "SELECT call_id, model_call_index FROM managed_recovery_call_indices WHERE turn_id = 'original'").toArray();
+    // Rust's StartedToolCall terminal for a dropped or host-interrupted handler:
+    // cancelled, outcome unknown, and (like ordinary results) no model ordinal.
+    const unknown = (callId: string, extra: Record<string, unknown> = {}) => event("tool.result", {
+      call_id: callId, tool: "effect", status: "cancelled", outcome_unknown: true, duration_ns: 1,
+      started_after_ns: null,
+      result: { text: "Tool execution interrupted; outcome unknown. Do not assume it did not run or automatically repeat it." },
+      ...extra,
+    });
+    expect([safety.begin("original"), safety.begin("original")]).toEqual([false, false]);
+    expect(attempts()).toEqual({ abrupt_attempts: 2, stopped: 0 });
+
+    safety.progress("original", event("tool.call", { call_id: "effect", tool: "effect", model_call_index: 2 }));
+    expect(indices()).toEqual([{ call_id: "effect", model_call_index: 2 }]);
+    safety.progress("original", unknown("effect"));
+    // The started call's correlation is closed, but no progress is recorded.
+    expect(indices()).toEqual([]);
+    expect(progress()).toEqual([]);
+    expect(attempts()).toEqual({ abrupt_attempts: 2, stopped: 0 });
+    // An explicit ordinal does not turn an unknown outcome into progress either.
+    safety.progress("original", unknown("effect", { model_call_index: 2 }));
+    expect(progress()).toEqual([]);
+    expect(attempts()).toEqual({ abrupt_attempts: 2, stopped: 0 });
+
+    // The unknown terminal did not consume the call's progress key: a later
+    // settled receipt for the same admitted call still replenishes once.
+    safety.progress("original", event("tool.call", { call_id: "effect", tool: "effect", model_call_index: 2 }));
+    safety.progress("original", event("tool.result", { call_id: "effect", tool: "effect", status: "completed", result: { text: "ok" } }));
+    expect(progress()).toEqual([{ progress_key: JSON.stringify([2, "effect"]) }]);
+    expect(attempts()).toEqual({ abrupt_attempts: 0, stopped: 0 });
+    expect(indices()).toEqual([]);
+    // A settled failure is still a real receipt and counts as progress.
+    expect(safety.begin("original")).toBe(false);
+    safety.progress("original", event("tool.call", { call_id: "failed", tool: "effect", model_call_index: 3 }));
+    safety.progress("original", event("tool.result", { call_id: "failed", tool: "effect", status: "failed", result: { text: "denied" } }));
+    expect(attempts()).toEqual({ abrupt_attempts: 0, stopped: 0 });
+
+    // Repeated host interruptions of fresh started calls never replenish the
+    // budget, so abrupt-loss recovery still exhausts at its bound.
+    const admissions: boolean[] = [];
+    for (const [position, callId] of ["lost-1", "lost-2", "lost-3", "lost-4"].entries()) {
+      admissions.push(safety.begin("original"));
+      safety.progress("original", event("tool.call", { call_id: callId, tool: "effect", model_call_index: 4 + position }));
+      safety.progress("original", unknown(callId));
+    }
+    expect(admissions).toEqual([false, false, false, true]);
+    expect(attempts()).toEqual({ abrupt_attempts: 4, stopped: 1 });
+    expect(progress()).toHaveLength(2);
+    expect(indices()).toEqual([]);
+    await ctx.storage.deleteAlarm();
+  });
+}, 30_000);
+
 it("pins a pending cell's starting store and merges completed writes exactly once across owner loss", async () => {
   await runInDurableObject(sessions().getByName(crypto.randomUUID()), async (_instance, ctx) => {
     let calls = 0;
