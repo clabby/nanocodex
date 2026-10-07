@@ -3415,6 +3415,7 @@ impl State {
                 let mut seen_ids = HashSet::new();
                 let mut text = String::new();
                 let mut citations = Vec::new();
+                let mut catalog_rejection = None;
                 for block in &response.content {
                     match block {
                         ContentBlock::Text { text: part, extra } => {
@@ -3446,21 +3447,20 @@ impl State {
                             }
                             // A recovered host can attach additional handlers, but that
                             // must not enlarge this operation's admitted catalog.
-                            let definition = cursor
-                                .template
-                                .tools
-                                .iter()
-                                .find_map(|tool| match tool {
+                            let definition =
+                                cursor.template.tools.iter().find_map(|tool| match tool {
                                     ClaudeToolSpec::Client(tool) if tool.name == *name => {
                                         Some(tool)
                                     }
                                     _ => None,
-                                })
-                                .ok_or_else(|| {
-                                    provider_error(format!(
-                                        "Claude tool {name} is outside the admitted catalog"
-                                    ))
-                                })?;
+                                });
+                            let Some(definition) = definition else {
+                                catalog_rejection = Some(format!(
+                                    "Claude tool {name} is outside the admitted catalog"
+                                ));
+                                tool_calls.push((id, name, input, None));
+                                continue;
+                            };
                             if definition.defer_loading
                                 && !discovered.contains(name)
                                 && !server_discovered.contains(name.as_str())
@@ -3505,9 +3505,14 @@ impl State {
                 if response.stop_reason == Some(StopReason::ToolUse) && tool_calls.is_empty() {
                     return Err(provider_error("tool_use stop without tool call"));
                 }
-                Ok((tool_calls, text, citations))
+                if let Some(reason) = &catalog_rejection
+                    && (has_server_effects || unfinished_server_turn_start(&pending).is_some())
+                {
+                    return Err(provider_error(reason));
+                }
+                Ok((tool_calls, text, citations, catalog_rejection))
             })();
-            let (tool_calls, text, citations) = match validated {
+            let (tool_calls, text, citations, catalog_rejection) = match validated {
                 Ok(validated) => validated,
                 Err(error) => {
                     if has_server_effects || unfinished_server_turn_start(&pending).is_some() {
@@ -3542,6 +3547,67 @@ impl State {
                     return Err(error);
                 }
             };
+            if let Some(reason) = catalog_rejection {
+                // Reject the entire validated batch before any hook or handler.
+                // Pair every call with an explicit non-execution receipt, including
+                // otherwise admitted calls, so continuation cannot replay effects.
+                conversation
+                    .admitted_tool_ids
+                    .extend(tool_calls.iter().map(|(id, _, _, _)| (*id).clone()));
+                let results = tool_calls
+                    .iter()
+                    .map(|(id, name, _, _)| {
+                        self.emit(
+                            &request.events,
+                            AgentEventKind::ToolResult,
+                            json!({
+                                "call_id":id,"tool":name,"status":"failed",
+                                "result":{"text":reason},"outcome_unknown":false,
+                            }),
+                        );
+                        ContentBlock::tool_result_content(
+                            id.as_str(),
+                            ToolResultContent::Text(format!(
+                                "{reason}. No client tools in this response were executed."
+                            )),
+                            true,
+                        )
+                    })
+                    .collect();
+                pending.push(Message {
+                    role: Role::Assistant,
+                    content: response.content,
+                });
+                pending.push(Message::tool_results(results));
+                let notice = format!(
+                    "Harness recovery notice: {reason}. No client tools in the rejected batch were executed. Use only tools in the admitted catalog and discover deferred tools before calling them. Do not repeat completed actions from earlier responses."
+                );
+                conversation.recovery_notices.push(notice.clone());
+                pending.push(Message::text(Role::User, notice));
+                conversation.messages = pending.clone();
+                conversation.previous_message_id = previous_message_id.clone();
+                conversation.summary.clear();
+                conversation.pending_continuation = true;
+                conversation.advance_boundary();
+                conversation.active_context_tokens = estimate_text_tokens(&json!({
+                    "system":cursor.template.system, "tools":cursor.template.tools, "messages":pending,
+                }).to_string());
+                if cancel.flag.load(Ordering::SeqCst) {
+                    return Err(NanocodexError::TurnCancelled);
+                }
+                if cursor.catalog_recovery_attempted {
+                    return Err(provider_error(format!(
+                        "Claude catalog validation failed after one recovery: {reason}; rejected calls were not executed"
+                    )));
+                }
+                cursor.catalog_recovery_attempted = true;
+                cursor.index = index + 1;
+                cursor.pending = pending.clone();
+                cursor.usage = usage.clone();
+                // Keep the admitted catalog frozen; retry is not a capability grant.
+                self.advance_cursor(&mut cursor, conversation).await?;
+                continue;
+            }
             if !text.is_empty() {
                 self.emit(&request.events,AgentEventKind::AssistantMessage,json!({"model_call_index":index,"item_id":response.id,"phase":null,"text":text,"citations":citations}));
             }
