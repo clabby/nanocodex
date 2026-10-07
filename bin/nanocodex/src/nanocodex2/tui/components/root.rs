@@ -254,6 +254,7 @@ pub(crate) enum RootEvent {
 
 pub(crate) struct RestoredSessionProjection {
     transcript: Transcript,
+    subagents: SubagentTree,
     context_diagnostics: ContextDiagnostics,
     context_tokens: Option<u64>,
     recent_prompts: Vec<RecentPromptDraft>,
@@ -266,6 +267,7 @@ impl RestoredSessionProjection {
         records: impl IntoIterator<Item = Arc<TranscriptRecord>>,
     ) {
         for record in records {
+            self.subagents.observe_record(&record);
             if self.transcript.ignores_finished_run_event(&record) {
                 continue;
             }
@@ -815,6 +817,7 @@ impl RootNode {
     ) -> RestoredSessionProjection {
         let mut projection = RestoredSessionProjection {
             transcript: Transcript::with_effort(thinking),
+            subagents: SubagentTree::new(thinking),
             context_diagnostics: ContextDiagnostics::default(),
             context_tokens: None,
             recent_prompts: Vec::new(),
@@ -837,6 +840,16 @@ impl RootNode {
             .set_effort(self.composer.component().effort());
         self.seen_vault_requests
             .extend(projection.seen_vault_requests);
+        projection.subagents.set_workspace(&self.workspace);
+        projection.subagents.preserve_view_from(&self.subagents);
+        self.subagents = projection.subagents;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::ActiveSubagents {
+                count: self.subagents.active_count(),
+                now: Instant::now(),
+            });
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;
@@ -891,6 +904,16 @@ impl RootNode {
         projection.transcript.set_workspace(workspace);
         self.seen_vault_requests
             .extend(projection.seen_vault_requests);
+        projection.subagents.set_workspace(&self.workspace);
+        projection.subagents.preserve_view_from(&self.subagents);
+        self.subagents = projection.subagents;
+        let _ = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::ActiveSubagents {
+                count: self.subagents.active_count(),
+                now: Instant::now(),
+            });
         self.transcript = Node::new(projection.transcript);
         self.context_diagnostics = projection.context_diagnostics;
         self.recent_prompts = projection.recent_prompts;
@@ -2232,6 +2255,9 @@ impl RootNode {
                 self.overlay = None;
                 return self
                     .apply_settings_command(SettingsCommand::Voice(crate::voice::Command::Toggle));
+            }
+            Some(ActionsEffect::Trigger(Action::Subagents)) => {
+                self.overlay = Some(Overlay::Subagents(SubagentOverlay::Tree));
             }
             Some(ActionsEffect::Trigger(Action::AgentId)) => {
                 self.overlay = None;
@@ -4155,6 +4181,16 @@ impl RootNode {
     }
 
     fn transcript_record(&mut self, record: Arc<TranscriptRecord>) -> ComponentUpdate<RootEffect> {
+        let subagents_changed = self.subagents.observe_record(&record);
+        if subagents_changed {
+            let _ = self
+                .composer
+                .component_mut()
+                .update(ComposerEvent::ActiveSubagents {
+                    count: self.subagents.active_count(),
+                    now: Instant::now(),
+                });
+        }
         if self
             .transcript
             .component()
@@ -4180,6 +4216,9 @@ impl RootNode {
             None
         };
         let mut update = self.update_transcript(TranscriptEvent::Record(record));
+        if subagents_changed {
+            update.render = update.render.max(RenderRequest::Streaming);
+        }
         if let Some(request) = private
             && self.seen_vault_requests.insert(format!(
                 "private:{}:{}",

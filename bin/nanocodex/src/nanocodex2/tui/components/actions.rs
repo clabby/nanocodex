@@ -20,7 +20,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 21] = [
+const ACTIONS: [Action; 22] = [
     Action::Effort,
     Action::FastMode,
     Action::Goal,
@@ -38,6 +38,7 @@ const ACTIONS: [Action; 21] = [
     Action::Model,
     Action::AutoRoute,
     Action::AgentId,
+    Action::Subagents,
     Action::Voice,
     Action::Screen,
     Action::Zoom,
@@ -72,6 +73,7 @@ pub(super) enum Action {
     Zoom,
     Voice,
     AgentId,
+    Subagents,
     Handoff,
     Review,
     Effort,
@@ -317,7 +319,7 @@ impl ActionsMenu {
             Action::ReloadConfig => true,
             Action::EditConfig => true,
             Action::DebugContext => true,
-            Action::Bug | Action::Goal | Action::Share | Action::Copy => true,
+            Action::Bug | Action::Goal | Action::Share | Action::Copy | Action::Subagents => true,
         }
     }
 
@@ -369,6 +371,7 @@ impl Action {
             Self::Zoom => "Zoom focused pane",
             Self::Voice => "Voice menu · providers and cloning",
             Self::AgentId => "Show agent ID",
+            Self::Subagents => "Subagents",
             Self::Handoff => "Prepare handoff",
             Self::Review => "Review changes",
             Self::Effort => "Change effort",
@@ -398,6 +401,7 @@ impl Action {
             Self::Zoom => Some("zoom"),
             Self::Voice => Some("voice"),
             Self::AgentId => Some("id"),
+            Self::Subagents => Some("agents"),
             Self::Handoff => Some("handoff"),
             Self::Review => Some("review"),
             Self::Effort => Some("thinking"),

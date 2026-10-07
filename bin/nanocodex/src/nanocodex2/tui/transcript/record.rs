@@ -134,7 +134,7 @@ pub(crate) enum LocalEvent {
     SessionEnded(SessionEnded),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct TranscriptRecord {
     schema_version: u32,
     sequence: u64,
@@ -147,7 +147,7 @@ pub(crate) struct TranscriptRecord {
     payload: Arc<RawValue>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct AgentMetadata {
     protocol_version: u32,
     request_id: Arc<str>,

@@ -25,6 +25,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
+use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -61,6 +62,7 @@ const INSPECTOR_HEIGHT: u16 = 6;
 struct AgentNode {
     descriptor: AgentDescriptor,
     status: AgentStatus,
+    model: Option<Model>,
     transcript: Node<Transcript>,
 }
 
@@ -138,6 +140,7 @@ pub(super) struct SubagentTree {
     effort: crate::config::ReasoningEffort,
     max_subagents: usize,
     workspace: std::path::PathBuf,
+    pending_spawns: HashMap<String, (Value, Option<AgentId>)>,
 }
 
 impl SubagentTree {
@@ -151,6 +154,7 @@ impl SubagentTree {
             effort,
             max_subagents: DEFAULT_MAX_SUBAGENTS,
             workspace: std::env::current_dir().unwrap_or_default(),
+            pending_spawns: HashMap::new(),
         }
     }
 
@@ -179,6 +183,7 @@ impl SubagentTree {
                     self.nodes.push(AgentNode {
                         descriptor,
                         status: AgentStatus::Running,
+                        model: None,
                         transcript: Node::new(transcript),
                     });
                     self.focused.get_or_insert(id);
@@ -190,6 +195,13 @@ impl SubagentTree {
                     return false;
                 };
                 let record = TranscriptRecord::from_agent(event.seq, unix_time_ms(), event);
+                if record.kind() == "run.started"
+                    && let Ok(payload) = record.decode_payload::<Value>()
+                {
+                    node.model = payload["model"]
+                        .as_str()
+                        .and_then(|model| model.parse().ok());
+                }
                 node.transcript
                     .update(TranscriptEvent::Record(Arc::new(record)));
                 true
@@ -227,6 +239,188 @@ impl SubagentTree {
                 projected
             }
         }
+    }
+
+    // Managed streams carry child events and public tool receipts, rather than
+    // the local runtime's AgentUpdate channel. Project both live and replayed
+    // records through this same path without submitting completion prompts.
+    pub(super) fn observe_record(&mut self, record: &TranscriptRecord) -> bool {
+        let child = record
+            .managed_agent_id()
+            .and_then(|id| id.to_string().parse().ok());
+        if child.is_none() && !matches!(record.kind(), "tool.call" | "tool.result") {
+            return false;
+        }
+        let Ok(payload) = record.decode_payload::<Value>() else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(id) = child {
+            self.ensure_managed_node(id);
+            let node = self.node_mut(id).expect("managed child was inserted");
+            if let Some(session) = record.agent_request_id() {
+                node.descriptor.session_id = session.to_string();
+            }
+            match record.kind() {
+                "run.started" => {
+                    node.status = AgentStatus::Running;
+                    if let Some(model) = payload["model"]
+                        .as_str()
+                        .and_then(|model| model.parse().ok())
+                    {
+                        node.model = Some(model);
+                    }
+                    if let Some(effort) = payload["effort"]
+                        .as_str()
+                        .and_then(|effort| effort.parse().ok())
+                    {
+                        node.transcript.component_mut().set_effort(effort);
+                    }
+                }
+                "run.completed" => {
+                    if !matches!(node.status, AgentStatus::Completed { .. }) {
+                        node.status = AgentStatus::Completed {
+                            output: Value::Null,
+                        };
+                    }
+                }
+                "run.failed" => {
+                    node.status = if matches!(
+                        payload["status"].as_str(),
+                        Some("interrupted" | "cancelled" | "canceled")
+                    ) {
+                        AgentStatus::Interrupted
+                    } else {
+                        AgentStatus::Failed {
+                            error: payload["error"]
+                                .as_str()
+                                .unwrap_or("child run failed")
+                                .to_owned(),
+                        }
+                    };
+                }
+                _ => {}
+            }
+            // Inside a child's inspector, its transcript is the foreground.
+            let local = record.clone().with_managed_agent_id(None);
+            node.transcript
+                .update(TranscriptEvent::Record(Arc::new(local)));
+            changed = true;
+        }
+        if record.kind() == "tool.call" && payload["tool"] == "spawn_agent" {
+            if let Some(call) = payload["call_id"].as_str() {
+                self.pending_spawns
+                    .insert(call.to_owned(), (payload["arguments"].clone(), child));
+            }
+        }
+        if record.kind() != "tool.result"
+            || !matches!(payload["status"].as_str(), Some("success" | "completed"))
+        {
+            if record.kind() == "tool.result"
+                && payload["tool"] == "spawn_agent"
+                && let Some(call) = payload["call_id"].as_str()
+            {
+                self.pending_spawns.remove(call);
+            }
+            return changed;
+        }
+        let result = managed_result(&payload);
+        match payload["tool"].as_str() {
+            Some("spawn_agent") => {
+                let pending = payload["call_id"]
+                    .as_str()
+                    .and_then(|id| self.pending_spawns.remove(id));
+                changed |= self.observe_descriptor(
+                    &result,
+                    pending.as_ref().map(|(input, _)| input),
+                    pending.as_ref().and_then(|(_, parent)| *parent).or(child),
+                );
+            }
+            Some("list_agents" | "wait_agent" | "close_agent" | "interrupt_agent") => {
+                if let Some(agents) = result["agents"].as_array() {
+                    for agent in agents {
+                        changed |= self.observe_descriptor(agent, None, child);
+                    }
+                } else {
+                    changed |= self.observe_descriptor(&result, None, child);
+                }
+            }
+            _ => {}
+        }
+        changed
+    }
+
+    fn ensure_managed_node(&mut self, id: AgentId) {
+        if !self.contains(id) {
+            self.apply(AgentUpdate::Added(AgentDescriptor {
+                id,
+                session_id: String::new(),
+                role: format!("Agent {id}"),
+                task: String::new(),
+                parent: None,
+            }));
+        }
+    }
+
+    fn observe_descriptor(
+        &mut self,
+        value: &Value,
+        input: Option<&Value>,
+        parent: Option<AgentId>,
+    ) -> bool {
+        let Some(id) = value["agent_id"]
+            .as_u64()
+            .and_then(|id| id.to_string().parse().ok())
+        else {
+            return false;
+        };
+        self.ensure_managed_node(id);
+        let node = self.node_mut(id).expect("managed child was inserted");
+        if value.get("parent_agent_id").is_some() {
+            node.descriptor.parent = value["parent_agent_id"]
+                .as_u64()
+                .and_then(|id| id.to_string().parse().ok());
+        } else if parent.is_some() {
+            node.descriptor.parent = parent;
+        }
+        if let Some(role) = input
+            .and_then(|v| v["role"].as_str())
+            .or_else(|| value["role"].as_str())
+        {
+            node.descriptor.role = role.to_owned();
+        }
+        if let Some(task) = input.and_then(|v| v["task"].as_str()).or_else(|| {
+            value["task"]
+                .as_str()
+                .filter(|_| node.descriptor.task.is_empty())
+        }) {
+            node.descriptor.task = task.to_owned();
+        }
+        if node.model.is_none() {
+            node.model = input
+                .and_then(|v| v["model"].as_str())
+                .or_else(|| value["model"].as_str())
+                .and_then(|model| model.parse().ok());
+        }
+        if let Some(session) = value["session_id"].as_str() {
+            node.descriptor.session_id = session.to_owned();
+        }
+        if let Ok(status) = serde_json::from_value::<AgentStatus>(value["status"].clone())
+            && (input.is_none() || node.status.is_active())
+        {
+            // A fast child can finish before its spawn acknowledgement arrives.
+            node.status = status;
+        }
+        true
+    }
+
+    pub(super) fn preserve_view_from(&mut self, previous: &Self) {
+        self.focused = previous
+            .focused
+            .filter(|id| self.contains(*id))
+            .or(self.focused);
+        self.filter = previous.filter;
+        self.max_subagents = previous.max_subagents;
     }
 
     pub(super) fn active_count(&self) -> usize {
@@ -483,7 +677,7 @@ impl SubagentTree {
         let title = format!(
             "{} · {} · #{}",
             node.descriptor.role,
-            model_name(Model::Oai(nanocodex::Model::Sol)),
+            node.model.map_or("model unknown", model_name),
             node.descriptor.id
         );
         let keys: &[(&str, &str)] = if node.transcript.component().expandables_focused() {
@@ -494,7 +688,7 @@ impl SubagentTree {
         let layout = Floating::new(&title, area.width, area.height, keys)
             .colors(
                 theme.border(),
-                theme.model(Model::Oai(nanocodex::Model::Sol)),
+                node.model.map_or(theme.muted(), |model| theme.model(model)),
             )
             .render(frame, area, theme);
         node.transcript.render(frame, layout.body, theme);
@@ -728,9 +922,9 @@ impl SubagentTree {
                 )),
                 Span::styled("    Model  ", Style::default().fg(theme.muted())),
                 Span::styled(
-                    model_name(Model::Oai(nanocodex::Model::Sol)),
+                    node.model.map_or("model unknown", model_name),
                     Style::default()
-                        .fg(theme.model(Model::Oai(nanocodex::Model::Sol)))
+                        .fg(node.model.map_or(theme.muted(), |model| theme.model(model)))
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -1106,6 +1300,19 @@ fn unix_time_ms() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+fn managed_result(payload: &Value) -> Value {
+    let structured = &payload["structured_result"];
+    let value = if structured.is_null() {
+        &payload["result"]
+    } else {
+        structured
+    };
+    let encoded = value.as_str().or_else(|| value["text"].as_str());
+    encoded
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| value.clone())
 }
 
 fn model_name(model: Model) -> &'static str {
