@@ -115,24 +115,25 @@ async fn unknown_call_is_paired_without_blocking_admitted_effects_or_expanding_c
             .unwrap();
         assert_eq!(result.final_message(), "recovered");
         assert_eq!(effects.load(Ordering::SeqCst), 2);
-        let requests = log.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests.iter().all(|r| r["tools"] == requests[0]["tools"]));
-        let messages = requests[2]["messages"].as_array().unwrap();
-        let receipts: Vec<_> = messages
-            .iter()
-            .flat_map(|m| m["content"].as_array().unwrap())
-            .filter(|b| b["type"] == "tool_result")
-            .collect();
-        assert_eq!(receipts.len(), 3);
-        assert!(!receipts[0]["is_error"].as_bool().unwrap_or(false));
-        assert_eq!(receipts[1]["is_error"], true);
-        assert!(!receipts[2]["is_error"].as_bool().unwrap_or(false));
-        eprintln!(
-            "catalog={name}; requests=3; effect executions=2; recovered={}",
-            result.final_message()
-        );
-        drop(requests);
+        {
+            let requests = log.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert!(requests.iter().all(|r| r["tools"] == requests[0]["tools"]));
+            let messages = requests[2]["messages"].as_array().unwrap();
+            let receipts: Vec<_> = messages
+                .iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .filter(|b| b["type"] == "tool_result")
+                .collect();
+            assert_eq!(receipts.len(), 3);
+            assert!(!receipts[0]["is_error"].as_bool().unwrap_or(false));
+            assert_eq!(receipts[1]["is_error"], true);
+            assert!(!receipts[2]["is_error"].as_bool().unwrap_or(false));
+            eprintln!(
+                "catalog={name}; requests=3; effect executions=2; recovered={}",
+                result.final_message()
+            );
+        }
         agent.shutdown().await.unwrap();
         server.abort();
     }

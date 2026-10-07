@@ -1063,6 +1063,9 @@ async fn summary_omits_invalidated_thinking_and_replays_new_reasoning() {
         json!({"type":"text","text":"completed"}),
     ];
     let answer = fresh.clone();
+    // Request 3 fails before any response commits. The recovery summary and its
+    // pending thinking-only boundary therefore remain uncommitted, which makes
+    // manual compaction pack the retained history with the summary applied.
     let (client, requests, task) = server(
         move |index, _| match index {
             1 => (
@@ -1074,11 +1077,10 @@ async fn summary_omits_invalidated_thinking_and_replays_new_reasoning() {
                 10,
             ),
             2 | 4 => (text("Preserve the task"), "end_turn", 10),
-            3 => (text("incomplete"), "max_tokens", 10),
             5 => (answer.clone(), "end_turn", 10),
             _ => (text("reviewed"), "end_turn", 10),
         },
-        None,
+        Some(3),
     )
     .await;
     let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
@@ -1086,14 +1088,15 @@ async fn summary_omits_invalidated_thinking_and_replays_new_reasoning() {
         .keep_thinking()
         .build()
         .unwrap();
-    let error = agent
-        .prompt("finish task")
-        .await
-        .unwrap()
-        .result()
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("MaxTokens"), "{error}");
+    assert!(
+        agent
+            .prompt("finish task")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .is_err()
+    );
     // The thinking-only response leaves no assistant content once the prior
     // summary is packed, so manual compaction summarizes user context alone.
     agent.compact().await.unwrap();
@@ -1106,7 +1109,87 @@ async fn summary_omits_invalidated_thinking_and_replays_new_reasoning() {
     for request in &log[2..5] {
         assert!(!request["messages"].to_string().contains("stale-"));
     }
+    // Manual compaction found no assistant to retain, so its input is only
+    // the prior summary, the recovery continuation and the summarization instruction.
+    let summary_input = log[3]["messages"].as_array().unwrap();
+    assert!(
+        summary_input
+            .iter()
+            .all(|message| message["role"] == "user")
+    );
+    assert!(summary_input[0].to_string().contains("Preserve the task"));
+    assert!(
+        summary_input
+            .iter()
+            .any(|message| message.to_string().contains("context window was exhausted"))
+    );
     assert_eq!(log[5]["messages"][2]["content"], json!(fresh));
+    task.abort();
+}
+
+#[tokio::test]
+async fn output_cutoff_after_summary_replays_only_post_summary_reasoning() {
+    let fresh = vec![
+        json!({"type":"thinking","thinking":"fresh reasoning","signature":"fresh-signature"}),
+        json!({"type":"text","text":"completed"}),
+    ];
+    let (client, requests, task) = server(
+        move |index, _| match index {
+            1 => (
+                vec![json!({"type":"thinking","thinking":"","signature":"stale-signature"})],
+                "model_context_window_exceeded",
+                10,
+            ),
+            2 => (text("Preserve the task"), "end_turn", 10),
+            3 => (
+                vec![
+                    json!({"type":"thinking","thinking":"","signature":"cutoff-signature"}),
+                    json!({"type":"text","text":"cut partial"}),
+                ],
+                "max_tokens",
+                10,
+            ),
+            _ => (fresh.clone(), "end_turn", 10),
+        },
+        None,
+    )
+    .await;
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        .adaptive_thinking()
+        .keep_thinking()
+        .build()
+        .unwrap();
+    assert_eq!(
+        agent
+            .prompt("finish task")
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap()
+            .final_message(),
+        "completed"
+    );
+    let log = requests.lock().unwrap();
+    assert_eq!(log.len(), 4);
+    // The pre-summary signature is never replayed. Thinking returned after the
+    // summary is bound to the packed prefix, which committing the response
+    // stores, so the following continuation replays it exactly.
+    assert!(!log[2]["messages"].to_string().contains("stale-"));
+    assert!(!log[3]["messages"].to_string().contains("stale-"));
+    assert!(!log[2]["messages"].to_string().contains("cutoff-signature"));
+    let continuation = log[3]["messages"].as_array().unwrap();
+    assert!(continuation[0].to_string().contains("Preserve the task"));
+    assert!(
+        continuation
+            .iter()
+            .any(|message| message["role"] == "assistant"
+                && message["content"][0]["signature"] == "cutoff-signature"
+                && message["content"][1]["text"] == "cut partial")
+    );
+    let last = continuation.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert!(last["content"].to_string().contains("output token limit"));
     task.abort();
 }
 

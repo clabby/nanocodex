@@ -1567,8 +1567,8 @@ impl BlockAccumulator {
 
     fn finish(self, truncated: bool) -> Result<ContentBlock, ClaudeError> {
         let block = match self {
-            BlockAccumulator::Text { text, extra } => ContentBlock::Text { text, extra },
-            BlockAccumulator::ToolUse {
+            Self::Text { text, extra } => ContentBlock::Text { text, extra },
+            Self::ToolUse {
                 id,
                 name,
                 initial,
@@ -1601,7 +1601,7 @@ impl BlockAccumulator {
                     extra,
                 }
             }
-            BlockAccumulator::ServerToolUse {
+            Self::ServerToolUse {
                 id,
                 name,
                 initial,
@@ -1625,7 +1625,7 @@ impl BlockAccumulator {
                     extra,
                 }
             }
-            BlockAccumulator::Thinking {
+            Self::Thinking {
                 thinking,
                 signature,
                 extra,
@@ -1634,7 +1634,7 @@ impl BlockAccumulator {
                 signature,
                 extra,
             },
-            BlockAccumulator::McpToolUse {
+            Self::McpToolUse {
                 id,
                 name,
                 server_name,
@@ -1660,7 +1660,7 @@ impl BlockAccumulator {
                     extra,
                 }
             }
-            BlockAccumulator::Other(block) => block,
+            Self::Other(block) => block,
         };
         Ok(block)
     }

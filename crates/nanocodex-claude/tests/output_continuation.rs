@@ -236,7 +236,7 @@ async fn malformed_terminal_without_token_cutoff_is_still_rejected() {
 }
 
 #[tokio::test]
-async fn automatic_compaction_retains_signed_cutoff_and_continuation_instruction() {
+async fn automatic_compaction_omits_old_thinking_but_retains_cutoff_and_continuation() {
     let (client, log, server) = fixture(vec![
         cut_tool(false, "max_tokens"),
         response(
@@ -268,11 +268,34 @@ async fn automatic_compaction_retains_signed_cutoff_and_continuation_instruction
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[1]["tool_choice"]["type"], "none");
     let continuation = requests[2]["messages"].as_array().unwrap();
+    // The summary replaces the prefix to which the old thinking was bound.
+    assert!(
+        !requests[2]["messages"]
+            .to_string()
+            .contains("opaque-signature")
+    );
+    assert!(
+        !requests[2]["messages"]
+            .to_string()
+            .contains("signed partial reasoning")
+    );
+    assert!(
+        continuation.iter().any(
+            |m| m["role"] == "assistant" && m["content"].to_string().contains("partial answer")
+        )
+    );
+    assert!(
+        requests[2]["messages"]
+            .to_string()
+            .contains("was not executed")
+    );
     assert!(
         continuation
             .iter()
-            .any(|m| m["role"] == "assistant"
-                && m["content"].to_string().contains("opaque-signature"))
+            .flat_map(|m| m["content"].as_array().unwrap())
+            .all(|block| block["type"] != "thinking"
+                && block["type"] != "redacted_thinking"
+                && block["type"] != "tool_use")
     );
     assert_eq!(continuation.last().unwrap()["role"], "user");
     assert!(
