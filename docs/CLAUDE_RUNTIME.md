@@ -202,6 +202,11 @@ adapter and capability types also exported at the crate root. For example,
 `nanocodex_claude_tools::ClaudeWorkspaceFiles`.
 
 The standalone tools crate has no OpenAI API/tools or agent dependency.
+The `nanocodex-claude` runtime crate is the one intentional Claude-side consumer
+of `nanocodex-oai-tools`: it enables only that crate's `image-processing`
+feature (no Code Mode, MCP or tool runtime) for the shared bounded image
+decoder. `scripts/check-crate-boundaries.sh` snapshots this edge and still
+fails if `nanocodex-claude-tools` reaches OpenAI or agent crates transitively.
 `HostContext` carries the actual model, session, turn, call and output budget,
 without a Responses history. Host outputs use native text/image blocks,
 `is_error`, and optional structured data/metadata; `ClaudeBuilder::host_tools`
