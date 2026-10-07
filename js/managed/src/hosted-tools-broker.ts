@@ -369,8 +369,10 @@ export class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   generationCalls(leaseId: string, generation: number): readonly HostedToolsCallRow[] {
     // This enumeration runs before initialize() migrates old rows. SELECT *
     // tolerates legacy nullable diagnostic columns without changing ownership.
+    // A command-recovery Hand keeps one generation across reconnects, so its
+    // settled history is unbounded; materialize only in-flight dispatches.
     return this.storage.sql.exec<HostedToolsCallRow>(
-      "SELECT * FROM hosted_tool_calls WHERE lease_id=? AND generation=? ORDER BY created_at", leaseId, generation,
+      "SELECT * FROM hosted_tool_calls WHERE lease_id=? AND generation=? AND state='dispatched' ORDER BY created_at", leaseId, generation,
     ).toArray();
   }
 

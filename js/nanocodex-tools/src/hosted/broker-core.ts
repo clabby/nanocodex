@@ -287,7 +287,11 @@ export interface HostedToolsBrokerPersistence {
   markGenerationAmbiguous(leaseId: string, generation: number, resultJson: string, now: number): void;
   activeCallCount(leaseId: string, generation: number): number;
   generationCallCount(leaseId: string, generation: number): number;
-  /** Required for command recovery; enumerates durable calls without resending commands. */
+  /**
+   * Required for command recovery; enumerates this generation's unsettled
+   * `dispatched` calls without resending commands. Settled history must stay
+   * in storage: a resumed generation accumulates it for the Hand's lifetime.
+   */
   generationCalls?(leaseId: string, generation: number): readonly HostedToolsCallRow[];
 }
 
