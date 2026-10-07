@@ -3864,6 +3864,12 @@ impl State {
                 // Reopening a prepared cursor never expands its original catalog.
                 self.refresh_dynamic_tools(&mut cursor);
                 if response.stop_reason == Some(StopReason::ToolUse) {
+                    // A finished model response and its tool round are committed
+                    // progress, so the output-cutoff budget bounds only
+                    // consecutive unfinished responses. Persist the reset with
+                    // this boundary: replay after a crash re-derives it from the
+                    // same receipts and cannot refill a still-consecutive count.
+                    cursor.output_continuations = 0;
                     self.advance_cursor(&mut cursor, conversation).await?;
                     continue;
                 }
@@ -3887,6 +3893,8 @@ impl State {
                 cursor.index = index + 1;
                 cursor.pending = pending.clone();
                 cursor.usage = usage.clone();
+                // A completed server-tool response is also forward progress.
+                cursor.output_continuations = 0;
                 self.advance_cursor(&mut cursor, conversation).await?;
                 continue;
             }
@@ -4029,6 +4037,9 @@ impl State {
                     format!("Host Stop hook requests continuation: {reason}"),
                 ));
                 cursor.stop_hook_active = true;
+                // The model finished this response normally, so any earlier
+                // cutoffs were not consecutive with the continuation it starts.
+                cursor.output_continuations = 0;
                 cursor.index = index + 1;
                 cursor.pending = pending.clone();
                 cursor.usage = usage.clone();
@@ -4054,6 +4065,9 @@ impl State {
             };
             if more_instructions {
                 cursor.index = index + 1;
+                // Same boundary as a Stop-hook continuation: a normal end_turn
+                // response, not an unfinished one, precedes accepted steering.
+                cursor.output_continuations = 0;
                 self.consume_steering(request, &mut cursor, &mut pending)
                     .await?;
                 conversation.messages = pending.clone();
