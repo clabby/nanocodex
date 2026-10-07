@@ -344,13 +344,34 @@ function validatedRelayRegion(value: string | null | undefined): DurableObjectLo
     ? value as DurableObjectLocationHint : undefined;
 }
 
-/** Bound only to the managed Session's private model transport, never tools. */
+const SESSION_MODEL_TRANSPORT_URLS: ReadonlySet<string> = new Set([
+  "https://nanocodex.internal/v1/responses", "https://nanocodex.internal/v1/messages",
+]);
+/** The Session's own provider-credential tool calls (web search, image
+ * generation and editing). Exact POST URLs only; never Realtime or control. */
+const SESSION_MODEL_TOOL_URLS: ReadonlySet<string> = new Set([
+  "https://nanocodex.internal/v1/search",
+  "https://nanocodex.internal/v1/images/generations",
+  "https://nanocodex.internal/v1/images/edits",
+]);
+/** Model operations a Session model authority may resolve without a callback. */
+const SESSION_MODEL_OPERATIONS: ReadonlySet<ModelOperation["id"]> = new Set([
+  "responses", "search", "image-generation", "image-edit",
+]);
+
+/**
+ * Bound only to the managed Session's private model transport and its own
+ * provider-credential model tools (web search, image generation/editing). It
+ * never carries connector, Vault, SSH, MCP, Realtime, or control traffic.
+ */
 export class SessionModelEgress extends WorkerEntrypoint<EgressEnv> {
   fetch(request: Request): Promise<Response> {
     const owner = request.headers.get(SESSION_MODEL_OWNER_HEADER);
     const subject = request.headers.get(SUBJECT_HEADER);
-    if (!["https://nanocodex.internal/v1/responses", "https://nanocodex.internal/v1/messages"].includes(request.url)
-      || (request.method !== "GET" && request.method !== "POST") || !owner || !USER_ID.test(owner)
+    const transport = SESSION_MODEL_TRANSPORT_URLS.has(request.url)
+      && (request.method === "GET" || request.method === "POST");
+    const tool = SESSION_MODEL_TOOL_URLS.has(request.url) && request.method === "POST";
+    if ((!transport && !tool) || !owner || !USER_ID.test(owner)
       || !subject || !MANAGED_SESSION_SUBJECT.test(subject)) {
       return Promise.resolve(jsonError(403, "invalid_session_model_authority"));
     }
@@ -358,7 +379,8 @@ export class SessionModelEgress extends WorkerEntrypoint<EgressEnv> {
     forwarded.headers.delete(SESSION_MODEL_OWNER_HEADER);
     // Only the private Session wrapper may assert placement; generic egress
     // never derives a region from this header. Nothing private goes upstream.
-    const region = validatedRelayRegion(forwarded.headers.get(SESSION_MODEL_REGION_HEADER));
+    // Placement applies to the model transport only, never to tool calls.
+    const region = transport ? validatedRelayRegion(forwarded.headers.get(SESSION_MODEL_REGION_HEADER)) : undefined;
     forwarded.headers.delete(SESSION_MODEL_REGION_HEADER);
     return handleEgress(forwarded, this.env, this.ctx, fetch, undefined, { subject, owner, ...(region ? { region } : {}) });
   }
@@ -738,7 +760,7 @@ async function handleMeasuredEgressWithOwner(
   // Never derived from caller input.
   const egressRequestId = operation.id === "responses" ? crypto.randomUUID() : undefined;
   try {
-    if (sessionModelAuthority && (operation.id !== "responses" || sessionModelAuthority.subject !== subject)) {
+    if (sessionModelAuthority && (!SESSION_MODEL_OPERATIONS.has(operation.id) || sessionModelAuthority.subject !== subject)) {
       return jsonError(403, "invalid_session_model_authority");
     }
     userId = sessionModelAuthority?.owner ?? ((operation.id === "realtime-call" || operation.id === "realtime-sideband") && verifiedVoiceOwner?.subject === subject

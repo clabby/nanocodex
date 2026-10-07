@@ -144,6 +144,18 @@ buffer supplies the single explicit-401 recovery attempt. Voice and legacy
 directory traffic keep their existing ownership checks. Deploy egress before
 enabling the managed binding.
 
+The same entrypoint also accepts the Session's own provider-credential model
+tools: exact `POST` `https://nanocodex.internal/v1/search`,
+`/v1/images/generations`, and `/v1/images/edits` (no query, port, or other
+method). These keep the generic credential placeholder, header, account
+selection, 401 recovery, and 429 account-failover handling, but use the asserted
+owner instead of the `ManagedAgentOwnership` callback. Placement headers apply
+only to the model transport and are ignored for these tool calls. Realtime,
+control, and every non-model route stay rejected, and `SessionToolEgress` never
+reaches these model-credential routes. Release this egress change before the
+managed code that routes web search and image tools to the binding: an older
+`SessionModelEgress` rejects those routes with 403.
+
 `SessionToolEgress` applies the same pattern to a managed Session's own tool
 traffic. It accepts only public egress, Vault `/v1/request`, SSH execute, MCP
 connection, and provider connector routes, requires a managed-session subject

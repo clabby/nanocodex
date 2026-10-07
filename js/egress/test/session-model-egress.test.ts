@@ -84,7 +84,7 @@ describe("Session-only model egress", () => {
       const invalid = new Headers(headers); invalid.set(header!, value!);
       expect((await entrypoint.fetch(new Request("https://nanocodex.internal/v1/responses", { method: "POST", headers: invalid, body: "{}" }))).status).toBe(403);
     }
-    for (const path of ["/v1/responses?x=1", "/v1/responses/", "/v1/responses/compact", "/v1/search"]) {
+    for (const path of ["/v1/responses?x=1", "/v1/responses/", "/v1/responses/compact", "/v1/realtime/calls", "/v1/search?x=1"]) {
       expect((await entrypoint.fetch(new Request(`https://nanocodex.internal${path}`, { method: "POST", headers, body: "{}" }))).status).toBe(403);
     }
   });
