@@ -1479,6 +1479,108 @@ enum BlockAccumulator {
     Other(ContentBlock),
 }
 
+impl BlockAccumulator {
+    fn finish(self, truncated: bool) -> Result<ContentBlock, ClaudeError> {
+        let block = match self {
+            BlockAccumulator::Text { text, extra } => ContentBlock::Text { text, extra },
+            BlockAccumulator::ToolUse {
+                id,
+                name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    Ok(initial)
+                } else {
+                    serde_json::from_str::<Value>(&fragments)
+                };
+                let input = match input {
+                    Ok(input) if input.is_object() => input,
+                    _ if truncated => {
+                        return Ok(ContentBlock::text(format!(
+                            "Incomplete tool input for {name} ({id}) was not executed because the output token limit was reached. Issue a fresh complete call if needed."
+                        )));
+                    }
+                    Err(error) => return Err(error.into()),
+                    _ => {
+                        return Err(ClaudeError::Protocol(
+                            "tool input must be a JSON object".into(),
+                        ));
+                    }
+                };
+                ContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    extra,
+                }
+            }
+            BlockAccumulator::ServerToolUse {
+                id,
+                name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    initial
+                } else {
+                    serde_json::from_str(&fragments)?
+                };
+                if !input.is_object() {
+                    return Err(ClaudeError::Protocol(
+                        "server tool input must be a JSON object".into(),
+                    ));
+                }
+                ContentBlock::ServerToolUse {
+                    id,
+                    name,
+                    input,
+                    extra,
+                }
+            }
+            BlockAccumulator::Thinking {
+                thinking,
+                signature,
+                extra,
+            } => ContentBlock::Thinking {
+                thinking,
+                signature,
+                extra,
+            },
+            BlockAccumulator::McpToolUse {
+                id,
+                name,
+                server_name,
+                initial,
+                fragments,
+                extra,
+            } => {
+                let input = if fragments.is_empty() {
+                    initial
+                } else {
+                    serde_json::from_str(&fragments)?
+                };
+                if !input.is_object() {
+                    return Err(ClaudeError::Protocol(
+                        "MCP tool input must be a JSON object".into(),
+                    ));
+                }
+                ContentBlock::McpToolUse {
+                    id,
+                    name,
+                    server_name,
+                    input,
+                    extra,
+                }
+            }
+            BlockAccumulator::Other(block) => block,
+        };
+        Ok(block)
+    }
+}
+
 /// Assemble streaming deltas into the same typed response as `create`.
 /// A partial tool JSON object or a missing terminal event is never returned as
 /// a usable tool call.
@@ -1493,7 +1595,7 @@ where
         return Err(ClaudeError::Protocol("expected message_start".into()));
     };
     let mut active = BTreeMap::<usize, BlockAccumulator>::new();
-    let mut completed = BTreeMap::<usize, ContentBlock>::new();
+    let mut completed = BTreeMap::<usize, BlockAccumulator>::new();
     while let Some(event) = events.next().await {
         match event? {
             StreamEvent::ContentBlockStart {
@@ -1610,93 +1712,6 @@ where
                 let block = active.remove(&index).ok_or_else(|| {
                     ClaudeError::Protocol(format!("unknown content block {index}"))
                 })?;
-                let block = match block {
-                    BlockAccumulator::Text { text, extra } => ContentBlock::Text { text, extra },
-                    BlockAccumulator::ToolUse {
-                        id,
-                        name,
-                        initial,
-                        fragments,
-                        extra,
-                    } => {
-                        let input = if fragments.is_empty() {
-                            initial
-                        } else {
-                            serde_json::from_str(&fragments)?
-                        };
-                        if !input.is_object() {
-                            return Err(ClaudeError::Protocol(
-                                "tool input must be a JSON object".into(),
-                            ));
-                        }
-                        ContentBlock::ToolUse {
-                            id,
-                            name,
-                            input,
-                            extra,
-                        }
-                    }
-                    BlockAccumulator::ServerToolUse {
-                        id,
-                        name,
-                        initial,
-                        fragments,
-                        extra,
-                    } => {
-                        let input = if fragments.is_empty() {
-                            initial
-                        } else {
-                            serde_json::from_str(&fragments)?
-                        };
-                        if !input.is_object() {
-                            return Err(ClaudeError::Protocol(
-                                "server tool input must be a JSON object".into(),
-                            ));
-                        }
-                        ContentBlock::ServerToolUse {
-                            id,
-                            name,
-                            input,
-                            extra,
-                        }
-                    }
-                    BlockAccumulator::Thinking {
-                        thinking,
-                        signature,
-                        extra,
-                    } => ContentBlock::Thinking {
-                        thinking,
-                        signature,
-                        extra,
-                    },
-                    BlockAccumulator::McpToolUse {
-                        id,
-                        name,
-                        server_name,
-                        initial,
-                        fragments,
-                        extra,
-                    } => {
-                        let input = if fragments.is_empty() {
-                            initial
-                        } else {
-                            serde_json::from_str(&fragments)?
-                        };
-                        if !input.is_object() {
-                            return Err(ClaudeError::Protocol(
-                                "MCP tool input must be a JSON object".into(),
-                            ));
-                        }
-                        ContentBlock::McpToolUse {
-                            id,
-                            name,
-                            server_name,
-                            input,
-                            extra,
-                        }
-                    }
-                    BlockAccumulator::Other(block) => block,
-                };
                 completed.insert(index, block);
             }
             StreamEvent::MessageDelta { delta, usage } => {
@@ -1723,10 +1738,24 @@ where
                 if message.stop_reason.is_none() {
                     return Err(ClaudeError::Protocol("missing final stop_reason".into()));
                 }
-                if !active.is_empty() {
-                    return Err(ClaudeError::Protocol(
-                        "message_stop before content_block_stop".into(),
-                    ));
+                let truncated = message.stop_reason == Some(StopReason::MaxTokens);
+                for (index, block) in active {
+                    // Only an explicit output cutoff explains an open text/client
+                    // block. Never synthesize a signature or a server-tool receipt.
+                    let block = match block {
+                        BlockAccumulator::Text { .. } if truncated => block,
+                        BlockAccumulator::ToolUse { id, name, .. } if truncated => {
+                            BlockAccumulator::Other(ContentBlock::text(format!(
+                                "Incomplete tool input for {name} ({id}) was not executed because the output token limit was reached. Issue a fresh complete call if needed."
+                            )))
+                        }
+                        _ => {
+                            return Err(ClaudeError::Protocol(
+                                "message_stop before content_block_stop".into(),
+                            ));
+                        }
+                    };
+                    completed.insert(index, block);
                 }
                 let count = completed.len();
                 if completed.keys().copied().ne(0..count) {
@@ -1734,7 +1763,10 @@ where
                         "non-contiguous content block indices".into(),
                     ));
                 }
-                message.content = completed.into_values().collect();
+                message.content = completed
+                    .into_values()
+                    .map(|block| block.finish(truncated))
+                    .collect::<Result<Vec<_>, _>>()?;
                 return Ok(message);
             }
             StreamEvent::Error { error } => {

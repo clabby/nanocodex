@@ -3426,7 +3426,10 @@ impl State {
                         ContentBlock::ToolUse {
                             id, name, input, ..
                         } => {
-                            if response.stop_reason != Some(StopReason::ToolUse) {
+                            if !matches!(
+                                response.stop_reason,
+                                Some(StopReason::ToolUse | StopReason::MaxTokens)
+                            ) {
                                 return Err(provider_error(
                                     "tool_use block without tool_use stop reason",
                                 ));
@@ -3684,7 +3687,7 @@ impl State {
                 role: Role::Assistant,
                 content: response.content,
             });
-            if response.stop_reason == Some(StopReason::ToolUse) {
+            if has_tool_calls {
                 pending.push(Message::tool_results(
                     results.into_iter().map(Option::unwrap).collect(),
                 ));
@@ -3718,8 +3721,10 @@ impl State {
                 // Admit discovery/removal for the next request before persisting it.
                 // Reopening a prepared cursor never expands its original catalog.
                 self.refresh_dynamic_tools(&mut cursor);
-                self.advance_cursor(&mut cursor, conversation).await?;
-                continue;
+                if response.stop_reason == Some(StopReason::ToolUse) {
+                    self.advance_cursor(&mut cursor, conversation).await?;
+                    continue;
+                }
             }
             if response.stop_reason == Some(StopReason::PauseTurn) {
                 // Server tools continue with the same tool array and paused
@@ -3744,7 +3749,8 @@ impl State {
                 continue;
             }
             let exhausted = response.stop_reason == Some(StopReason::ModelContextWindowExceeded);
-            if has_server_effects || exhausted {
+            let output_exhausted = response.stop_reason == Some(StopReason::MaxTokens);
+            if has_server_effects || exhausted || output_exhausted {
                 // Complete provider content owns partial output and any server
                 // effects. Keep this boundary even if recovery or cancellation
                 // prevents the next assistant response.
@@ -3768,6 +3774,32 @@ impl State {
                 return Err(provider_error(
                     "server turn ended without a complete server-tool result; outcome unknown",
                 ));
+            }
+            if output_exhausted {
+                if cancel.flag.load(Ordering::SeqCst) {
+                    return Err(NanocodexError::TurnCancelled);
+                }
+                // This budget is persisted with the admitted operation. Completed
+                // content and paired tool receipts are committed before checking it.
+                if cursor.output_continuations >= 3 {
+                    return Err(provider_error(
+                        "Claude output token limit exhausted after 3 continuations; partial output and completed tool results retained",
+                    ));
+                }
+                cursor.output_continuations += 1;
+                pending.push(Message::text(
+                    Role::User,
+                    "Continue the current task from the interrupted response. The output token limit was reached. Do not repeat completed tool actions. Any incomplete tool input was not executed; issue a fresh complete call if still needed.",
+                ));
+                // Automatic compaction rebuilds pending from this history. Keep
+                // the instruction with the interrupted boundary across that swap.
+                conversation.messages = pending.clone();
+                cursor.index = index + 1;
+                cursor.pending = pending.clone();
+                cursor.usage = usage.clone();
+                self.refresh_dynamic_tools(&mut cursor);
+                self.advance_cursor(&mut cursor, conversation).await?;
+                continue;
             }
             if exhausted {
                 if cancel.flag.load(Ordering::SeqCst) {
