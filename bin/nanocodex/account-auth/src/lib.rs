@@ -353,6 +353,24 @@ pub fn saved_enrollment_account_file() -> std::result::Result<PathBuf, ManagedEr
     resolve().map_err(|error| ManagedError::Configuration(error.to_string()))
 }
 
+/// Resolve only the exact saved login selected by an activation receipt.
+/// Ambient environment keys cannot change this selection.
+pub fn saved_enrollment_credentials(
+    path: &std::path::Path,
+    origin: &str,
+) -> Result<(String, zeroize::Zeroizing<String>)> {
+    if !path.is_absolute() {
+        return Err(Error::message("Saved account file must be absolute"));
+    }
+    let origin = canonical_origin(origin)?;
+    let saved = store::load(path)?;
+    let key = saved
+        .accounts
+        .get(&origin)
+        .ok_or_else(|| Error::message("No saved account login for this origin"))?;
+    Ok((origin, zeroize::Zeroizing::new(key.api_key.clone())))
+}
+
 /// Run the normal SMS login against the default managed account and credential
 /// file. Used by the guided first-run flow without inventing a second auth path.
 pub async fn login_default() -> std::result::Result<(), Error> {

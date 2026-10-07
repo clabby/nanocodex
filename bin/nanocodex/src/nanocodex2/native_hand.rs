@@ -429,7 +429,7 @@ pub(super) async fn run_observed(
 /// remain available while the optional upstream provider is being prepared.
 pub(super) async fn computer_tools()
 -> Result<Option<nanocodex_computer::ComputerTools>, ManagedError> {
-    super::computer::connect_for_startup()
+    super::computer::connect_for_hand()
         .await
         .map_err(configuration)
 }

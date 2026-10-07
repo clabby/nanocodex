@@ -2,6 +2,13 @@
 
 `nanocodex2 hand` is the headless machine runner. Install it once under the OS service manager; the CLI and app observe it. The installer/controller is not its lifetime owner: an installed Hand must remain independently owned after setup, an updater, or every observing CLI session exits. The native `nanocodex hand` controller uses a per-user LaunchAgent on macOS, systemd on Linux, and a per-user Task Scheduler job on Windows. If installation, start permission, or the account-scoped connection is unavailable, the CLI prints an actionable warning and continues remote work. `NANOCODEX_DISABLE_HAND=1` skips the local Hand check.
 
+`nanocodex2`, `run`, and `attach` connect to this persistent daemon through
+private local IPC. Each client owns only an observing lease; closing it leaves
+the daemon and its processes running. A terminal's current directory is
+descriptive request context, independent of publisher identity. Changing
+projects does not publish or reconnect a Hand. An unavailable service produces
+a warning instead of a replacement workspace publisher.
+
 ```text
 OS -> Hand daemon <--- outbound WebSocket ---> AccountHostedTools <- agent
        |-- host tools
@@ -62,6 +69,28 @@ login, platform CUA provisioning, and idempotent `nanocodex hand install`. Use
 platforms. A remote Linux host can be enrolled without interactive auth using
 `nanocodex hand install --target user@host [--port PORT]`.
 
+On macOS and Linux, the installer also supports logged-out preparation with
+`nanocodex hand install --prepare`. It preserves an existing installation's
+account configuration. The account login flow activates the prepared service
+using the exact saved login through `nanocodex hand connect`; an unrelated
+ambient API key does not select its account.
+
+Linux prepares the service and starts `nanocodex-hand-components.service` with
+`systemctl start --no-block`. This root-owned oneshot installs and validates
+desktop dependencies, has a fifteen-minute startup bound, and remains active
+after completion. The non-root Hand service requires that unit and waits for
+`/opt/nanocodex/account.env`; logged-out preparation creates no account credential
+or publisher. Sign-in installs that root-owned mode-0600 environment file,
+starts the Hand, and waits for account and controllable screen catalogs.
+
+A fresh local sudo installation uses the invoking non-root user's UID; retained
+installations keep their existing service owner. The dedicated `nanocodex` user
+is used when no non-root sudo invoker is available. State remains under
+`/srv/nanocodex` with private permissions. Same-owner clients validate the
+root-owned installation metadata and reuse this state and private IPC across
+changes to `HOME`; other users do not gain access. Closing observers or repeating
+unchanged setup does not restart the publisher.
+
 The installed Rust updater runs hourly as a per-user LaunchAgent, systemd timer,
 or Task Scheduler job. It stages verified matching CLI/Hand bundles and never
 silently restarts an installed Hand. An explicit `hand restart` activates a staged
@@ -82,6 +111,17 @@ For a custom login, pass `--managed-url https://your-server` and `--account-file
 Use `sudo systemctl stop/start nanocodex-hand` on Linux. On macOS, use `sudo launchctl bootout system/com.nanocodex.hand` to stop and `sudo launchctl bootstrap system /Library/LaunchDaemons/com.nanocodex.hand.plist` to start. Remove/disable the OS service to prevent future boot startup. Windows service installation is not provided by this helper.
 
 The Linux SSH bootstrap installs the same single daemon with its VM recipe. Older separate factory services require an explicit installation/migration decision; an updater never removes or restarts them. Publishers send `capabilities: ["turn_metadata"]`; a retained command journal is advertised with `command_recovery: true` and a stable `runtime_id`. Recovery exchanges command status or retained receipts, and does not provide process persistence across daemon crashes.
+
+The Ubuntu `shared-hands` CI job builds the CLI pair once with the existing Rust
+cache, then runs `scripts/tests/linux-hand-installer.py` against the image in
+`scripts/fixtures/linux-installer/Dockerfile`. The black-box journey owns a
+disposable privileged systemd container; sudo permits reading the built binaries.
+Only the account HTTP/WebSocket service is a fixture. It checks logged-out
+preparation, activation, private credentials, two same-owner observers, daemon
+survival and idempotent setup. The bounded CI steps always upload available
+command, service and account evidence under `output/linux-hand-installer/`.
+This container journey does not establish physical desktop capture or reboot
+behavior on a user's machine.
 
 ## Coordinated updates and independent lifetime
 
@@ -154,8 +194,17 @@ output to a private file; small commands avoid temporary-file setup/cleanup.
 Reply budgets do not discard unread output, and UTF-8 decoding spans polls and
 spills.
 
-Fresh managed cells join retained-VM readiness and fresh account Hand discovery
-concurrently, then capture one authorized, generation-pinned namespace. Both
+For a known selected user Hand, `exec_command` and workdir-scoped CUA capture
+only that route. A locally online shell route needs no account inventory;
+account-owned routes and CUA use a selected-machine lookup, including the
+independently published screen for CUA. Captures extend the cell without
+replacing its earlier generation bindings. `write_stdin` uses its retained
+process owner and rechecks authority and generation directly, without inventory
+preparation or rerouting a poll.
+
+Full discovery remains for inventory, unresolved routes and retained-VM
+preparation. That path joins retained-VM readiness and account Hand discovery
+concurrently before capturing an authorized, generation-pinned namespace. Both
 branches are joined even on failure; current authority and verified VM routes
 are rechecked at capture. Account `/snapshot` and `/invoke` build a synchronous
 request-local catalog index once, rather than rebuilding every publisher's
@@ -171,11 +220,14 @@ Measure the boundaries separately:
   tool-call latency. Subtracting it from client elapsed time does not establish
   one-way network latency.
 - `namespace.prepare` includes fresh-cell preparation; its
-  `namespace.host_readiness` and `namespace.account_discovery` sub-stages overlap
+  `namespace.host_readiness` and `namespace.account_discovery` sub-stages on
+  the full-discovery path overlap
   and must not be summed as serial costs. A successful readiness phase can still
   exclude individual unavailable VMs. Each stage excludes the cost of recording
   its own diagnostic event; measure full public/client waits too. `/brain`
   bypasses Hand preparation.
+- `namespace.selected_lookup` measures the selected account Hand lookup;
+  selected routes do not imply retained-VM preparation avoids full inventory.
 - Correlated Hand observations split namespace routing, account input/ownership,
   broker admission/round trip/settlement, host scheduling/execution and result
   encoding. Preserve first-observed requests, warm calls and concurrent bursts
@@ -227,6 +279,13 @@ Retained offline upstream catalogs do not take precedence over a live screen.
 An online upstream pair adds the `computer` capability even when the native
 publisher omitted that label. Shell connectivity and screen connectivity remain
 separate; capability labels alone do not prove that an input can be dispatched.
+
+A persistent dynamic CUA gateway can discover components that finish preparing
+after daemon startup. Discover with only `workdir` before supplying provider
+arguments. If components are still preparing, discovery can select the captured
+native screen; without one it reports preparation and requires a new cell.
+Once selected, the provider remains pinned for that cell, and an input failure
+never triggers a retry on another backend.
 
 Each Code Mode cell keeps its captured provider. A missing provider fails before
 input dispatch and directs the caller to rediscover the same Hand in a new

@@ -5,7 +5,7 @@ import { recordDiagnostic } from "./diagnostic-journal";
  * the local awaited boundary, not time before a Worker starts or after it returns.
  */
 export type HandCallOutcome = "ok" | "failed" | "unavailable" | "ambiguous" | "cancelled";
-export type HandCallStage = "namespace.prepare" | "namespace.host_readiness" | "namespace.account_discovery" | "namespace.route" | "namespace.invoke" | "namespace.cua.queue"
+export type HandCallStage = "namespace.prepare" | "namespace.host_readiness" | "namespace.account_discovery" | "namespace.selected_lookup" | "namespace.route" | "namespace.invoke" | "namespace.cua.queue"
   | "account.decode_input" | "account.ownership" | "account.resolve" | "account.handler" | "account.fetch"
   | "account.decode" | "sandbox.preflight" | "sandbox.invoke";
 

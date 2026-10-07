@@ -3511,7 +3511,7 @@ function createManagedNamespaceRuntime(
   authorizationKey: (context: ToolContext) => string = () => "account",
   processStorage?: NamespaceProcessStorage,
   threadId?: string,
-  localPreparation?: (context: ToolContext, name: string | undefined, input: unknown) => NamespaceCaptureFilter | undefined,
+  localPreparation?: (context: ToolContext, name: string | undefined, input: unknown) => NamespaceCaptureFilter | undefined | Promise<NamespaceCaptureFilter | undefined>,
 ): Readonly<{ tools: NamedTool[]; capture(context: ToolContext): Promise<void> }> {
   const runtime = createNamespaceExecutionRuntime(
     machines,
@@ -3534,18 +3534,50 @@ function createManagedNamespaceRuntime(
     // A selected session route is already authorized and generation-bound by
     // the local broker. Do not gate it on unrelated account or VM availability.
     const localStarted = performance.now();
-    const localFilter = localPreparation?.(context, toolName, input);
-    if (localFilter) {
-      const workdir = (input as { workdir: string }).workdir;
-      runtime.capture(context, localFilter, false, true);
-      if (runtime.hasRoute(context, workdir)) {
-        if (!locallyCaptured.has(key)) {
-          locallyCaptured.add(key);
-          observeHandCall("namespace.prepare", toolName ?? "other", localStarted, "ok", context.callId,
-            { thread_id: threadId, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
-        }
-        return;
+    const localAuthority = authorizationKey(context);
+    const computer = toolName === CUA_JS_NAME || toolName === CUA_RESET_NAME;
+    const selectedWorkdir = (toolName === "exec_command" || computer) && input && typeof input === "object"
+      ? (input as { workdir?: unknown }).workdir : undefined;
+    if (typeof selectedWorkdir === "string" && runtime.hasRoute(context, selectedWorkdir, computer)) return;
+    const selectedKey = typeof selectedWorkdir === "string" ? key + "\u0000" + selectedWorkdir : undefined;
+    const selectedPending = selectedKey === undefined ? undefined : preparations.get(selectedKey);
+    if (selectedPending !== undefined) {
+      await selectedPending;
+      if (runtime.hasRoute(context, selectedWorkdir as string, computer)) return;
+    }
+    let resolveSelected: (() => void) | undefined;
+    let rejectSelected: ((error: unknown) => void) | undefined;
+    if (selectedKey !== undefined) {
+      const pending = new Promise<void>((resolve, reject) => { resolveSelected = resolve; rejectSelected = reject; });
+      void pending.catch(() => {});
+      preparations.set(selectedKey, pending);
+    }
+    try {
+      const localFilter = await localPreparation?.(context, toolName, input);
+      if (!canUseExecutionNamespace(context) || authorizationKey(context) !== localAuthority) {
+        throw new ManagedRequestError(403, "namespace_forbidden", "the current authorization cannot use execution hands");
       }
+      context.signal.throwIfAborted();
+      if (localFilter) {
+        const workdir = (input as { workdir: string }).workdir;
+        runtime.capture(context, localFilter, true, !computer);
+        if (runtime.hasRoute(context, workdir, computer)) {
+          if (!locallyCaptured.has(key)) {
+            locallyCaptured.add(key);
+            observeHandCall("namespace.prepare", toolName ?? "other", localStarted, "ok", context.callId,
+              { thread_id: threadId, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+          }
+          return;
+        }
+      }
+    } catch (error) {
+      rejectSelected?.(error);
+      observeHandCall("namespace.prepare", toolName ?? "other", localStarted, context.signal.aborted ? "cancelled" : "failed", context.callId,
+        { thread_id: threadId, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+      throw error;
+    } finally {
+      resolveSelected?.();
+      if (selectedKey !== undefined) preparations.delete(selectedKey);
     }
     const pending = preparations.get(key);
     if (pending !== undefined) return pending;
@@ -3603,7 +3635,10 @@ function createManagedNamespaceRuntime(
           "the current authorization cannot use execution hands",
         );
       }
-      await capture(context, name, input);
+      // Process IDs carry their original owner, authority and provider binding.
+      // The handler rechecks durable generation identity directly; inventory
+      // preparation cannot improve that binding and must never reroute a poll.
+      if (name !== "write_stdin") await capture(context, name, input);
       return tool.handler(input, context);
     },
     releaseSession: (sessionId: string) => {
@@ -10438,19 +10473,34 @@ export class DurableAgentSession extends DurableComputerObject {
       ]),
       this.#processSessions,
       session.session_id,
-      (context, name, input) => {
-        // CUA can also depend on the independently published account screen;
-        // retain full discovery for that contract and for inventory/process tools.
-        if (name !== "exec_command" || !input || typeof input !== "object") return undefined;
+      async (context, name, input) => {
+        // Capture only the selected Hand, including its independently published screen.
+        const computer = name === CUA_JS_NAME || name === CUA_RESET_NAME;
+        if ((name !== "exec_command" && !computer) || !input || typeof input !== "object") return undefined;
         const workdir = (input as { workdir?: unknown }).workdir;
         if (typeof workdir !== "string" || !workdir.startsWith("/")) return undefined;
         const cwd = resolveNamespaceCwd("/brain", workdir);
-        const local = namespaceMachines(context).filter(machine => machine.id.startsWith("user:")
-          && this.#hostedTools.machineOnline(machine.id.slice("user:".length)));
-        if (!local.some(machine => [machine.root!, ...(machine.aliases ?? [])]
-          .some(root => cwd === root || cwd.startsWith(`${root}/`)))) return undefined;
-        const ids = new Set(local.map(machine => machine.id));
-        return machine => ids.has(machine.id);
+        const known = namespaceMachines(context).filter(machine => machine.id.startsWith("user:"));
+        const selected = known.find(machine => [machine.root!, ...(machine.aliases ?? [])]
+          .some(root => cwd === root || cwd.startsWith(`${root}/`)));
+        if (!selected) return undefined;
+        const id = selected.id.slice("user:".length);
+        if (computer || !this.#hostedTools.machineOnline(id)) {
+          if (!this.#accountHostedTools) return undefined;
+          const started = performance.now();
+          try {
+            await this.#accountHostedTools.refreshMachine(id, context, computer);
+            observeHandCall("namespace.selected_lookup", name, started, "ok", context.callId,
+              { thread_id: session.session_id, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+          } catch (error) {
+            observeHandCall("namespace.selected_lookup", name, started, context.signal.aborted ? "cancelled" : "failed", context.callId,
+              { thread_id: session.session_id, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
+            throw error;
+          }
+        }
+        // Incremental capture preserves earlier cell routes, including their
+        // original generation when another selected Hand is looked up later.
+        return machine => machine.id === selected.id;
       },
     );
     const cloudTools: NamedTool[] = [

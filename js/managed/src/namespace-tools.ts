@@ -136,7 +136,7 @@ export type NamespaceCaptureFilter = (machine: NamespaceMachine) => boolean;
 export type NamespaceExecutionRuntime = Readonly<{
   tools: ToolMap;
   capture(context: ToolContext, filter?: NamespaceCaptureFilter, extend?: boolean, deferComputer?: boolean): void;
-  hasRoute(context: ToolContext, workdir: string): boolean;
+  hasRoute(context: ToolContext, workdir: string, computer?: boolean): boolean;
 }>;
 
 /**
@@ -163,6 +163,34 @@ export function createNamespaceExecutionRuntime(
   }) satisfies MountedHand;
   const cells = new Map<string, AuthorizedCellBinding>();
   const sessions = new Map<number, ProcessBinding>();
+  // Discovery selects a backend once for this exact captured Hand. Never retry
+  // a failed probe or retarget an action after publication changes.
+  const dynamicComputers = new WeakMap<MountedHand, Promise<MountedHand>>();
+  const discoverDynamicComputer = async (hand: MountedHand, context: ToolContext): Promise<MountedHand> => {
+    const result = await hand.cua!.handler({}, context);
+    context.signal.throwIfAborted();
+    const payload = isToolResult(result) ? result.structuredResult ?? result.output : result;
+    const decoded = typeof payload === "string" ? JSON.parse(payload) : payload;
+    const content = decoded?.content;
+    const receipt = Array.isArray(content)
+      ? JSON.parse(content.find((item: { type?: string; text?: string }) => item.type === "text")?.text ?? "null") : decoded;
+    if (receipt?.status === "preparing") {
+      if (!hand.screen) throw new Error(`Computer components for ${hand.root} are preparing; discover in a new Code Mode cell`);
+      return Object.freeze({ ...hand, ...nativeScreenCua(hand.screen), cuaBackend: "native_screen" });
+    }
+    if (receipt?.status !== "ready" || !Array.isArray(receipt.definitions))
+      throw new Error("Invalid dynamic CUA discovery receipt");
+    const providerTool = (name: string, gateway: RoutedTool): RoutedTool => {
+      const definition = receipt.definitions.find((entry: { name?: string }) => entry.name === name);
+      if (!definition || typeof definition.description !== "string" || !definition.parameters)
+        throw new Error(`Dynamic CUA provider has no ${name} contract`);
+      return Object.freeze({ definition, handler: gateway.handler });
+    };
+    return Object.freeze({ ...hand,
+      cua: withNativeRecording(providerTool("js", hand.cua!), hand.screen),
+      cuaReset: providerTool("js_reset", hand.cuaReset!),
+    });
+  };
 
   const cell = (context: ToolContext, filter?: NamespaceCaptureFilter, extend = false, deferComputer = false): AuthorizedCellBinding => {
     // Direct tools have an empty parentCallId. Pin those to their own call,
@@ -219,13 +247,26 @@ export function createNamespaceExecutionRuntime(
       observeHandCall("namespace.route", name, routeStarted, "unavailable", context.callId, correlation(context));
       throw error;
     }
-    const hand = binding.hands.get(route.mount.mountId);
+    let hand = binding.hands.get(route.mount.mountId);
+    const providerInput = without(value, "workdir");
+    if (hand?.cua?.definition?.description?.startsWith("NANOCODEX_DYNAMIC_CUA_V1.")) {
+      let pending = dynamicComputers.get(hand);
+      if (!pending) {
+        if (name !== CUA_JS_NAME || Object.keys(providerInput).length !== 0)
+          throw new Error("Discover this Hand with only workdir before sending dynamic CUA input");
+        context.signal.throwIfAborted();
+        pending = discoverDynamicComputer(hand, context);
+        dynamicComputers.set(hand, pending);
+      }
+      hand = await pending;
+      // Recheck the captured cell's authority after the remote discovery await.
+      cell(context);
+    }
     if (!hand?.cua || !hand.cuaReset) {
       observeHandCall("namespace.invoke", name, routeStarted, "unavailable", context.callId, correlation(context));
       if (route.mount.root === DEFAULT_CWD) throw new Error("/brain has no desktop. Use an explicit Hand workdir for CUA.");
       throw new Error(`CUA is unavailable for ${route.mount.root} in this cell's captured routes. No action was dispatched. A screen publisher may be disconnected or reconnecting; discover this same workdir in a new Code Mode cell before sending input. Use environment to inspect current Hand availability.`);
     }
-    const providerInput = without(value, "workdir");
     // JS with only a workdir discovers the actual provider API without executing
     // anything. Reset with only a workdir still invokes the provider's empty reset.
     if (name === CUA_JS_NAME && Object.keys(providerInput).length === 0) {
@@ -238,6 +279,7 @@ export function createNamespaceExecutionRuntime(
         }
         return { ...definition, name: toolName };
       });
+      observeHandCall("namespace.invoke", name, routeStarted, "ok", context.callId, correlation(context));
       return { workdir: hand.root, machine_id: hand.machineId,
         backend: hand.cuaBackend, tools: [CUA_JS_NAME, CUA_RESET_NAME], definitions,
         browser_interaction: BACKGROUND_BROWSER_INSTRUCTIONS,
@@ -441,11 +483,12 @@ export function createNamespaceExecutionRuntime(
   return Object.freeze({
     tools,
     capture: (context: ToolContext, filter?: NamespaceCaptureFilter, extend = false, deferComputer = false) => { void cell(context, filter, extend, deferComputer); },
-    hasRoute: (context, workdir) => {
+    hasRoute: (context, workdir, computer = false) => {
       const retained = cells.get(`${context.sessionId}\u0000${context.parentCallId || context.callId}`);
       if (!retained || retained.authorizationKey !== authorizationKey(context)) return false;
       const cwd = canonicalCwd(retained, workdir);
-      return [...retained.hands.values()].some(hand => cwd === hand.root || cwd.startsWith(`${hand.root}/`));
+      return [...retained.hands.values()].some(hand => (!computer || !hand.computerDeferred)
+        && (cwd === hand.root || cwd.startsWith(`${hand.root}/`)));
     },
   });
 }

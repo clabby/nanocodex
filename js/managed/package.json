@@ -63,7 +63,7 @@
     "test:permissions": "node --test test/permission-requests-journey.test.mjs test/permission-tool-journey.test.mjs",
     "test:crm-search": "node scripts/prepare-code-evaluator.mjs && node scripts/prepare-just-bash-lazy.mjs && node --test test/crm-greek-search-journey.test.mjs",
     "test:vault-requests": "node --test test/vault-request-journey.test.mjs test/vault-totp-account-journey.test.mjs",
-    "test:regional-hand-relay": "node --test test/regional-hand-relay-journey.test.mjs",
+    "test:regional-hand-relay": "node --test test/regional-hand-relay-journey.test.mjs test/regional-hand-transport.test.mjs",
     "test:code-mode-only": "node --test test/code-mode-only-journey.test.mjs",
     "test:provider-vault": "node ../egress/scripts/prepare-whatsapp.mjs && node scripts/prepare-code-evaluator.mjs && node scripts/prepare-just-bash-lazy.mjs && node --test test/same-origin-mutation.test.mjs test/mercator-private-result-journey.test.mjs test/provider-vault-journey.test.mjs",
     "test:account-links": "node --test test/account-navigation-journey.test.mjs",

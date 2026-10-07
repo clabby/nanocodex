@@ -25,7 +25,6 @@ const command = "pnpm --filter nanocodex-managed-service test:hand-preparation";
 const trials = Array.from({ length: 7 }, (_, i) => `MEASURE_${i}`);
 const scripts = Object.fromEntries(trials.map(scenario => [scenario, `
   const results = await Promise.all(["a","b"].map(part => tools.exec_command({cmd:"printf '${scenario}:"+part+"\\n' >> effect.log; printf PREP_OK",workdir:"/${machine}",shell:"/bin/sh",login:false,yield_time_ms:1000})));
-  for (const workdir of ["/slow-vm", "/fast-vm"]) { try { await tools.exec_command({cmd:"printf MUST_NOT_RUN",workdir}); text("UNSAFE_VM"); } catch(error) { text({excluded:workdir,error:error.message}); } }
   text(results);
 `]));
 scripts.LOCAL = `text(await tools.exec_command({cmd:"printf LOCAL_INDEPENDENT",workdir:"/${localMachine}",shell:"/bin/sh",login:false}));`;
@@ -42,6 +41,7 @@ scripts.RECONNECT = `
   catch(error) { text({stale_route:error.message}); }
 `;
 scripts.RECOVER = scripts.LOCAL;
+scripts.OFFLINE = `try { text(await tools.exec_command({cmd:"printf MUST_NOT_RUN_OFFLINE",workdir:"/${machine}",shell:"/bin/sh",login:false})); } catch(error) { text({offline:error.message}); }`;
 scripts.PROCESS = `
   const started=await tools.exec_command({cmd:"sleep 0.3; printf PROCESS_RESUMED",workdir:"/${localMachine}",shell:"/bin/sh",login:false,yield_time_ms:1});
   if(!started.session_id) throw Error("expected retained native process");
@@ -52,6 +52,8 @@ scripts.INVENTORY = `
   const env=await tools.environment({});text({inventory:Object.keys(env.hands)});
 `;
 for (let i=0;i<7;i++) scripts[`DIRECT_MEASURE_${i}`] = scripts.LOCAL;
+scripts.OMITTED = 'text(await tools.exec_command({cmd:"printf OMITTED_BRAIN"}));';
+scripts.EXCLUDED = 'for(const workdir of ["/slow-vm","/fast-vm","/unknown-hand"]) {try {text(await tools.exec_command({cmd:"printf UNSAFE_DISPATCH",workdir}));} catch(error) {text({excluded:workdir,error:error.message});}}';
 scripts.BRAIN = 'text(await tools.exec_command({cmd:"printf BRAIN_INDEPENDENT",workdir:"/brain"}));';
 scripts.FAIL = `try { text(await tools.exec_command({cmd:"printf MUST_NOT_RUN",workdir:"/${machine}"})); } catch(error) { text({expected_failure:error.message}); }`;
 const mounts = ["slow", "fast"].map((name, i) => ({ id: `fixture-${name}`, root: `/${name}-vm`, provider: "host", name,
@@ -72,9 +74,9 @@ export class ObservedAccountHostedTools extends AccountHostedTools {
     const path=new URL(request.url).pathname;
     if(path==='/__fixture') { await this.ctx.storage.put('fixture',await request.json()); return new Response(null,{status:204}); }
     if(path==='/snapshot') {
-      const config=await this.ctx.storage.get('fixture')??{},started=Date.now();
-      console.info({type:'fixture.snapshot',stage:'start',at:started});
-      await new Promise(resolve=>setTimeout(resolve,config.delay_ms??0));
+      const config=await this.ctx.storage.get('fixture')??{},started=Date.now(),selected=(await request.clone().json()).machine_id;
+      console.info({type:'fixture.snapshot',stage:'start',at:started,selected:selected??null});
+      await new Promise(resolve=>setTimeout(resolve,selected?0:(config.delay_ms??0)));
       while((await this.ctx.storage.get('fixture'))?.hold) await new Promise(resolve=>setTimeout(resolve,10));
       const response=config.fail?new Response('fixture discovery failure',{status:503}):await super.fetch(request);
       console.info({type:'fixture.snapshot',stage:'end',at:Date.now(),status:response.status}); return response;
@@ -185,13 +187,14 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
     for(const scenario of trials.slice(2)) {
       const first=records.length,value=await runTurn(scenario),current=records.slice(first),stages=current.filter(row=>row.type==="hand.tool.stage"&&row.parent_call_id===`call_preparation_${scenario}`&&row.stage==="namespace.prepare");
       assert.match(JSON.stringify(value.turn),/PREP_OK/);assert.doesNotMatch(JSON.stringify(value.turn),/UNSAFE_VM/);assert.equal(stages.length,1,"concurrent calls must join one cell preparation");
-      assert.equal(current.filter(row=>row.type==="fixture.pool"&&row.stage==="start").length,2);
+      assert.equal(current.filter(row=>row.type==="fixture.pool"&&row.stage==="start").length,prepSource?2:0);
       assert.equal(current.filter(row=>row.type==="fixture.snapshot"&&row.stage==="start").length,1);
       const snapshot=current.find(row=>row.type==="fixture.snapshot"&&row.stage==="start");
-      const slowEnd=current.find(row=>row.type==="fixture.pool"&&row.stage==="end"&&row.pool==="slow");
+      const selectedLookup=current.find(row=>row.type==="hand.tool.stage"&&row.stage==="namespace.selected_lookup");
+      if(!prepSource) {assert.equal(snapshot.selected,machine);assert.ok(selectedLookup);}
       const readiness=current.find(row=>row.type==="hand.tool.stage"&&row.parent_call_id===`call_preparation_${scenario}`&&row.stage==="namespace.host_readiness");
       const discovery=current.find(row=>row.type==="hand.tool.stage"&&row.parent_call_id===`call_preparation_${scenario}`&&row.stage==="namespace.account_discovery");
-      samples.push({scenario,prepare_ms:stages[0].duration_ms,public_turn_ms:value.elapsed_ms,snapshot_started_before_slow_vm_finished:snapshot.at<slowEnd.at,
+      samples.push({scenario,prepare_ms:stages[0].duration_ms,public_turn_ms:value.elapsed_ms,selected_machine:snapshot.selected, selected_lookup_ms:selectedLookup?.duration_ms, snapshots:current.filter(row=>row.type==="fixture.snapshot"&&row.stage==="start").length, pools:current.filter(row=>row.type==="fixture.pool"&&row.stage==="start").length,
         ...(readiness?{host_readiness_ms:readiness.duration_ms}:{}),...(discovery?{account_discovery_ms:discovery.duration_ms}:{})});
     }
     const localSamples=[];
@@ -202,10 +205,12 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
       assert.ok(stage);
       const snapshots=rows.filter(row=>row.type==="fixture.snapshot"&&row.stage==="start").length;
       const pools=rows.filter(row=>row.type==="fixture.pool"&&row.stage==="start").length;
-      assert.equal(snapshots,prepSource?1:0);assert.equal(pools,prepSource?2:0);
+      assert.equal(snapshots,0);assert.equal(pools,0);
       if(i>=2) localSamples.push({scenario,prepare_ms:stage.duration_ms,public_turn_ms:value.elapsed_ms,snapshots,pools});
     }
+    const processStart=records.length;
     const processTurn=await runTurn("PROCESS");assert.match(JSON.stringify(processTurn.turn),/PROCESS_RESUMED/);
+    if(!prepSource) assert.equal(records.slice(processStart).filter(row=>row.type==="fixture.pool"||row.type==="fixture.snapshot").length,0,"retained process polling must resolve its original binding without inventory");
     const inventory=await runTurn("INVENTORY");
     for(const id of [machine,localMachine]) assert.match(JSON.stringify(inventory.turn),new RegExp(id));
     const mixed=await runTurn("MIXED");
@@ -224,7 +229,12 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
     assert.doesNotMatch(JSON.stringify(reconnected.turn),/WRONG_GENERATION/);
     const recovered=await runTurn("RECOVER");assert.match(JSON.stringify(recovered.turn),/LOCAL_INDEPENDENT/);
     }
+    const excluded=await runTurn("EXCLUDED");
+    assert.doesNotMatch(JSON.stringify(excluded.turn),/UNSAFE_DISPATCH/);
+    for(const root of ["/slow-vm","/fast-vm","/unknown-hand"]) assert.ok(JSON.stringify(excluded.turn).includes(root));
     const before=wire.filter(row=>row.direction==="broker"&&row.frame.type==="call").length;
+    const omitted=await runTurn("OMITTED");assert.match(JSON.stringify(omitted.turn),/OMITTED_BRAIN/);
+    assert.ok(!records.some(row=>row.type==="hand.tool.stage"&&row.parent_call_id==="call_preparation_OMITTED"&&row.stage==="namespace.prepare"));
     const brain=await runTurn("BRAIN");assert.match(JSON.stringify(brain.turn),/BRAIN_INDEPENDENT/);
     assert.ok(!records.some(row=>row.type==="hand.tool.stage"&&row.parent_call_id==="call_preparation_BRAIN"&&row.stage==="namespace.prepare"));
     assert.equal((await request("/account-tools/__fixture",{method:"POST",body:JSON.stringify({delay_ms:30,fail:true})})).status,204);
@@ -250,6 +260,19 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
     assert.equal(wire.filter(row=>row.direction==="broker"&&row.frame.type==="call").length,before,"discovery failure and Brain must never dispatch to a Hand");
     const effects=(await readFile(join(workspace,"effect.log"),"utf8")).trim().split("\n").sort();
     assert.deepEqual(effects,trials.flatMap(scenario=>[`${scenario}:a`,`${scenario}:b`]).sort());assert.equal(before,prepSource?15:16);
+    if(!prepSource) {
+      await attachment.close();
+      assert.equal((await request("/account-tools/__fixture",{method:"POST",body:JSON.stringify({delay_ms:0})})).status,204);
+      const offlineStart=records.length;
+      const offline=await runTurn("OFFLINE");
+      assert.match(JSON.stringify(offline.turn),/offline/);
+      assert.doesNotMatch(JSON.stringify(offline.turn),/MUST_NOT_RUN_OFFLINE/);
+      const offlineRows=records.slice(offlineStart);
+      assert.equal(offlineRows.filter(row=>row.type==="fixture.snapshot"&&row.stage==="start").length,1);
+      assert.equal(offlineRows.find(row=>row.type==="fixture.snapshot"&&row.stage==="start").selected,machine);
+      assert.equal(offlineRows.filter(row=>row.type==="fixture.pool").length,0);
+      assert.equal(wire.filter(row=>row.direction==="broker"&&row.frame.type==="call").length,before);
+    }
     const diagnostics=await request(`/v1/agents/${thread}/diagnostics?limit=1024`);assert.equal(diagnostics.status,200);
     if(!prepSource) {
       const managed=diagnostics.value.services.find(service=>service.service==="managed");
@@ -266,19 +289,17 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
         if (page.next_after===after) break;
         after=page.next_after;
       }
-      for(const stage of ["namespace.host_readiness","namespace.account_discovery"]) {
-        assert.ok(managed.events.some(event=>event.stage===stage&&event.parent_call_id==="call_preparation_MEASURE_2"&&event.outcome==="ok"),`owner diagnostics must expose ${stage}`);
-      }
+      assert.ok(managed.events.some(event=>event.stage==="namespace.prepare"&&event.parent_call_id==="call_preparation_MEASURE_2"&&event.outcome==="ok"));
       const failedRows=managed.events.filter(event=>event.parent_call_id==="call_preparation_FAIL");
-      assert.ok(failedRows.some(event=>event.stage==="namespace.account_discovery"&&event.outcome==="failed"));
-      assert.ok(failedRows.some(event=>event.stage==="namespace.host_readiness"&&event.outcome==="ok"),"failed discovery must join ongoing VM readiness before completing preparation");
+      assert.ok(failedRows.some(event=>event.stage==="namespace.prepare"&&event.outcome==="failed"));
+
     }
     await writeFile(join(output,"diagnostics.json"),JSON.stringify(diagnostics.value,null,2));
-    result.observed={once_only_effects:effects.length,concurrent_cell_capture_count:7,unavailable_vms_excluded:true,brain_bypasses_prepare:true,discovery_failure_predispatch:true,failed_discovery_cancelled:true,local_bypasses_failed_discovery:!prepSource,mixed_cell_routes:true,reconnect_keeps_pinned_generation:!prepSource,fresh_cell_recovers:!prepSource,process_resumed:true,full_inventory:true,samples,localSamples};
+    result.observed={once_only_effects:effects.length,concurrent_cell_capture_count:7,unavailable_vms_excluded:true,brain_bypasses_prepare:true,discovery_failure_predispatch:true,failed_discovery_cancelled:true,local_bypasses_failed_discovery:!prepSource,mixed_cell_routes:true,known_offline_selected_only:!prepSource,reconnect_keeps_pinned_generation:!prepSource,fresh_cell_recovers:!prepSource,process_resumed:true,full_inventory:true,samples,localSamples};
     console.log(JSON.stringify({evidence:output,label,...result.observed}));
   } catch(error){failure=error;result.error=error.stack;throw error;}
   finally {try{await localAttachment?.close();await attachment?.close();await tools?.close();await native?.close();await mf?.dispose();}finally{
     await writeFile(join(output,"trace.json"),JSON.stringify({result,records},null,2));await writeFile(join(output,"wire.json"),JSON.stringify(wire,null,2));await writeFile(join(output,"http.json"),JSON.stringify(http,null,2));await writeFile(join(output,"runtime.log"),runtime.join("\n")+"\n");
-    await writeFile(join(output,"README.md"),`Run: \`${command}\`\n\nLabel: ${label}\nStatus: ${failure?"FAIL: "+failure.message:"PASS"}\nInputs: ${JSON.stringify(result.inputs)}\nExpected: ${JSON.stringify(result.expected)}\nObserved: ${JSON.stringify(result.observed)}\n\nActual public HTTP turn admission/results and shipped fresh-cell Session callback, WASM Code Mode, account discovery, SQLite ledger, reverse WebSocket and native /bin/sh. Synthetic external VM pool negative receipts wait 160/40ms; a wrapper around the real account DO adds 120ms to the actual snapshot response. These injected waits demonstrate overlap only, not production network latency. First two cells excluded as warmups. Optional NANOCODEX_NAMESPACE_PREP_SOURCE bundles a saved baseline index.ts with all other source resolutions unchanged (source-resolution.json hashes). Retain paired runs and outliers. trace.json, wire.json, http.json, diagnostics.json, runtime.log, fixture-source.mjs, worker.mjs and SQLite are the inspection evidence.\n`);
+    await writeFile(join(output,"README.md"),`Run: \`${command}\`\n\nLabel: ${label}\nStatus: ${failure?"FAIL: "+failure.message:"PASS"}\nInputs: ${JSON.stringify(result.inputs)}\nExpected: ${JSON.stringify(result.expected)}\nObserved: ${JSON.stringify(result.observed)}\n\nActual public HTTP turn admission/results and shipped fresh-cell Session callback, WASM Code Mode, account discovery, SQLite ledger, reverse WebSocket and native /bin/sh. Synthetic external VM pool negative receipts wait 160/40ms; a wrapper around the real account DO adds 120ms only to full inventory snapshots; selected-machine snapshots use the actual account DO immediately. These injected waits demonstrate overlap only, not production network latency. First two cells excluded as warmups. Optional NANOCODEX_NAMESPACE_PREP_SOURCE bundles a saved baseline index.ts with all other source resolutions unchanged (source-resolution.json hashes). Retain paired runs and outliers. trace.json, wire.json, http.json, diagnostics.json, runtime.log, fixture-source.mjs, worker.mjs and SQLite are the inspection evidence.\n`);
   }}
 });

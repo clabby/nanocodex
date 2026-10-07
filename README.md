@@ -154,12 +154,14 @@ irm https://nanocodex.paradigm.xyz/install.ps1 | iex
 nanocodex
 ```
 
-On macOS, the installer prepares the persistent Hand immediately, before sign-in,
+On macOS and Linux, the installer prepares the persistent Hand before sign-in,
 even without an interactive terminal. Sign in once with `nanocodex account login`
 or `nanocodex2 login`; the Hand connects automatically using that saved login.
 There is no separate Hand setup command. An existing service keeps its account
-configuration. Optional Computer Use components prepare in the background while
-you use Nanocodex. `--no-setup` explicitly opts out of automatic preparation.
+configuration. Desktop components prepare in the background while you use
+Nanocodex. Linux preparation requires sudo and runs component installation in a
+root-owned systemd oneshot; the Hand itself runs as a non-root user.
+`--no-setup` explicitly opts out of automatic preparation.
 
 `nanocodex2`, `run`, and `attach` use this persistent computer Hand. Opening a
 terminal or changing projects does not publish another Hand or reconnect its
@@ -168,7 +170,7 @@ and its processes remain available. The current directory travels as descriptive
 request context, independently of the Hand's identity and connection. If the
 service is unavailable, the client does not substitute a workspace publisher.
 
-On Linux and Windows, the installer runs guided setup when a terminal or saved
+On Windows, the installer runs guided setup when a terminal or saved
 account login is available; unattended installs print the command to resume.
 Setup remains idempotent and resumable.
 
@@ -285,7 +287,7 @@ refresh/recovery, supported tools, current limits and deployment acceptance.
 
 ### Native Linux Hands
 
-Install or repair the Hand on the current Linux machine after the curl login:
+Install or repair the Hand on the current Linux machine after account login:
 
 ```sh
 nanocodex hand install
@@ -300,7 +302,7 @@ nanocodex hand install --target ubuntu@your-server --port 2222
 ```
 
 Both commands install the same native Hand and private controllable desktop.
-Setup currently supports x86-64 Debian/Ubuntu with systemd and sudo. On-device
+Setup supports x86-64 Debian/Ubuntu and Arch/Omarchy with systemd and sudo. On-device
 setup can prompt for your administrator password; SSH enrollment uses your
 existing SSH keys/configuration and requires passwordless sudo.
 
@@ -311,7 +313,15 @@ catalog; no Python, Bash installer, or remote interactive login is involved.
 `nanocodex-hand.service` starts at boot and reconnects independently of SSH.
 Re-running setup reuses the identity and private workspace under
 `/srv/nanocodex`; an installation enrolled to another account or origin is
-rejected.
+rejected. A fresh sudo installation runs the service as the invoking non-root
+user; existing installations retain their service owner. Only that owner can
+observe the daemon through private IPC, including from terminals with different
+`HOME` values. Account credentials stay in the root-owned mode-0600
+`/opt/nanocodex/account.env`.
+
+`nanocodex hand install --prepare` prepares the local service before login.
+It starts `nanocodex-hand-components.service` asynchronously and leaves the Hand
+unpublished until sign-in supplies the saved account login.
 
 The same lifecycle commands work for the local LaunchAgent, systemd service, or
 Windows scheduled task:

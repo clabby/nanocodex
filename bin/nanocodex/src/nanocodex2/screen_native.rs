@@ -191,9 +191,13 @@ impl NativeScreen {
                 .map_err(configuration)?;
             // A retired or failed publisher must never send shutdown to another
             // session's helper, even when both were given the same state-dir.
+            // Account state paths contain a full identity hash and can exceed
+            // sockaddr_un's path limit. Keep ephemeral desktop IPC in a short,
+            // atomically created owner-private directory; durable state and
+            // recordings remain under the account directory.
             let desktop_directory = tempfile::Builder::new()
-                .prefix("desktop-")
-                .tempdir_in(directory)
+                .prefix("nanocodex-desktop-")
+                .tempdir_in("/tmp")
                 .map_err(configuration)?;
             let runtime = desktop_directory.path().to_owned();
             let desktop = Self::spawn_desktop(Path::new(machine.workspace()), &runtime)?;

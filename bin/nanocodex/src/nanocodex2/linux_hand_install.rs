@@ -19,6 +19,7 @@ use tokio::process::Command;
 const ROOT: &str = "/opt/nanocodex";
 const STATE: &str = "/srv/nanocodex";
 const SERVICE: &str = "nanocodex-hand.service";
+const COMPONENTS_SERVICE: &str = "nanocodex-hand-components.service";
 // Native headless screens are video-only. Provision their encoder alongside
 // display/input prerequisites; users must not repair a fresh install over SSH.
 const DEBIAN_DESKTOP_PACKAGES: &[&str] = &[
@@ -36,8 +37,15 @@ const DEBIAN_DESKTOP_PACKAGES: &[&str] = &[
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
+    #[serde(default)]
+    prepare: bool,
+    #[serde(default)]
+    prepare_components: bool,
+    #[serde(default)]
     origin: String,
+    #[serde(default)]
     credential: String,
+    #[serde(default)]
     owner: String,
 }
 
@@ -57,6 +65,34 @@ async fn install() -> Result<()> {
     if !Path::new("/run/systemd/system").is_dir() {
         bail!("systemd must be running");
     }
+
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .take(64 * 1024)
+        .read_to_end(&mut bytes)
+        .context("could not read the Hand installation request")?;
+    let request: Request =
+        serde_json::from_slice(&bytes).context("invalid installation request")?;
+    validate_request(&request)?;
+    // The OS owns this job; dependency downloads survive installer/login exit.
+    // Its lock is independent of the enrollment transaction that starts it.
+    if request.prepare_components {
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open("/run/lock/nanocodex-hand-components.lock")?;
+        lock.try_lock_exclusive()
+            .context("Hand component preparation is already running")?;
+        install_dependencies().await?;
+        println!(
+            "{}",
+            json!({"status":"ready", "components":"native_desktop"})
+        );
+        return Ok(());
+    }
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -67,30 +103,42 @@ async fn install() -> Result<()> {
     lock.try_lock_exclusive()
         .context("another Hand installation is already running")?;
 
-    let mut bytes = Vec::new();
-    std::io::stdin()
-        .take(64 * 1024)
-        .read_to_end(&mut bytes)
-        .context("could not read the Hand installation request")?;
-    let request: Request =
-        serde_json::from_slice(&bytes).context("invalid installation request")?;
-    validate_request(&request)?;
-
     let root = Path::new(ROOT);
     let state = Path::new(STATE);
     safe_directory(root)?;
     safe_directory(state)?;
     let record_path = root.join("installation.json");
     let previous = read_record(&record_path)?;
+    if request.prepare
+        && let Some(previous) = &previous
+    {
+        if Path::new("/etc/systemd/system")
+            .join(COMPONENTS_SERVICE)
+            .is_file()
+        {
+            checked(
+                Command::new("systemctl").args(["start", "--no-block", COMPONENTS_SERVICE]),
+                "resume background desktop preparation",
+            )
+            .await?;
+        }
+        println!(
+            "{}",
+            json!({"status": "installed", "awaiting_login": previous["pending_login"] == true})
+        );
+        return Ok(());
+    }
     if let Some(previous) = &previous {
-        for (field, expected) in [
-            ("owner", request.owner.as_str()),
-            ("origin", request.origin.as_str()),
-        ] {
-            if previous.get(field).and_then(Value::as_str) != Some(expected) {
-                bail!(
-                    "existing Hand installation belongs to another {field}; refusing to replace retained state"
-                );
+        if previous["pending_login"] != true {
+            for (field, expected) in [
+                ("owner", request.owner.as_str()),
+                ("origin", request.origin.as_str()),
+            ] {
+                if previous.get(field).and_then(Value::as_str) != Some(expected) {
+                    bail!(
+                        "existing Hand installation belongs to another {field}; refusing to replace retained state"
+                    );
+                }
             }
         }
         if previous.get("native_only") == Some(&Value::Bool(false))
@@ -102,9 +150,8 @@ async fn install() -> Result<()> {
         }
     }
 
-    install_dependencies().await?;
-    ensure_user().await?;
-    prepare_state().await?;
+    let service_user = service_user(previous.as_ref()).await?;
+    prepare_state(&service_user).await?;
     for child in ["cache", "releases"] {
         safe_directory(&root.join(child))?;
     }
@@ -128,14 +175,27 @@ async fn install() -> Result<()> {
         "NANOCODEX_API_KEY={}\nNANOCODEX_MANAGED_URL={}\n",
         request.credential, request.origin
     );
-    let secret_changed = atomic_write(&root.join("account.env"), account.as_bytes(), 0o600)?;
+    let secret_changed = if request.prepare {
+        false
+    } else {
+        atomic_write(&root.join("account.env"), account.as_bytes(), 0o600)?
+    };
     let link_changed = activate(root, &release)?;
     let unit_changed = atomic_write(
         Path::new("/etc/systemd/system").join(SERVICE).as_path(),
-        service_unit().as_bytes(),
+        service_unit(&service_user).as_bytes(),
+        0o644,
+    )?;
+    atomic_write(
+        Path::new("/etc/systemd/system")
+            .join(COMPONENTS_SERVICE)
+            .as_path(),
+        components_unit().as_bytes(),
         0o644,
     )?;
     let public = json!({
+        "pending_login": request.prepare,
+        "service_uid": service_user.uid.as_raw(),
         "owner": request.owner,
         "origin": request.origin,
         "mode": "native",
@@ -154,6 +214,21 @@ async fn install() -> Result<()> {
     )
     .await?;
     checked(
+        Command::new("systemctl").args(["start", "--no-block", COMPONENTS_SERVICE]),
+        "start background desktop preparation",
+    )
+    .await?;
+    if request.prepare {
+        eprintln!(
+            "Desktop dependencies are preparing in the background; account sign-in can continue."
+        );
+        println!(
+            "{}",
+            json!({"status": "prepared", "awaiting_login": true, "revision": revision})
+        );
+        return Ok(());
+    }
+    checked(
         Command::new("systemctl").args(["enable", SERVICE]),
         "enable the Hand service",
     )
@@ -169,7 +244,7 @@ async fn install() -> Result<()> {
     )
     .await?;
 
-    let machine = describe_machine(&request).await?;
+    let machine = describe_machine(&request, &service_user).await?;
     wait_ready(&request, &machine).await?;
     println!(
         "{}",
@@ -184,6 +259,16 @@ async fn install() -> Result<()> {
 }
 
 fn validate_request(request: &Request) -> Result<()> {
+    if request.prepare || request.prepare_components {
+        if request.prepare && request.prepare_components {
+            bail!("select one preparation phase");
+        }
+        if !request.origin.is_empty() || !request.credential.is_empty() || !request.owner.is_empty()
+        {
+            bail!("preparation must not contain account credentials");
+        }
+        return Ok(());
+    }
     if !request.credential.starts_with("ncx_live_")
         || request.credential.len() > 4096
         || !request
@@ -533,7 +618,29 @@ async fn ensure_user() -> Result<()> {
     Ok(())
 }
 
-async fn prepare_state() -> Result<()> {
+// Retained installations keep their OS owner. A new sudo install belongs to
+// the invoking login, so its CLI can share private IPC without widening access.
+async fn service_user(previous: Option<&Value>) -> Result<nix::unistd::User> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = if previous.is_some() {
+        nix::unistd::Uid::from_raw(fs::metadata(STATE)?.uid())
+    } else if let Some(uid) = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|uid| *uid != 0)
+    {
+        nix::unistd::Uid::from_raw(uid)
+    } else {
+        ensure_user().await?;
+        return nix::unistd::User::from_name("nanocodex")?.context("missing service user");
+    };
+    if uid.is_root() {
+        bail!("retained Hand state has no non-root service owner; repair ownership explicitly");
+    }
+    nix::unistd::User::from_uid(uid)?.context("Hand service owner no longer exists")
+}
+
+async fn prepare_state(user: &nix::unistd::User) -> Result<()> {
     for path in [
         PathBuf::from(STATE),
         Path::new(STATE).join("workspace"),
@@ -543,7 +650,10 @@ async fn prepare_state() -> Result<()> {
         safe_directory(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
         checked(
-            Command::new("chown").args(["nanocodex:nanocodex", path.to_string_lossy().as_ref()]),
+            Command::new("chown").args([
+                &format!("{}:{}", user.uid, user.gid),
+                path.to_string_lossy().as_ref(),
+            ]),
             "set Hand state ownership",
         )
         .await?;
@@ -601,11 +711,13 @@ fn activate(root: &Path, release: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn service_unit() -> &'static str {
+fn service_unit(user: &nix::unistd::User) -> String {
     r#"[Unit]
 Description=Nanocodex host Hand
 Wants=network-online.target
-After=network-online.target
+Requires=nanocodex-hand-components.service
+After=network-online.target nanocodex-hand-components.service
+ConditionPathExists=/opt/nanocodex/account.env
 StartLimitIntervalSec=0
 
 [Service]
@@ -628,6 +740,25 @@ CPUWeight=25
 [Install]
 WantedBy=multi-user.target
 "#
+    .replace("User=nanocodex", &format!("User={}", user.uid))
+    .replace("Group=nanocodex", &format!("Group={}", user.gid))
+}
+
+fn components_unit() -> &'static str {
+    r#"[Unit]
+Description=Nanocodex desktop component preparation
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/nanocodex/current/nanocodex2 __install-hand
+StandardInput=data
+StandardInputText={"prepare_components":true}
+TimeoutStartSec=15min
+UMask=0077
+"#
 }
 
 async fn checked(command: &mut Command, operation: &str) -> Result<()> {
@@ -641,11 +772,11 @@ async fn checked(command: &mut Command, operation: &str) -> Result<()> {
     Ok(())
 }
 
-async fn describe_machine(request: &Request) -> Result<String> {
+async fn describe_machine(request: &Request, user: &nix::unistd::User) -> Result<String> {
     let output = Command::new("runuser")
         .args([
             "-u",
-            "nanocodex",
+            &user.name,
             "--",
             "/opt/nanocodex/current/nanocodex2",
             "__device-hand",
@@ -671,6 +802,7 @@ async fn describe_machine(request: &Request) -> Result<String> {
 }
 
 async fn wait_ready(request: &Request, machine: &str) -> Result<()> {
+    nanocodex::oai::transport::install_default_rustls_crypto_provider();
     eprintln!("Checking the account Hand and screen catalog…");
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -734,6 +866,8 @@ mod tests {
     #[test]
     fn request_validation_rejects_values_unsafe_for_environment_files() {
         let valid = Request {
+            prepare: false,
+            prepare_components: false,
             origin: "https://api.nanocodex.dev".into(),
             credential: "ncx_live_fixture-123".into(),
             owner: "user_fixture-123".into(),
@@ -1034,11 +1168,14 @@ mod tests {
 
     #[test]
     fn service_runs_only_the_activated_native_binary() {
-        let unit = service_unit();
+        let user = nix::unistd::User::from_uid(nix::unistd::geteuid())
+            .unwrap()
+            .unwrap();
+        let unit = service_unit(&user);
         assert!(unit.contains("ExecStart=/opt/nanocodex/current/nanocodex2 hand"));
         assert!(!unit.contains("python"));
         assert!(!unit.contains("bash"));
-        assert!(unit.contains("User=nanocodex\nGroup=nanocodex"));
+        assert!(unit.contains(&format!("User={}\nGroup={}", user.uid, user.gid)));
         assert!(unit.contains("UMask=0077"));
         assert!(!unit.contains("sudo"));
         assert!(!unit.contains("NANOCODEX_DESKTOP_TARGET"));

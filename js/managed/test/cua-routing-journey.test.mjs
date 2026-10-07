@@ -32,6 +32,8 @@ const scripts = {
     await new Promise(resolve=>setTimeout(resolve,3000));
     text(await tools.mcp__cua_repl__js({workdir:"/${localMachine}"}));
     text(await tools.mcp__cua_repl__js({workdir:"/${localMachine}",action:"observe"}));`,
+  DYNAMIC_FALLBACK: `${discovery} await new Promise(resolve=>setTimeout(resolve,3000)); ${discovery}
+    text(await tools.mcp__cua_repl__js({workdir:"/${machine}",action:"observe"}));`,
   UPSTREAM: `text({hand:(await tools.environment({})).hands["user:${machine}"]}); ${discovery}
     text(await tools.mcp__cua_repl__js({workdir:"/${machine}",code:"UPSTREAM_OK"}));
     text(await tools.mcp__cua_repl__js_reset({workdir:"/${machine}"}));`,
@@ -58,8 +60,9 @@ const info=console.info.bind(console);
 console.info=(record,...rest)=>info(record && typeof record==='object'?JSON.stringify(record):record,...rest);
 export class ObservedAccountHostedTools extends AccountHostedTools {
   async fetch(request) {
+    const selected=new URL(request.url).pathname==='/snapshot' ? (await request.clone().json()).machine_id : undefined;
     const response=await super.fetch(request);
-    if(new URL(request.url).pathname==='/snapshot') console.info({type:'fixture.account.snapshot',status:response.status,snapshot:await response.clone().json()});
+    if(new URL(request.url).pathname==='/snapshot') console.info({type:'fixture.account.snapshot',selected:selected??null,status:response.status,snapshot:await response.clone().json()});
     return response;
   }
 }
@@ -112,7 +115,7 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
   const screenWire = [], screenSockets = [];
   const result = { command, inputs: { owner, thread, machine, scripts },
     expected: { upstream_preferred: true, environment_agrees: true, old_cell_pinned: true,
-      fresh_screen_fallback: true, discovered_scroll_schema_validated: true, invalid_scroll_predispatch: true, complete_scroll_forwarded: true,
+      dynamic_preparing_fallback_pinned: true, dynamic_ready_contract: true, fresh_screen_fallback: true, discovered_scroll_schema_validated: true, invalid_scroll_predispatch: true, complete_scroll_forwarded: true,
       missing_route_predispatch: true, same_hand_recovery: true, shell_then_screen_discovery: true }, observed: {} };
   const capture = line => {
     runtime.push(line);
@@ -186,14 +189,22 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
       }, `${scenario} turn completion`);
     };
     const runTurn = async (scenario, extraHeaders) => (await startTurn(scenario, extraHeaders))();
-    const callFrames = () => wire.filter(row => row.direction === "broker" && row.frame.type === "call");
+    const callFrames = () => wire.filter(row => row.direction === "broker" && row.frame.type === "call" && !(row.frame.name === "mcp__cua_repl__js" && Object.keys(row.frame.input).length === 0));
     native = await createNodeProcessTools({ workspace, onActivity: event => activity.push(event) });
+    let dynamicReady = false;
+    let dynamicProbes = 0;
+    const providerDefinitions = [
+      {name:"js",description:"Synthetic upstream CUA JavaScript",parameters:{type:"object",required:["code"],properties:{code:{type:"string"}},additionalProperties:false}},
+      {name:"js_reset",description:"Synthetic upstream CUA reset",parameters:{type:"object",properties:{},additionalProperties:false}},
+    ];
     tools = await createTools({ tools: {
       ...Object.fromEntries(native.tools.map(tool => [tool.name, tool])),
-      mcp__cua_repl__js: { description: "Synthetic upstream CUA JavaScript", parameters: {
-        type: "object", required: ["code"], properties: { code: { type: "string" } }, additionalProperties: false },
-        handler(input) { return { backend: "upstream", code: input.code }; } },
-      mcp__cua_repl__js_reset: { description: "Synthetic upstream CUA reset", parameters: {
+      mcp__cua_repl__js: { description: "NANOCODEX_DYNAMIC_CUA_V1. Discover with empty input", parameters: {type:"object",additionalProperties:true},
+        handler(input) {
+          if (Object.keys(input).length === 0) { dynamicProbes++; return {content:[{type:"text",text:JSON.stringify(dynamicReady ? {status:"ready",definitions:providerDefinitions} : {status:"preparing"})}]}; }
+          return { backend: "upstream", code: input.code };
+        } },
+      mcp__cua_repl__js_reset: { description: "NANOCODEX_DYNAMIC_CUA_V1. Reset", parameters: {
         type: "object", properties: {}, additionalProperties: false }, handler() { return { reset: "UPSTREAM_RESET_OK" }; } },
     } });
     const endpoint = new URL("/tool-host", base); endpoint.protocol = "ws:";
@@ -273,6 +284,19 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
     // Keep the existing reconnect assertions scoped to the original Hand.
     screenCallOffset = 1;
 
+    const preparingScreen = await publishScreen();
+    const fallbackDone = await startTurn("DYNAMIC_FALLBACK");
+    await waitFor(() => dynamicProbes === 1, "dynamic preparing descriptor");
+    dynamicReady = true;
+    const fallback = await fallbackDone();
+    assert.match(rendered(fallback), /native_screen/);
+    assert.match(rendered(fallback), /Screen action completed/);
+    assert.equal(dynamicProbes, 1, "same cell discovery remains pinned to preparing fallback");
+    assert.equal(screenCalls().length, 1);
+    preparingScreen.close(1000);
+    await waitFor(async () => !(await snapshot()).screens.some(entry => entry.machine_id === machine), "preparing screen disconnected");
+    screenCallOffset++;
+
     // With no screen publisher, the complete online CUA pair alone must advertise computer.
     const upstream = await runTurn("UPSTREAM");
     assert.match(rendered(upstream), /UPSTREAM_OK/);
@@ -281,23 +305,39 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
     assert.ok(upstreamValues.find(value => value.hand)?.hand.capabilities.includes("computer"),
       "upstream-only CUA pair must advertise computer in environment");
     assert.match(rendered(upstream), /upstream/);
+    assert.equal(dynamicProbes, 2, "fresh cell discovers the ready provider");
     assert.equal(callFrames().length, 2);
     assert.deepEqual(callFrames().map(row => row.frame.input), [{ code: "UPSTREAM_OK" }, {}]);
     assert.equal(screenCalls().length, 0);
 
     const screen = await publishScreen();
+    const preferredStart = records.length;
     const preferred = await runTurn("PREFERRED");
+    const preferredLookups = records.slice(preferredStart).filter(row => row.type === "fixture.account.snapshot");
+    assert.equal(preferredLookups.length, 1, "known CUA captures once without full inventory");
+    assert.equal(preferredLookups[0].selected, machine);
+    assert.ok(preferredLookups[0].snapshot.screens.every(target => target.machine_id === machine));
+    assert.equal(preferredLookups[0].snapshot.screens.length, 1);
+    assert.equal(preferredLookups[0].snapshot.tools.filter(tool => tool.provider === "screens").length, 1, "selected screen includes its dispatch route");
     assert.match(rendered(preferred), /PREFERRED_OK/);
     assert.equal(callFrames().length, 3);
     assert.equal(screenCalls().length, 0, "the live upstream pair wins even with a published screen");
 
     const pinnedDone = await startTurn("PINNED_UPSTREAM");
-    await waitFor(() => stages("PINNED_UPSTREAM", "namespace.route").length === 1, "old cell captured upstream");
+    // Dynamic discovery dispatches a remote probe. Wait for its completed
+    // receipt, not namespace.route, before cutting the publisher transport.
+    await waitFor(() => stages("PINNED_UPSTREAM", "namespace.invoke").some(row => row.outcome === "ok"), "old cell completed upstream discovery");
     upstreamDisconnected = true; upstreamSocket.terminate();
     await waitFor(async () => (await snapshot()).machines.find(entry => entry.machine.id === machine)?.online === false,
       "upstream disconnect visible in account catalog");
     assert.equal(stages("PINNED_UPSTREAM", "namespace.route").length, 1, "disconnect must precede the old cell's second discovery");
     const pinned = await pinnedDone();
+    assert.deepEqual(stages("PINNED_UPSTREAM", "namespace.invoke").map(row => [row.call_id, row.outcome]), [
+      ["call_cua_PINNED_UPSTREAM/code-1", "ok"],
+      ["call_cua_PINNED_UPSTREAM/code-2", "ok"],
+      ["call_cua_PINNED_UPSTREAM/code-3", "unavailable"],
+    ], "both discoveries complete on the pinned contract and the disconnected action returns unavailable");
+    assert.equal(dynamicProbes, 4, "repeat discovery must reuse the pinned descriptor without another remote probe");
     assert.match(rendered(pinned), /upstream/);
     assert.doesNotMatch(rendered(pinned), /native_screen/);
     assert.equal(screenCalls().length, 0, "an old cell never falls through to a newly available backend");

@@ -422,11 +422,15 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       return this.#broker.upgrade(ownerId, undefined, undefined, undefined, undefined, identity || undefined);
     }
     if (request.method === "POST" && url.pathname === "/snapshot") {
-      const ownerId = await ownerFromBody(request);
-      if (!ownerId || !this.#owns(ownerId)) {
+      const body = await request.json<{ owner_id?: unknown; machine_id?: unknown }>();
+      const ownerId = body.owner_id;
+      if (!isUserId(ownerId) || !this.#owns(ownerId)) {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
-      return Response.json(await this.#snapshot(), { headers: { "cache-control": "no-store" } });
+      if (body.machine_id !== undefined && (typeof body.machine_id !== "string" || !body.machine_id || body.machine_id.length > 256)) {
+        return Response.json({ error: "invalid_request" }, { status: 400 });
+      }
+      return Response.json(await this.#snapshot(body.machine_id as string | undefined), { headers: { "cache-control": "no-store" } });
     }
 
     if (request.method === "POST" && url.pathname === "/turn-ended") {
@@ -567,11 +571,20 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       };
   }
 
-  async #snapshot(): Promise<AccountHostedToolsSnapshot> {
-    const local = this.#localSnapshot();
+  async #snapshot(machineId?: string): Promise<AccountHostedToolsSnapshot> {
+    const full = this.#localSnapshot();
+    // A selected route needs only its current publication and capabilities.
+    // Inventory remains explicit; this request never probes unrelated regions.
+    const local = machineId === undefined ? full : {
+      ...full,
+      tools: full.tools.filter(tool => (full.screens ?? []).some(target => target.machine_id === machineId
+        && screenTool(target).route_token === tool.route_token && tool.provider === "screens")),
+      screens: (full.screens ?? []).filter(target => target.machine_id === machineId),
+      machines: full.machines.filter(entry => entry.machine.id === machineId),
+    };
     if (this.#regional) return { ...local, publications: this.ctx.storage.sql.exec<{ publication_json: string }>(
       "SELECT publication_json FROM regional_local_publications WHERE publication_json IS NOT NULL").toArray().map(row => JSON.parse(row.publication_json) as HandPublication) };
-    const directory = this.#directory.entries();
+    const directory = this.#directory.entries().filter(entry => machineId === undefined || entry.machine.id === machineId);
     if (!directory.length) return this.#withRoots(local);
     const regions = [...new Set(directory.filter(entry => !entry.pending && entry.region !== "legacy").map(entry => entry.region as HandRelayRegion))];
     const snapshots = await Promise.all(regions.map(async region => {
@@ -579,7 +592,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         if (!this.env.NANOCODEX_HAND_RELAYS) return undefined;
         const response = await fetchResponseWithDeadline(this.env.NANOCODEX_HAND_RELAYS.getByName(handRelayName(this.#ownerId!, region)),
           "https://account-tools.internal/snapshot", { method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ owner_id: this.#ownerId }) }, 5_000, "regional Hand discovery",
+            body: JSON.stringify({ owner_id: this.#ownerId, ...(machineId === undefined ? {} : { machine_id: machineId }) }) }, 5_000, "regional Hand discovery",
           async response => response.ok ? response.json<AccountHostedToolsSnapshot>() : undefined);
         return response ? { region, snapshot: response } : undefined;
       } catch { return undefined; }
@@ -943,6 +956,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   readonly #ownerId: string;
   readonly #threadId: string | undefined;
   readonly #allowed: (context?: AuthorizationContext) => boolean;
+  #snapshot: AccountHostedToolsSnapshot = { tools: [], machines: [] };
   #definitions: readonly HostedToolsCodeDefinition[] = [];
   #candidates: readonly HostedToolsCatalogCandidate[] = [];
   #machines: readonly HostedMachine[] = [];
@@ -1073,6 +1087,39 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     return refreshing;
   }
 
+  /** Fresh selected-machine lookup. Never joins a slow full inventory request. */
+  async refreshMachine(machineId: string, context: AuthorizationContext, computer = false): Promise<void> {
+    if (!this.#allowed(context)) throw new Error("Hand access revoked");
+    const generation = this.#generation;
+    const snapshot = await fetchResponseWithDeadline(
+      this.#namespace.getByName(this.#ownerId), "https://account-tools.internal/snapshot",
+      { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ owner_id: this.#ownerId, machine_id: machineId }) },
+      10_000, "selected Hand lookup", async response => {
+        if (!response.ok) throw new Error("Selected Hand lookup unavailable");
+        return response.json<unknown>();
+      }).catch(error => {
+        throw Object.assign(new Error("Selected Hand lookup interrupted", { cause: error }), { code: "host_interrupted" });
+      });
+    if (generation !== this.#generation || !this.#allowed(context)) throw new Error("Hand authorization changed during lookup");
+    if (!validSnapshot(snapshot) || snapshot.inventory_unknown_ids?.includes(machineId)
+      || snapshot.machines.some(entry => entry.machine.id !== machineId)
+      || (!computer && (snapshot.machines.length !== 1 || snapshot.machines[0]?.online !== true)))
+      throw new Error("Selected Hand route unavailable");
+    // Replace only this machine's screen routes; unrelated catalogs and cells survive.
+    const removed = new Set((this.#snapshot.screens ?? []).filter(target => target.machine_id === machineId)
+      .map(target => screenTool(target).route_token));
+    const screens = (snapshot.screens ?? []).filter(target => target.machine_id === machineId);
+    const routes = new Set(screens.map(target => screenTool(target).route_token));
+    this.#publish({ ...this.#snapshot,
+      screens: [...(this.#snapshot.screens ?? []).filter(target => target.machine_id !== machineId), ...screens],
+      tools: [...this.#snapshot.tools.filter(tool => tool.provider !== "screens" || !removed.has(tool.route_token)),
+        ...snapshot.tools.filter(tool => tool.provider === "screens" && routes.has(tool.route_token))],
+      machines: [...this.#snapshot.machines.filter(entry => entry.machine.id !== machineId), ...snapshot.machines],
+      mount_roots: { ...this.#snapshot.mount_roots, ...snapshot.mount_roots },
+    });
+  }
+
   setCatalogValidator(validator: HostedToolsCatalogValidator | undefined): void {
     this.#validator = validator;
     if (validator === undefined || this.#definitions.length === 0) return;
@@ -1122,6 +1169,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   }
 
   #publish(snapshot: AccountHostedToolsSnapshot): void {
+    this.#snapshot = snapshot;
     this.#machineRoots = new Map(Object.entries(snapshot.mount_roots ?? {}));
     const tools = new Map<string, RoutedHostedTool>();
     for (const entry of snapshot.tools) {
@@ -1171,7 +1219,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
             input: unknown,
             context: InvocationContext,
           ) => this.#invoke(route.name, route.route_token, input, context, entry.machine.id,
-            route.name === "native_secure_input" ? "fixed" : "refresh"),
+            route.name === "native_secure_input" || route.name === CUA_JS_NAME || route.name === CUA_RESET_NAME ? "fixed" : "refresh"),
         }));
       }
     }

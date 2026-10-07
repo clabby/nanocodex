@@ -1,7 +1,7 @@
-//! Best-effort macOS Hand enrollment after a successfully saved account login.
+//! Best-effort local Hand enrollment after a successfully saved account login.
 
 pub(crate) async fn connect_after_login(receipt: &nanocodex_cli_auth::LoginReceipt) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if receipt.skip_hand {
             return;
@@ -12,11 +12,11 @@ pub(crate) async fn connect_after_login(receipt: &nanocodex_cli_auth::LoginRecei
             );
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = receipt;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn connect(receipt: &nanocodex_cli_auth::LoginReceipt) -> std::io::Result<()> {
     use std::{io, process::Stdio, time::Duration};
     use tokio::process::Command;
@@ -45,7 +45,7 @@ async fn connect(receipt: &nanocodex_cli_auth::LoginReceipt) -> std::io::Result<
         command.arg("--credentials-changed");
     }
     let mut child = command.spawn()?;
-    match tokio::time::timeout(Duration::from_secs(60), child.wait()).await {
+    match tokio::time::timeout(Duration::from_secs(180), child.wait()).await {
         Ok(Ok(status)) if status.success() => Ok(()),
         Ok(Err(error)) => Err(error),
         Ok(Ok(_)) => Err(io::Error::other("Hand connection is pending")),

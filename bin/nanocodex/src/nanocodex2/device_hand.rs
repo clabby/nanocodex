@@ -309,6 +309,27 @@ fn error(value: impl std::fmt::Display) -> ManagedError {
     ManagedError::Configuration(value.to_string())
 }
 fn home() -> Result<PathBuf, ManagedError> {
+    // A system installation retains state independently of the login user's
+    // HOME. Only its owning OS user may reuse that private daemon and IPC.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let root = fs::symlink_metadata("/opt/nanocodex");
+        let record = fs::symlink_metadata("/opt/nanocodex/installation.json");
+        let state = fs::symlink_metadata("/srv/nanocodex");
+        if let (Ok(root), Ok(record), Ok(state)) = (root, record, state)
+            && root.is_dir()
+            && root.uid() == 0
+            && root.mode() & 0o022 == 0
+            && record.is_file()
+            && record.uid() == 0
+            && record.mode() & 0o022 == 0
+            && state.is_dir()
+            && state.uid() == nix::unistd::geteuid().as_raw()
+        {
+            return Ok(PathBuf::from("/srv/nanocodex"));
+        }
+    }
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .ok_or_else(|| error("A user home directory is required for the device Hand"))
@@ -657,7 +678,7 @@ async fn share(
                 ),
                 |error| {
                     let mut status = status.lock().unwrap();
-                    status["screen"] = json!({"status": if error.is_none() { "ready" } else { "unavailable" }, "transport":"webrtc"});
+                    status["screen"] = json!({"status": if error.is_none() { "ready" } else { "unavailable" }, "transport":"webrtc", "error": error.map(ToString::to_string)});
                     let _ = publish(directory, &status);
                 },
             )

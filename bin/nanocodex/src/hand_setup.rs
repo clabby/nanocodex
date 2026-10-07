@@ -36,11 +36,11 @@ enum HandCommand {
         /// First-launch enrollment only; never replace or restart an owner.
         #[arg(long, hide = true, conflicts_with_all = ["target", "port", "account_file", "artifacts"])]
         if_missing: bool,
-        /// Prepare a dormant macOS Hand service before account sign-in.
+        /// Prepare a dormant local Hand service before account sign-in.
         #[arg(long, conflicts_with_all = ["target", "port", "account_file", "artifacts", "if_missing"])]
         prepare: bool,
     },
-    /// Connect the macOS Hand using the exact login saved by account sign-in.
+    /// Connect the local Hand using the exact login saved by account sign-in.
     Connect {
         /// Absolute path to the saved account credential file.
         #[arg(long)]
@@ -126,10 +126,19 @@ async fn service_lock() -> Result<fs::File> {
     }
 }
 
-/// Prepare a validated macOS LaunchAgent without authentication or startup.
+/// Prepare the local OS service before authentication; desktop setup may continue in the background.
 pub(crate) async fn prepare_default(executable: Option<PathBuf>) -> Result<()> {
+    if cfg!(target_os = "linux") {
+        return run_linux_installer(
+            Destination::Local,
+            None,
+            executable,
+            json!({"prepare": true}),
+        )
+        .await;
+    }
     if !cfg!(target_os = "macos") {
-        bail!("Preparing a Hand before sign-in is only available on macOS");
+        bail!("Preparing a Hand before sign-in is unavailable on this platform");
     }
     let _lock = service_lock().await?;
     crate::hand_service::prepare(executable).await?;
@@ -144,8 +153,13 @@ pub(crate) async fn connect_saved_login(
     managed_url: String,
     credentials_changed: bool,
 ) -> Result<()> {
+    if cfg!(target_os = "linux") {
+        let (origin, key) =
+            nanocodex_cli_auth::saved_enrollment_credentials(&account_file, &managed_url)?;
+        return install_linux_with_login(Destination::Local, None, origin, key.as_str()).await;
+    }
     if !cfg!(target_os = "macos") {
-        bail!("Saved-login Hand activation is only available on macOS");
+        bail!("Saved-login Hand activation is unavailable on this platform");
     }
     let _lock = service_lock().await?;
     crate::hand_service::connect_saved_login(account_file, managed_url, credentials_changed)
@@ -249,11 +263,22 @@ impl Destination {
     }
 
     async fn authorize_sudo(&self) -> Result<()> {
-        let mut command = self.command("sudo", &["-n", "true"]);
-        if matches!(self, Self::Local) {
-            command = self.command("sudo", &["-v"]);
+        // `sudo -v` can require a password even when the requested command is
+        // covered by NOPASSWD (for example a user also in Ubuntu's sudo group).
+        // Honor existing unattended authorization before asking interactively.
+        if self
+            .command("sudo", &["-n", "true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?
+            .success()
+        {
+            return Ok(());
         }
-        if !command.status().await?.success() {
+        if !matches!(self, Self::Local) || !self.command("sudo", &["-v"]).status().await?.success()
+        {
             bail!(
                 "{} needs {}sudo access to install the Hand service",
                 self.label(),
@@ -298,12 +323,21 @@ impl Destination {
 
 async fn install_linux(destination: Destination, artifacts: Option<PathBuf>) -> Result<()> {
     let (origin, key) = nanocodex_cli_auth::enrollment_credentials(None)?;
+    install_linux_with_login(destination, artifacts, origin, key.as_str()).await
+}
+
+async fn install_linux_with_login(
+    destination: Destination,
+    artifacts: Option<PathBuf>,
+    origin: String,
+    key: &str,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let response = client
         .get(format!("{origin}/v1/me"))
-        .bearer_auth(key.as_str())
+        .bearer_auth(key)
         .send()
         .await?;
     if !response.status().is_success() {
@@ -314,6 +348,16 @@ async fn install_linux(destination: Destination, artifacts: Option<PathBuf>) -> 
         .as_str()
         .ok_or_else(|| eyre::eyre!("Invalid account identity"))?;
 
+    let request = json!({"origin": origin, "credential": key, "owner": owner});
+    run_linux_installer(destination, artifacts, None, request).await
+}
+
+async fn run_linux_installer(
+    destination: Destination,
+    artifacts: Option<PathBuf>,
+    executable: Option<PathBuf>,
+    request: serde_json::Value,
+) -> Result<()> {
     destination.authorize_sudo().await?;
     eprintln!(
         "Preparing the native Rust Hand for {}…",
@@ -322,7 +366,14 @@ async fn install_linux(destination: Destination, artifacts: Option<PathBuf>) -> 
     let binary = match artifacts {
         Some(directory) => fs::read(directory.join("nanocodex2"))
             .wrap_err_with(|| format!("Missing nanocodex2 in {}", directory.display()))?,
-        None => crate::update::linux_hand_binary().await?,
+        None => {
+            let local = executable.unwrap_or(std::env::current_exe()?.with_file_name("nanocodex2"));
+            if matches!(destination, Destination::Local) && local.is_file() {
+                fs::read(&local).wrap_err("Could not read the installed Hand binary")?
+            } else {
+                crate::update::linux_hand_binary().await?
+            }
+        }
     };
     if binary.get(..6) != Some(b"\x7fELF\x02\x01") || binary.get(18..20) != Some(b"\x3e\x00") {
         bail!("the Hand installer is not an x86_64 Linux executable");
@@ -340,7 +391,6 @@ async fn install_linux(destination: Destination, artifacts: Option<PathBuf>) -> 
     }
     let remote = format!("/tmp/nanocodex-hand-{}", uuid::Uuid::new_v4());
     destination.upload(staged.path(), &remote).await?;
-    let request = json!({"origin": origin, "credential": key.as_str(), "owner": owner});
     eprintln!(
         "Installing or repairing the Hand on {}…",
         destination.label()

@@ -26,9 +26,9 @@ impl Setup {
         eprintln!("Setting up Nanocodex…");
         // Install the local service before any login prompt or network work.
         // It remains dormant until a verified saved account is available.
-        if !self.skip_hand && cfg!(target_os = "macos") {
+        if !self.skip_hand && cfg!(any(target_os = "macos", target_os = "linux")) {
             crate::hand_setup::prepare_default(None).await?;
-            eprintln!("✓ Hand is installed on this Mac");
+            eprintln!("✓ Hand daemon is installed on this computer");
         }
 
         if !self.skip_computer {
@@ -60,7 +60,7 @@ impl Setup {
         }
 
         if !self.skip_hand {
-            if cfg!(target_os = "macos") {
+            if cfg!(any(target_os = "macos", target_os = "linux")) {
                 if let Some(login) = login {
                     crate::hand_setup::connect_saved_login(
                         login.account_file,

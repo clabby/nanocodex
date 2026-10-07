@@ -501,3 +501,164 @@ async fn background_daemon_survives_two_clients_and_routes_native_cwds() {
     daemon.wait().await.unwrap();
     server.abort();
 }
+
+// Only the remote account and optional external MCP provider are fixtures.
+// The daemon, workspace process retention and account WebSocket are shipped code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn late_computer_provider_preserves_daemon_and_running_shell() {
+    use std::os::unix::fs::PermissionsExt;
+    let (calls, receiver) = mpsc::unbounded_channel();
+    let state = Cloud {
+        calls,
+        receiver: Arc::new(Mutex::new(Some(receiver))),
+        catalog: Arc::new(Mutex::new(None)),
+        origins: Arc::new(Mutex::new(Vec::new())),
+        account_connections: Arc::new(AtomicUsize::new(0)),
+        agent_connections: Arc::new(AtomicUsize::new(0)),
+        model_reads: Arc::new(AtomicUsize::new(0)),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route(
+            "/v1/me",
+            get(|| async { Json(json!({"user":{"id":OWNER}})) }),
+        )
+        .route("/v1/account/tool-host", get(account_socket))
+        .with_state(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let temporary = tempfile::Builder::new()
+        .prefix("nc-cua-")
+        .tempdir()
+        .unwrap();
+    let home = temporary.path().canonicalize().unwrap();
+    let managed = home.join("runtimes/openai-cua");
+    std::fs::create_dir_all(&managed).unwrap();
+    let provider = home.join("provider");
+    // A managed receipt may precede completion/recovery of its executable.
+    std::fs::write(
+        managed.join("provider.json"),
+        json!({"status":"installed", "transport":"mcp",
+        "executable":provider, "dependency_contract":"nanocodex-native-no-codex-v1"})
+        .to_string(),
+    )
+    .unwrap();
+    let log = std::fs::File::create(home.join("daemon.log")).unwrap();
+    let mut daemon = command(&home, &origin)
+        .env_remove("NANOCODEX_COMPUTER")
+        .env("NANOCODEX_DIR", &home)
+        .args(["hand"])
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(TIMEOUT, async {
+        while state.catalog.lock().unwrap().is_none() {
+            assert!(
+                daemon.try_wait().unwrap().is_none(),
+                "{}",
+                std::fs::read_to_string(home.join("daemon.log")).unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let catalog = state.catalog.lock().unwrap().clone().unwrap();
+    assert!(
+        catalog["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["definition"]["name"] == "mcp__cua_repl__js")
+    );
+    let call = |id: &str, name: &str, input: Value| {
+        let (result, received) = oneshot::channel();
+        state.calls.send(Call { frame: json!({"type":"call","session_id":AGENT,"call_id":id,
+            "model":"gpt-6.1-sol", "name":name,"input":input,
+            "output_token_budget":4096,"output_byte_budget":131072,"deadline_at":9_000_000_000_000_u64}), result }).unwrap();
+        async move {
+            let frame = tokio::time::timeout(TIMEOUT, received)
+                .await
+                .unwrap()
+                .unwrap();
+            eprintln!("LATE PROVIDER call: {frame}");
+            assert_eq!(frame["outcome"]["status"], "completed", "{frame}");
+            assert_eq!(frame["outcome"]["output"]["success"], true, "{frame}");
+            frame
+        }
+    };
+    let preparing = call("preparing", "mcp__cua_repl__js", json!({})).await;
+    let receipt = |frame: &Value| {
+        serde_json::from_str::<Value>(
+            frame["outcome"]["output"]["structured_result"]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(receipt(&preparing)["status"], "preparing");
+    let running = call("start-shell", "exec_command", json!({"cmd":"read answer; printf 'retained:%s' \"$answer\"", "workdir":home, "tty":true,"yield_time_ms":100,"login":false})).await;
+    let session = running["outcome"]["output"]["structured_result"]["session_id"].clone();
+    assert!(!session.is_null(), "{running}");
+    std::fs::write(&provider, r#"#!/usr/bin/env python3
+import sys,json
+for line in sys.stdin:
+ r=json.loads(line)
+ if 'id' not in r: continue
+ m=r['method']
+ if m=='initialize': out={'protocolVersion':'2025-06-18','capabilities':{}}
+ elif m=='tools/list': out={'tools':[{'name':'js','description':'Exact late provider documentation.','inputSchema':{'type':'object','required':['code'],'properties':{'code':{'type':'string'}}}},{'name':'js_reset','description':'Exact reset','inputSchema':{'type':'object'}}]}
+ else:
+  with open(__file__+'.calls','a') as f: f.write(json.dumps(r)+'\n')
+  out={'content':[{'type':'text','text':json.dumps(r['params'])}]}
+ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
+"#).unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ready = call("ready", "mcp__cua_repl__js", json!({})).await;
+    assert!(
+        ready
+            .to_string()
+            .contains("Exact late provider documentation."),
+        "{ready}"
+    );
+    assert_eq!(receipt(&ready)["status"], "ready");
+    let definitions = receipt(&ready)["definitions"].as_array().unwrap().clone();
+    assert_eq!(
+        definitions
+            .iter()
+            .find(|tool| tool["name"] == "js")
+            .unwrap()["parameters"]["required"],
+        json!(["code"])
+    );
+    let action = call(
+        "action",
+        "mcp__cua_repl__js",
+        json!({"code":"single-action"}),
+    )
+    .await;
+    assert!(action.to_string().contains("single-action"), "{action}");
+    let done = call(
+        "finish-shell",
+        "write_stdin",
+        json!({"session_id":session,"chars":"ok\n","yield_time_ms":1000}),
+    )
+    .await;
+    assert!(done.to_string().contains("retained:ok"), "{done}");
+    assert_eq!(
+        std::fs::read_to_string(provider.with_extension("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    assert_eq!(state.account_connections.load(Ordering::SeqCst), 1);
+    assert!(daemon.try_wait().unwrap().is_none());
+    eprintln!(
+        "PASS: preparing -> exact catalog ready; one action dispatch; retained exec; one publisher connection.\n{}",
+        std::fs::read_to_string(home.join("daemon.log")).unwrap()
+    );
+    daemon.kill().await.unwrap();
+    daemon.wait().await.unwrap();
+    server.abort();
+}
