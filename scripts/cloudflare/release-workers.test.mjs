@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { existsSync, writeFileSync, readFileSync, statSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { DeploymentLedgerError } from './deployment-ledger.mjs';
 import { releaseWorkers, releasePhases, prepareReleasePhase, guardedCommand, accountHealth } from './release-workers.mjs';
 function fixture(selected, overrides = {}) {
   const events = [], calls = [];
@@ -308,4 +309,35 @@ test('managed releases enter the CRM migration/upload boundary with their pinned
   await f.release();
   assert.deepEqual(f.calls[0].command.slice(0, 5), [process.execPath, '../../scripts/cloudflare/managed-crm.mjs', 'deploy', '--config', 'wrangler.ci.jsonc']);
   assert.ok(f.calls[0].command.includes('--containers-rollout'));
+});
+
+
+test('admission failure identifies Worker and GitHub status without leaking provider output', async () => {
+  const f = fixture(['managed', 'account']);
+  f.options.ledger.start = async () => { throw new DeploymentLedgerError(422); };
+  await assert.rejects(f.release(), /managed ledger admission: .*GitHub HTTP 422/);
+  assert.equal(f.calls.length, 0);
+  assert.deepEqual(f.events, []);
+});
+
+test('freshness and completion failures retain safe stage diagnostics and block dependencies', async () => {
+  const freshness = fixture(['managed', 'account']);
+  let checks = 0;
+  freshness.options.isCurrent = async () => {
+    if (++checks > 1) throw Error('synthetic-private-provider-output');
+    return true;
+  };
+  await assert.rejects(freshness.release(), error => {
+    assert.match(error.message, /managed freshness check/);
+    assert.ok(!error.message.includes('synthetic-private'));
+    assert.ok(!error.cause);
+    return true;
+  });
+  assert.equal(freshness.calls.length, 0);
+  const completion = fixture(['managed', 'account']);
+  completion.options.ledger.finish = async (_, state) => {
+    if (state === 'success') throw new DeploymentLedgerError(403);
+  };
+  await assert.rejects(completion.release(), /managed completion receipt: .*GitHub HTTP 403/);
+  assert.equal(completion.calls.length, 1);
 });
