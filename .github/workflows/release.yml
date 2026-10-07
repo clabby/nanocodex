@@ -44,7 +44,9 @@ jobs:
           cargo metadata --no-deps --format-version 1 | jq -e --arg version "$version" \
             '[.packages[].dependencies[] | select(.source == null and (.name | startswith("nanocodex"))) | .req] | all(. == ("^" + $version))' >/dev/null
       - name: Validate isolated voice lockfile
-        run: cargo metadata --locked --manifest-path third_party/codex-voice/Cargo.toml --format-version 1 > /dev/null
+        run: |
+          python3 third_party/codex-voice/patches/webrtc-sys/prepare.py
+          cargo metadata --locked --manifest-path third_party/codex-voice/Cargo.toml --format-version 1 > /dev/null
       - name: Validate installers and crate packages
         shell: bash
         run: |
