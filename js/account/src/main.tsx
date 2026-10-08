@@ -5,6 +5,8 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { AccountSessionProvider } from "./AccountSession";
 import { MainApp } from "./MainApp";
+import { preloadAgentExperience } from "./agentExperiencePreload";
+import { installStaleChunkRecovery } from "./staleChunkRecovery";
 import "./MainNavigation.css";
 
 const ArtifactRuntime = lazy(() => import("./artifactRuntime").then((module) => ({ default: module.ArtifactRuntime })));
@@ -15,6 +17,10 @@ const directUrl = new URL(window.location.href);
 const directPath = directUrl.pathname === "/"
   ? "/"
   : directUrl.pathname.replace(/\/+$/, "");
+installStaleChunkRecovery(window);
+// A direct /agents load needs the chat module before anything useful renders:
+// start fetching it now instead of after React's first commit.
+if (/^\/agents?(?:\/|$)/.test(directPath)) preloadAgentExperience();
 const container = document.getElementById("root");
 if (!container) throw new Error("Nanocodex root container is missing");
 
