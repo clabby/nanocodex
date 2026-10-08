@@ -1,6 +1,8 @@
 import { memo } from "react";
 import { generatedOutputUrl, type GeneratedOutput } from "nanocodex-react/agent";
 import { RichMarkdown } from "./RichMarkdown.js";
+import { HtmlPreview } from "./HtmlPreview.js";
+import { inlineHtmlFromDataUrl } from "./htmlDocument.js";
 
 /** User-facing code output, independent of the activity disclosure's state. */
 export const GeneratedOutputView = memo(function GeneratedOutputView({ items }: {
@@ -27,6 +29,8 @@ const GeneratedMedia = memo(function GeneratedMedia({ item, index }: {
   const url = generatedOutputUrl(item.url, item.kind);
   const name = item.name || defaultName(item, index);
   if (!url) return <p className="agent-generated-unavailable">{name} — preview unavailable</p>;
+  const html = item.kind === "file" && url.startsWith("data:") ? inlineHtmlFromDataUrl(url) : undefined;
+  if (html !== undefined) return <HtmlPreview html={html} name={name} />;
   return <figure className={`agent-generated-media is-${item.kind}`}>
     {item.kind === "image" ? <img src={url} alt={name} loading="lazy" decoding="async" referrerPolicy="no-referrer" /> : null}
     {item.kind === "audio" ? <audio src={url} controls preload="none" aria-label={name} /> : null}
