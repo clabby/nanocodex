@@ -92,7 +92,8 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
       assert.equal(auth, null, "provider storage redirect must not receive the deployment key");
       return new Response(clip, { headers: { "content-type": "video/mp4", "content-length": String(clip.byteLength) } });
     }
-    assert.equal(url.origin, "https://openrouter.ai", "journey must never contact real services");
+    // Default MCP discovery also leaves through this boundary; never reach real services.
+    if (url.origin !== "https://openrouter.ai") return new Response("synthetic network unavailable", { status: 503 });
     assert.equal(auth, `Bearer ${apiKey}`);
     if (request.method === "GET" && url.pathname === "/api/v1/videos/models")
       return Response.json({ data: [seedance, { ...seedance, id: "google/veo-3.1", name: "Veo 3.1", seed: false }] });
@@ -181,7 +182,7 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
       const id = crypto.randomUUID();
       socket.send(JSON.stringify({ type: "prompt", id, input: `Synthetic OpenRouter video journey: ${label}` }));
       await waitFor(() => frames.some(frame => frame.id === id && ["turn_completed", "turn_failed", "turn_cancelled"].includes(frame.type)), label);
-      assert.equal(frames.find(frame => frame.id === id && frame.type.startsWith("turn_"))?.type, "turn_completed");
+      assert.equal(frames.find(frame => frame.id === id && ["turn_completed", "turn_failed", "turn_cancelled"].includes(frame.type))?.type, "turn_completed");
       socket.close();
       const results = frames.filter(frame => frame.event?.type === "tool.result" && frame.event.payload.tool === "openrouter_video").map(frame => frame.event.payload.structured_result);
       assert.equal(results.length, toolCalls.length, JSON.stringify(frames.slice(-6)));
@@ -230,7 +231,8 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
     assert.deepEqual(stored, clip, "downloaded clip is readable from the owner's /brain over HTTP");
 
     // Another account cannot address the owner's receipts, jobs or files.
-    const before = upstream.length;
+    const openrouterCalls = () => upstream.filter(call => call.origin === "https://openrouter.ai").length;
+    const before = openrouterCalls();
     const bobAgent = await createAgent(bob.token);
     const foreignResults = await turn(bob.token, bobAgent, [
       { operation: "status", operation_id: shot },
@@ -238,7 +240,7 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
       { ...request, operation_id: lost, prompt: "LOSE_REPLY shot", previous_operation_id: shot },
     ], "foreign_account");
     for (const result of foreignResults) assert.deepEqual(result, { error: "invalid_request", message: "unknown operation_id for this account" });
-    assert.equal(upstream.length, before, "foreign reads never contact OpenRouter");
+    assert.equal(openrouterCalls(), before, "foreign reads never contact OpenRouter");
     await call(`/v1/agents/${aliceAgent}/files?${new URLSearchParams({ path })}`, { token: bob.token, expected: 404 });
     const rows = await db.prepare("SELECT owner_id, operation_id, state, job_status FROM openrouter_video_jobs ORDER BY created_at").all();
     assert.deepEqual(rows.results.map(row => [row.owner_id, row.state]), [[owner, "submitted"], [owner, "outcome_unknown"], [owner, "rejected"]]);
