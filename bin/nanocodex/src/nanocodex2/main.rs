@@ -237,15 +237,24 @@ enum Command {
 
 #[derive(Args)]
 struct Attach {
-    /// Account-owned agent URL or ID. Choose from a list when omitted.
+    /// Agent ID, account URL, or shared /share/ URL. Shared tokens stay in memory.
     #[arg(value_name = "AGENT_URL_OR_ID", value_parser = parse_agent_reference)]
     agent: Option<AgentReference>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 struct AgentReference {
     agent_id: String,
     managed_origin: Option<String>,
+    shared_url: Option<String>,
+}
+
+impl std::fmt::Debug for AgentReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentReference")
+            .field("agent_id", &self.agent_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -687,6 +696,16 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
             .await
             .map_err(|_| ManagedError::Configuration("local recording control failed".into()));
     }
+    if let Some(Command::Attach(Attach { agent: Some(agent) })) = &cli.command {
+        if let Some(url) = &agent.shared_url {
+            if cli.managed2 {
+                return Err(ManagedError::Configuration(
+                    "Shared threads use the standard managed service".into(),
+                ));
+            }
+            return tui::run_shared(url).await;
+        }
+    }
     if cli.managed2 {
         return match cli.command {
             None => tui::run_managed2(None).await,
@@ -1086,10 +1105,18 @@ fn managed_url_from_environment(fallback: Option<&str>) -> Result<String, Manage
 }
 
 fn parse_agent_reference(value: &str) -> Result<AgentReference, String> {
+    if Url::parse(value).is_ok_and(|url| url.path().starts_with("/share/")) {
+        return Ok(AgentReference {
+            agent_id: String::new(),
+            managed_origin: None,
+            shared_url: Some(value.to_owned()),
+        });
+    }
     if valid_managed_agent_id(value) {
         return Ok(AgentReference {
             agent_id: value.to_owned(),
             managed_origin: None,
+            shared_url: None,
         });
     }
     let url = Url::parse(value).map_err(|_| {
@@ -1117,6 +1144,7 @@ fn parse_agent_reference(value: &str) -> Result<AgentReference, String> {
     Ok(AgentReference {
         agent_id: agent_id.into_owned(),
         managed_origin: Some(url.origin().ascii_serialization()),
+        shared_url: None,
     })
 }
 
@@ -1502,6 +1530,7 @@ mod tests {
                 managed_origin: Some(
                     "https://named-workspace-fabric.nanocodex.localhost:2443".to_owned()
                 ),
+                shared_url: None,
             })
         );
     }
@@ -1513,6 +1542,7 @@ mod tests {
             AgentReference {
                 agent_id: "agent:v1_test-id".to_owned(),
                 managed_origin: None,
+                shared_url: None,
             }
         );
         let picker = Cli::try_parse_from(["nanocodex2", "attach"])
