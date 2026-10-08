@@ -36,3 +36,9 @@ runs:
         echo "SCCACHE_GHA_RW_MODE=$CACHE_MODE" >> "$GITHUB_ENV"
         # Incremental compilation bypasses sccache; CI caches compiler outputs.
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        # sccache hashes every CARGO_* variable into its keys. CI sets these at
+        # workflow level, so set them for every Rust job: the production deploy,
+        # previews and CI's wasm-build then share WASM entries. Without this the
+        # deploy (96% hits) and PR WASM builds (0% hits) never matched.
+        echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+        echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
