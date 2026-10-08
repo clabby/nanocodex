@@ -189,7 +189,11 @@ function ToolBody({ tool, model }: { tool: ToolActivity; model: ToolModel }) {
   </div>;
 }
 
-/** Compact Amp-style activity row with a lazily rendered detail panel. */
+/**
+ * Compact Amp-style activity row: one summary line (status, icon, name, target,
+ * duration). Details, nested calls and raw payloads render only when expanded;
+ * failures stay collapsed behind a red status marker.
+ */
 export const ToolRow = memo(function ToolRow({ tool }: { tool: ToolActivity }) {
   const model = modelTool(tool);
   const [open, setOpen] = useState(false);
@@ -200,9 +204,10 @@ export const ToolRow = memo(function ToolRow({ tool }: { tool: ToolActivity }) {
   const added = model.diffs?.reduce((total, diff) => total + diff.added, 0) ?? 0;
   const removed = model.diffs?.reduce((total, diff) => total + diff.removed, 0) ?? 0;
   const target = model.kind === "command" && model.target ? `$ ${model.target}` : model.target;
+  const nested = tool.children.length;
   return <div className={`agent-tool-row is-${tool.status}`} data-tool-kind={model.kind} data-tool-status={tool.status}>
     <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary>
+      <summary title={model.error}>
         <StatusIcon status={tool.status} />
         <KindIcon kind={model.kind} />
         <span className="agent-tool-title">
@@ -213,17 +218,19 @@ export const ToolRow = memo(function ToolRow({ tool }: { tool: ToolActivity }) {
         <span className="agent-tool-meta">
           <DiffStat added={added} removed={removed} />
           {model.exitCode ? <span className="agent-tool-exit">exit {model.exitCode}</span> : null}
+          {nested && !open ? <span className="agent-tool-count">{nested} {nested === 1 ? "call" : "calls"}</span> : null}
           {model.source ? <span className="agent-tool-source">{model.source}</span> : null}
-          <span className="agent-terminal-sr-only">{STATUS_TEXT[tool.status]}</span>
+          <span className="agent-terminal-sr-only">{STATUS_TEXT[tool.status]}{model.error ? `: ${model.error}` : ""}</span>
           {elapsed ? <span className="agent-tool-time" aria-hidden={running ? "true" : undefined}>{elapsed}</span> : null}
           <ChevronRight className="agent-tool-chevron" aria-hidden="true" />
         </span>
       </summary>
-      {open ? <ToolBody tool={tool} model={model} /> : null}
+      {open ? <>
+        <ToolBody tool={tool} model={model} />
+        {nested ? <div className="agent-tool-children">
+          {tool.children.map(child => <ToolRow key={child.callId} tool={child} />)}
+        </div> : null}
+      </> : null}
     </details>
-    {model.error && !open ? <p className="agent-tool-error-line">{model.error}</p> : null}
-    {tool.children.length ? <div className="agent-tool-children">
-      {tool.children.map(child => <ToolRow key={child.callId} tool={child} />)}
-    </div> : null}
   </div>;
 });

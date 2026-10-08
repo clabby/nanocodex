@@ -293,6 +293,7 @@
   --activity-sans: var(--terminal-font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
   --activity-mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
   --activity-positive: var(--chat-positive, var(--positive, #18794e));
+  --activity-accent: var(--terminal-accent, var(--terminal-foreground, #111));
   --activity-negative: var(--terminal-negative, var(--negative, #d53b3b));
   --activity-surface: color-mix(in srgb, var(--terminal-foreground, #111) 4%, var(--terminal-background, #fff));
 }
@@ -303,8 +304,9 @@
 
 .agent-tool-status-icon, .agent-tool-kind-icon { flex: 0 0 auto; width: 14px; height: 14px; }
 .agent-tool-kind-icon { color: var(--terminal-muted, #6b6b6b); opacity: .85; }
-.agent-tool-status-icon.is-running { animation: agent-activity-spin 1s linear infinite; color: var(--terminal-foreground, #111); }
-.agent-tool-status-icon.is-completed { color: var(--activity-positive); }
+.agent-tool-status-icon.is-running { animation: agent-activity-spin 1s linear infinite; color: var(--activity-accent); }
+/* Monochrome: success is quiet; only failures carry color. */
+.agent-tool-status-icon.is-completed { color: var(--terminal-muted, #6b6b6b); opacity: .8; }
 .agent-tool-status-icon.is-failed { color: var(--activity-negative); }
 .agent-tool-status-icon.is-cancelled { color: var(--terminal-muted, #6b6b6b); }
 @keyframes agent-activity-spin { to { transform: rotate(360deg); } }
@@ -356,10 +358,9 @@ details[open] > summary .agent-tool-chevron { transform: rotate(90deg); }
 .agent-tool-diffstat { display: inline-flex; gap: 6px; font: 12px/1 var(--activity-mono); }
 .agent-tool-diffstat .is-add { color: var(--activity-positive); }
 .agent-tool-diffstat .is-remove { color: var(--activity-negative); }
-.agent-tool-error-line {
-  margin: 0 0 4px 44px; overflow: hidden; color: var(--activity-negative); font: 12px/1.45 var(--activity-mono);
-  text-overflow: ellipsis; white-space: nowrap;
-}
+.agent-tool-count { color: var(--terminal-muted, #6b6b6b); font-size: 11.5px; }
+.agent-tool-row.is-failed > details > summary .agent-tool-title strong { color: var(--activity-negative); }
+.agent-work-current { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--activity-mono); font-size: 12px; }
 .agent-tool-row.is-running .agent-tool-title strong { color: var(--terminal-foreground, #111); }
 .agent-tool-children { margin: 0 0 2px 6px; padding-left: 13px; border-left: 1px dashed var(--terminal-border, #ddd); }
 .agent-tool-row.is-thinking .agent-tool-detail { font-style: italic; }
@@ -474,7 +475,6 @@ details[open] > summary .agent-tool-chevron { transform: rotate(90deg); }
   .agent-tool-meta { margin-left: 44px; }
   .agent-tool-meta .agent-tool-source { display: none; }
   .agent-tool-body { margin-left: 0; }
-  .agent-tool-error-line { margin-left: 22px; }
   .agent-work-body, .agent-tool-children { margin-left: 2px; padding-left: 10px; }
   .agent-subagent-body { padding-left: 12px; }
 }
@@ -786,3 +786,85 @@ details[open] > summary .agent-tool-chevron { transform: rotate(90deg); }
 .agent-terminal-preview-card > span:nth-child(2) > span { color: var(--terminal-muted, #737373); overflow-wrap: anywhere; font-size: 12px; }
 .agent-terminal-preview-icon { font-size: 22px; }
 .agent-terminal-preview-action { margin-inline-start: auto; font-size: 12px; color: var(--terminal-muted, #737373); }
+
+.agent-work-group.is-running .agent-work-heading { flex-wrap: nowrap; overflow: hidden; }
+
+/* Composer attachments, drop target, and inline notices. */
+.agent-composer { position: relative; }
+.agent-composer-spacer { flex: 1 1 auto; min-width: 4px; }
+.agent-composer-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 6px 4px 2px; list-style: none;
+  font: 12px/1.3 var(--terminal-font-sans, system-ui, sans-serif);
+}
+.agent-composer-chip {
+  position: relative; display: flex; align-items: center; gap: 8px; max-width: 240px; min-height: 44px; padding: 4px 4px 4px 4px;
+  color: var(--terminal-foreground, #111); background: var(--terminal-surface, var(--terminal-hover, #f4f4f4));
+  border: 1px solid var(--terminal-border, #ddd); border-radius: 8px;
+}
+.agent-composer-chip > img { flex: 0 0 auto; width: 36px; height: 36px; object-fit: cover; border-radius: 5px; background: var(--terminal-background, #fff); }
+.agent-composer-chip-icon {
+  display: grid; flex: 0 0 auto; width: 36px; height: 36px; place-items: center; color: var(--terminal-muted, #6b6b6b);
+  background: var(--terminal-background, #fff); border-radius: 5px;
+}
+.agent-composer-chip-icon svg { width: 16px; height: 16px; }
+.agent-composer-chip.is-preparing .agent-composer-chip-icon::after {
+  content: ""; width: 14px; height: 14px; border: 2px solid var(--terminal-border, #ddd); border-top-color: var(--terminal-accent, currentColor);
+  border-radius: 50%; animation: agent-activity-spin .9s linear infinite;
+}
+.agent-composer-chip-text { display: grid; min-width: 0; gap: 2px; padding-right: 2px; }
+.agent-composer-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.agent-composer-chip-meta { color: var(--terminal-muted, #6b6b6b); font-size: 11px; white-space: nowrap; }
+.agent-composer-chip > button {
+  display: grid; flex: 0 0 auto; width: 24px; height: 24px; margin-left: auto; padding: 0; place-items: center;
+  color: var(--terminal-muted, #6b6b6b); background: transparent; border: 0; border-radius: 5px; cursor: pointer;
+}
+.agent-composer-chip > button:hover { color: var(--terminal-foreground, #111); background: var(--terminal-hover, #eee); }
+.agent-composer-chip > button svg { width: 14px; height: 14px; }
+.agent-composer-notice {
+  display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 6px 6px 6px 10px;
+  color: var(--terminal-negative, #b42318); font: 12.5px/1.4 var(--terminal-font-sans, system-ui, sans-serif);
+  background: color-mix(in srgb, var(--terminal-negative, #b42318) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--terminal-negative, #b42318) 28%, transparent); border-radius: 8px;
+}
+.agent-composer-notice > span { flex: 1; min-width: 0; }
+.agent-composer-notice > button { display: grid; width: 24px; height: 24px; padding: 0; place-items: center; color: inherit; background: transparent; border: 0; border-radius: 5px; cursor: pointer; }
+.agent-composer-notice svg { width: 14px; height: 14px; }
+.agent-composer-drop {
+  position: absolute; z-index: 3; inset: 4px; display: grid; place-items: center; pointer-events: none;
+  color: var(--terminal-foreground, #111); font: 500 13px/1 var(--terminal-font-sans, system-ui, sans-serif);
+  background: color-mix(in srgb, var(--terminal-background, #fff) 82%, transparent);
+  border: 1.5px dashed var(--terminal-accent, var(--terminal-muted, #6b6b6b)); border-radius: 10px;
+}
+
+/* Errors read as a tidy notice; raw payloads only behind Details. */
+.agent-error-notice {
+  display: flex; gap: 10px; align-items: flex-start; margin: 0 0 18px; padding: 9px 12px;
+  color: var(--terminal-foreground, #111); font: 13.5px/1.5 var(--terminal-font-sans, system-ui, sans-serif);
+  background: color-mix(in srgb, var(--terminal-negative, #d53b3b) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--terminal-negative, #d53b3b) 30%, var(--terminal-border, #ddd)); border-radius: 8px;
+}
+.agent-error-notice-icon { flex: 0 0 auto; width: 16px; height: 16px; margin-top: 2px; color: var(--terminal-negative, #d53b3b); }
+.agent-error-notice-body { display: grid; min-width: 0; gap: 4px; }
+.agent-error-notice-body > p { margin: 0; overflow-wrap: anywhere; }
+.agent-error-notice-details > pre {
+  max-height: 260px; margin: 6px 0 0; padding: 8px 10px; overflow: auto; color: var(--terminal-muted, #6b6b6b);
+  font: 11.5px/1.5 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--terminal-background, #fff); border: 1px solid var(--terminal-border, #ddd); border-radius: 6px;
+}
+.agent-error-notice-details > summary { list-style: none; }
+.agent-error-notice-details > summary::-webkit-details-marker { display: none; }
+
+/* Attachments shown on sent user messages. */
+.agent-terminal-user-text { margin: 0; white-space: pre-wrap; }
+.agent-user-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.agent-terminal-user-text:empty + .agent-user-attachments, .agent-user-attachments:first-child { margin-top: 0; }
+.agent-user-attachments > li {
+  display: flex; align-items: center; gap: 6px; max-width: 260px; min-height: 28px; padding: 3px 9px;
+  color: var(--terminal-muted, #6b6b6b); font: 12px/1.3 var(--terminal-font-sans, system-ui, sans-serif);
+  background: var(--terminal-background, #fff); border: 1px solid var(--terminal-border, #ddd); border-radius: 6px;
+}
+.agent-user-attachments > li > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-user-attachments > li > svg { flex: 0 0 auto; width: 14px; height: 14px; }
+.agent-user-attachments > li.is-image:has(> img) { padding: 0; overflow: hidden; }
+.agent-user-attachments img { display: block; max-width: 220px; max-height: 160px; object-fit: contain; }
+@media (prefers-reduced-motion: reduce) { .agent-composer-chip.is-preparing .agent-composer-chip-icon::after { animation: none; } }

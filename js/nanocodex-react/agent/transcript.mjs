@@ -9,7 +9,7 @@ export function initialState(status = "Ready") {
   };
 }
 
-export function queuePrompt(state, id, text, historyEntryId) {
+export function queuePrompt(state, id, text, historyEntryId, attachments) {
   const displayImmediately = !state.running && state.queuedPrompts.length === 0;
   const turnId = historyTurnId(historyEntryId);
   return {
@@ -17,8 +17,9 @@ export function queuePrompt(state, id, text, historyEntryId) {
     entries: displayImmediately ? [...state.entries, {
       id: historyEntryId ?? `user-${id}`, kind: "user", text, promptId: id,
       ...(turnId === undefined ? {} : { turnId }),
+      ...(attachments?.length ? { attachments } : {}),
     }] : state.entries,
-    queuedPrompts: [...state.queuedPrompts, { id, text, historyEntryId, turnId }],
+    queuedPrompts: [...state.queuedPrompts, { id, text, historyEntryId, turnId, ...(attachments?.length ? { attachments } : {}) }],
     displayedQueuedPrompt: displayImmediately ? id : state.displayedQueuedPrompt,
     pendingTurns: state.pendingTurns + 1,
     status: state.running ? "Prompt queued" : "Starting",
@@ -253,6 +254,7 @@ export function applyAgentEvents(state, events) {
           mutableEntries().push({
             id: promptEntryId, kind: "user", text: prompt.text, promptId: prompt.id,
             ...(prompt.turnId === undefined ? {} : { turnId: prompt.turnId }),
+            ...(prompt.attachments ? { attachments: prompt.attachments } : {}),
           });
         }
         next = {

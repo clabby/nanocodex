@@ -160,6 +160,42 @@ test("prompt controls steer active work, queue roots, cancel the latest turn, an
   }
 });
 
+test("attachments send structured input as a new root turn and show markers, not payloads", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  let controller;
+  function Consumer() {
+    controller = useAgentController(source.agent);
+    return null;
+  }
+  let root;
+  try {
+    await act(async () => { root = create(createElement(Consumer)); });
+    await flushFrames(frames);
+    const image = { type: "image", image_url: "data:image/png;base64,iVBORw0KGgo=" };
+    const file = { type: "text", text: '<attached_file name="notes &quot;v2&quot;.md" media_type="text/markdown">\n# Secret payload\n</attached_file>' };
+    await act(async () => { await controller.submit("Describe these", { attachments: [image, file] }); });
+    await flushFrames(frames);
+    assert.deepEqual(source.turns[0].input, [{ type: "text", text: "Describe these" }, image, file]);
+    const user = controller.entries.at(-1);
+    assert.equal(user.text, 'Describe these\n[image]\n[file: notes "v2".md]');
+    assert.doesNotMatch(user.text, /Secret payload|base64/);
+    assert.deepEqual(user.attachments, [{ kind: "image", url: image.image_url }, { kind: "file", name: 'notes "v2".md' }]);
+
+    // An active turn is never steered with attachments; they start a new root turn.
+    source.emit(event(1, "run.started", { turn_id: "turn-1" }));
+    await flushFrames(frames);
+    await act(async () => { await controller.submit("", { attachments: [image] }); });
+    await flushFrames(frames);
+    assert.equal(source.turns.length, 2);
+    assert.deepEqual(source.turns[0].steers, []);
+    assert.deepEqual(source.turns[1].input, [image]);
+    await act(async () => root.unmount());
+  } finally {
+    frames.restore();
+  }
+});
+
 test("queued message controls withdraw only the selected root", async () => {
   const frames = fakeAnimationFrames();
   const source = fakeAgent();

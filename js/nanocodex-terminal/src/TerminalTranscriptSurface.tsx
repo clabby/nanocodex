@@ -10,7 +10,8 @@ import {
   useState,
 } from "react";
 import type { AgentEntry, ToolActivity } from "nanocodex-react/agent";
-import { ArrowDown, Check, Copy } from "lucide-react";
+import { ArrowDown, Check, CircleAlert, Copy, FileText, Image as ImageIcon } from "lucide-react";
+import { looksLikeRawError, presentAgentError, presentAssistantText } from "./errorPresentation.js";
 import { RichMarkdown } from "./RichMarkdown.js";
 
 import type { AgentStatus, AgentTerminalMode } from "./types.js";
@@ -225,9 +226,8 @@ export function TerminalTranscriptSurface({
           ))}
           {running && !streamingAnswer ? <LiveStatus activity={readableActivity(activity)} startedAt={turnStartedAt} /> : null}
           {status !== "ready" && inactiveMessage ? (
-            <p className="agent-terminal-status" role={status === "error" ? "alert" : "status"}>
-              {inactiveMessage}
-            </p>
+            status === "error" ? <ErrorNotice text={inactiveMessage} className="agent-terminal-status" />
+              : <p className="agent-terminal-status" role="status">{looksLikeRawError(inactiveMessage) ? presentAgentError(inactiveMessage).summary : inactiveMessage}</p>
           ) : null}
           <div className="agent-transcript-keyboard-spacer" aria-hidden="true" />
         </div>
@@ -421,18 +421,10 @@ const TerminalEntryView = memo(function TerminalEntryView({
   userLabel,
 }: RowProps & { entry: TerminalEntry }) {
   const voice = isVoiceEntry(entry);
-  if (entry.kind === "user") return <pre className="agent-terminal-user" data-source={voice ? "voice" : undefined}>
-    {voice ? <span className="agent-terminal-entry-label">voice</span> : !voice && (userLabel?.(entry) || entry.author === "guest") ? <span className="agent-terminal-entry-label">{userLabel?.(entry) || "Guest"}</span> : null}{entry.text}
-  </pre>;
-  if (entry.kind === "assistant" || entry.kind === "reasoning") return (
-    <article className={`agent-terminal-markdown is-${entry.kind}`} data-source={voice ? "voice" : undefined}>
-      {voice ? <span className="agent-terminal-entry-label">voice</span> : null}
-      {entry.kind === "reasoning" ? <span className="agent-terminal-entry-label">thinking{entry.streaming ? "…" : ""}</span> : null}
-      <RichMarkdown streaming={entry.streaming}>{entry.text}</RichMarkdown>
-      {entry.kind === "assistant" && !entry.streaming && entry.text.trim() ? <ResponseActions text={entry.text} /> : null}
-    </article>
-  );
-  if (entry.kind === "error") return <p className="agent-terminal-error" role="alert">! {entry.text}</p>;
+  if (entry.kind === "user") return <UserMessage entry={entry} voice={voice}
+    label={voice ? "voice" : userLabel?.(entry as Extract<AgentEntry, { kind: "user" }>) || ("author" in entry && entry.author === "guest" ? "Guest" : undefined)} />;
+  if (entry.kind === "assistant" || entry.kind === "reasoning") return <AssistantMessage entry={entry} voice={voice} />;
+  if (entry.kind === "error") return <ErrorNotice text={entry.text} className="agent-terminal-error" />;
   if (entry.kind === "plan") return <ol className="agent-terminal-plan">
     {entry.update.plan.map((step, index) => <li key={`${index}-${step.step}`} data-status={step.status}>
       <span aria-hidden="true">{step.status === "completed" ? "✓" : step.status === "in_progress" ? "→" : "·"}</span>
@@ -444,6 +436,22 @@ const TerminalEntryView = memo(function TerminalEntryView({
     renderTool={renderTool} renderEntry={() => null} />;
   return null;
 });
+
+type ProseEntry = Readonly<{ kind: "assistant" | "reasoning" | "user"; text: string; streaming: boolean }>;
+
+function AssistantMessage({ entry, voice }: { entry: ProseEntry; voice: boolean }) {
+  // Only a settled answer that is entirely a payload envelope is reinterpreted.
+  const settled = entry.kind === "assistant" && !entry.streaming && /^\s*[{[]/.test(entry.text);
+  const shown = useMemo(() => settled ? presentAssistantText(entry.text) : undefined, [settled, entry.text]);
+  if (shown?.kind === "error") return <ErrorNotice text={shown.text} className="agent-terminal-error" />;
+  const text = shown?.text ?? entry.text;
+  return <article className={`agent-terminal-markdown is-${entry.kind}`} data-source={voice ? "voice" : undefined}>
+    {voice ? <span className="agent-terminal-entry-label">voice</span> : null}
+    {entry.kind === "reasoning" ? <span className="agent-terminal-entry-label">thinking{entry.streaming ? "…" : ""}</span> : null}
+    <RichMarkdown streaming={entry.streaming}>{text}</RichMarkdown>
+    {entry.kind === "assistant" && !entry.streaming && text.trim() ? <ResponseActions text={text} /> : null}
+  </article>;
+}
 
 function ResponseActions({ text }: { text: string }) {
   const [state, setState] = useState<"idle" | "copied" | "error">("idle");
@@ -458,5 +466,61 @@ function ResponseActions({ text }: { text: string }) {
       catch { setState("error"); }
     }}>{state === "copied" ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}</button>
     <span role="status">{state === "copied" ? "Copied" : state === "error" ? "Couldn’t copy. Select the text to copy it." : ""}</span>
+  </div>;
+}
+
+type UserAttachment = Readonly<{ kind: "image" | "file" | "document" | "audio"; name?: string | undefined; url?: string | undefined }>;
+const ATTACHMENT_MARKER = /^\[(image|audio|file|document)(?::\s*(.+))?\]$/;
+const ATTACHED_FILE_BLOCK = /<attached_file name="([^"]*)"[^>]*>[\s\S]*?<\/attached_file>/g;
+
+/** Splits trailing attachment markers (and any inlined file envelopes) out of user prose. */
+export function splitUserAttachments(text: string): { text: string; attachments: UserAttachment[] } {
+  const attachments: UserAttachment[] = [];
+  let body = text.replace(ATTACHED_FILE_BLOCK, (_match, name: string) => {
+    attachments.push({ kind: "file", name: name.replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&") });
+    return "";
+  });
+  const lines = body.split("\n");
+  const trailing: UserAttachment[] = [];
+  while (lines.length) {
+    const marker = ATTACHMENT_MARKER.exec(lines.at(-1)!.trim());
+    if (!marker) break;
+    lines.pop();
+    trailing.unshift({ kind: marker[1] as UserAttachment["kind"], ...(marker[2] ? { name: marker[2] } : {}) });
+  }
+  body = lines.join("\n").trimEnd();
+  return { text: body, attachments: [...attachments, ...trailing] };
+}
+
+function UserMessage({ entry, label, voice }: { entry: TerminalEntry & { text: string }; label?: string | undefined; voice: boolean }) {
+  const { text, attachments: markers } = useMemo(() => splitUserAttachments(entry.text), [entry.text]);
+  const local = "attachments" in entry ? entry.attachments : undefined;
+  // Local previews carry thumbnails; history only has markers in the same order.
+  const attachments: UserAttachment[] = local?.length ? local.map((item, index) => ({ ...markers[index], ...item })) : markers;
+  return <div className="agent-terminal-user" data-source={voice ? "voice" : undefined}>
+    {label ? <span className="agent-terminal-entry-label">{label}</span> : null}
+    {text ? <p className="agent-terminal-user-text">{text}</p> : null}
+    {attachments.length ? <ul className="agent-user-attachments" aria-label="Attachments">
+      {attachments.map((item, index) => <li key={index} className={`is-${item.kind}`}>
+        {item.kind === "image" && item.url ? <img src={item.url} alt={item.name ?? "Attached image"} />
+          : <>{item.kind === "image" ? <ImageIcon aria-hidden="true" /> : <FileText aria-hidden="true" />}
+            <span>{item.name ?? (item.kind === "image" ? "Image" : item.kind === "audio" ? "Audio" : item.kind === "document" ? "Document" : "File")}</span></>}
+      </li>)}
+    </ul> : null}
+  </div>;
+}
+
+/** Tidy inline notice: one readable sentence; raw source only behind Details. */
+function ErrorNotice({ text, className }: { text: string; className: string }) {
+  const { summary, detail } = useMemo(() => presentAgentError(text), [text]);
+  return <div className={`${className} agent-error-notice`} role="alert">
+    <CircleAlert className="agent-error-notice-icon" aria-hidden="true" />
+    <div className="agent-error-notice-body">
+      <p>{summary}</p>
+      {detail ? <details className="agent-tool-protocol agent-error-notice-details">
+        <summary>Details</summary>
+        <pre>{detail}</pre>
+      </details> : null}
+    </div>
   </div>;
 }

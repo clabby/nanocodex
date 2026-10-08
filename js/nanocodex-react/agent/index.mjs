@@ -230,8 +230,11 @@ function createController(agent, options) {
   }
 
   async function submit(value, submitOptions = {}) {
-    const input = String(value).trim();
-    if (!input || disposed) return undefined;
+    const text = String(value).trim();
+    const attachments = promptAttachments(submitOptions.attachments);
+    if ((!text && attachments.length === 0) || disposed) return undefined;
+    const input = text;
+    if (attachments.length > 0) return startRootTurn(nextPromptId++, text, false, attachments);
     if (input === "/clear") {
       clear();
       return undefined;
@@ -282,10 +285,16 @@ function createController(agent, options) {
     return startRootTurn(id, input, false);
   }
 
-  function startRootTurn(id, input, requeuedSteer) {
+  function startRootTurn(id, input, requeuedSteer, attachments = []) {
     let turn;
+    // Attachments always start a root turn: steering accepts text only.
+    const promptInput = attachments.length === 0
+      ? input
+      : [...(input ? [{ type: "text", text: input }] : []), ...attachments];
+    const displayText = attachments.length === 0 ? input : promptInputText(promptInput);
+    const display = attachments.length === 0 ? undefined : attachmentPreviews(attachments);
     try {
-      turn = agent.turn.prompt({ input });
+      turn = agent.turn.prompt({ input: promptInput });
     } catch (error) {
       state = requeuedSteer
         ? steerFailed(state, id, errorMessage(error))
@@ -298,12 +307,12 @@ function createController(agent, options) {
     state = boundedState(
       requeuedSteer
         ? requeueSteerAsPrompt(state, id, input, turn.historyEntryId)
-        : queuePrompt(state, id, input, turn.historyEntryId),
+        : queuePrompt(state, id, displayText, turn.historyEntryId, display),
       options.maxEntries,
     );
     const record = { disposed: false, id, turn, cancelRequested: false, cancelVersion: 0, cancellation: undefined };
     activeTurns.add(record);
-    emit("prompt.accepted", { id, input, sessionId: agent.sessionId });
+    emit("prompt.accepted", { id, input: displayText, sessionId: agent.sessionId });
     publish();
     void finishTurn(record);
     return turn;
@@ -500,6 +509,48 @@ function validateAgent(agent) {
 
 function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+/** Accepts only protocol prompt items; text attachments use the attached_file envelope. */
+function promptAttachments(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => item && typeof item === "object" && (
+    (item.type === "image" && typeof item.image_url === "string" && item.image_url)
+    || (item.type === "file" && typeof item.file_data === "string" && item.file_data)
+    || (item.type === "text" && typeof item.text === "string" && item.text.trim())
+  ));
+}
+
+const ATTACHED_FILE = /^<attached_file name="([^"]*)"[^>]*>[\s\S]*<\/attached_file>$/;
+
+/** Transcript text for structured input: attachments become readable markers, never payloads. */
+export function promptInputText(input) {
+  if (typeof input === "string") return input;
+  if (!Array.isArray(input)) return "";
+  return input.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    if (item.type === "text" && typeof item.text === "string") {
+      const file = ATTACHED_FILE.exec(item.text.trim());
+      return [file ? `[file: ${decodeAttribute(file[1])}]` : item.text];
+    }
+    if (item.type === "image") return ["[image]"];
+    if (item.type === "audio") return ["[audio]"];
+    if (item.type === "file") return [typeof item.filename === "string" && item.filename ? `[document: ${item.filename}]` : "[document]"];
+    return [];
+  }).join("\n");
+}
+
+function decodeAttribute(value) {
+  return value.replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+}
+
+function attachmentPreviews(items) {
+  return items.map((item) => {
+    if (item.type === "image") return { kind: "image", url: item.image_url };
+    if (item.type === "file") return { kind: "document", ...(item.filename ? { name: item.filename } : {}) };
+    const file = ATTACHED_FILE.exec(item.text.trim());
+    return { kind: "file", ...(file ? { name: decodeAttribute(file[1]) } : {}) };
+  });
 }
 
 function errorMessage(error) {

@@ -10,7 +10,7 @@ import {
   type ManagedEvent,
   type ManagedTurn,
 } from "nanocodex/managed";
-import type { Agent as ControllerAgent, AgentTurn } from "nanocodex-react/agent";
+import { promptInputText, type Agent as ControllerAgent, type AgentTurn, type PromptAttachment } from "nanocodex-react/agent";
 
 const MANAGED_HISTORY_PAGE_SIZE = 128;
 const MANAGED_HISTORY_INITIAL_ATTEMPTS = 3;
@@ -231,9 +231,20 @@ function managedConversation(agent: ManagedAgent): ManagedConversation {
       updatedAt: agent.summary.updatedAt,
       lastUserMessageAt: agent.summary.lastUserMessageAt ?? 0,
       turnCount: agent.summary.turnCount,
-      ...(agent.summary.presentation ? { presentation: agent.summary.presentation } : {}),
+      ...(agent.summary.presentation ? { presentation: readablePresentation(agent.summary.presentation) } : {}),
     }),
   });
+}
+
+/** Sidebar text names text-file attachments instead of showing their envelope and contents. */
+function readablePresentation(presentation: NonNullable<ManagedConversation["presentation"]>): NonNullable<ManagedConversation["presentation"]> {
+  const prompt = presentation.lastUserPrompt;
+  return prompt && prompt.includes("<attached_file") ? { ...presentation, lastUserPrompt: attachmentSummary(prompt) } : presentation;
+}
+
+function attachmentSummary(text: string): string {
+  return text.replace(/<attached_file name="([^"]*)"[^>]*>[\s\S]*?(?:<\/attached_file>|$)/g,
+    (_match, name: string) => `[file: ${name.replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&")}]`);
 }
 
 export function managedTerminalAgent(
@@ -249,7 +260,7 @@ export function managedTerminalAgent(
       watch: () => managedEventWatcher(managed, submitted, historyEnabled, options.accountId),
     }),
     turn: Object.freeze({
-      prompt: ({ input }: { input: string }) => {
+      prompt: ({ input }: { input: string | readonly PromptAttachment[] }) => {
         const id = crypto.randomUUID();
         submitted?.add(id);
         return managedTerminalTurn(managed, id, input);
@@ -263,7 +274,7 @@ function isManagedAgent(source: ManagedTerminalSource): source is ManagedAgent {
   return typeof candidate.state === "function" && typeof candidate.delete === "function";
 }
 
-function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, input: string): AgentTurn {
+function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, input: string | readonly PromptAttachment[]): AgentTurn {
   const controller = new AbortController();
   const turn: ManagedTurn = managed.turn.prompt({ id: turnId, input });
   return Object.freeze({
@@ -911,21 +922,12 @@ function historyEvent(
 function promptText(input: unknown): string {
   if (typeof input === "string") return input;
   if (!Array.isArray(input)) return "[prompt]";
-  return input.flatMap((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const value = item as Record<string, unknown>;
-    return value.type === "text" && typeof value.text === "string"
-      ? [value.text]
-      : value.type === "image"
-        ? ["[image]"]
-        : value.type === "audio"
-          ? ["[audio]"]
-          : [];
-  }).join("\n");
+  // Attachment payloads (data URLs, file contents) become markers, never transcript prose.
+  return promptInputText(input as readonly PromptAttachment[]);
 }
 
 function titleFromPrompt(input: string): string {
-  const text = input.replace(/\s+/g, " ").trim();
+  const text = attachmentSummary(input).replace(/\s+/g, " ").trim();
   if (!text) return "";
   return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text;
 }

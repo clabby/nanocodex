@@ -204,15 +204,32 @@ export const ThinkingRow = memo(function ThinkingRow({ entry }: { entry: Reasoni
   </div>;
 });
 
-function useDisclosure(automatic: boolean) {
-  const [chosen, setChosen] = useState<boolean>();
-  const open = chosen ?? automatic;
+/** Reader-controlled disclosure: always starts collapsed and never opens by itself. */
+function useDisclosure() {
+  const [open, setOpen] = useState(false);
   return {
     open,
     onToggle(event: { currentTarget: HTMLDetailsElement }) {
-      if (event.currentTarget.open !== open) setChosen(event.currentTarget.open);
+      if (event.currentTarget.open !== open) setOpen(event.currentTarget.open);
     },
   };
+}
+
+/** The newest running call, named for a collapsed live group's summary row. */
+function currentActivity(tools: readonly ToolActivity[]): string | undefined {
+  for (let index = tools.length - 1; index >= 0; index -= 1) {
+    let tool: ToolActivity | undefined = tools[index]!;
+    if (!hasRunning(tool)) continue;
+    // Prefer the innermost running call, such as a command inside Code Mode.
+    while (tool) {
+      const child: ToolActivity | undefined = [...tool.children].reverse().find(hasRunning);
+      if (!child) break;
+      tool = child;
+    }
+    const model = modelTool(tool);
+    return [model.label, model.target].filter(Boolean).join(" ") || undefined;
+  }
+  return undefined;
 }
 
 export const WorkGroup = memo(function WorkGroup({ entries, live, showToolCalls, renderTool, renderEntry }: {
@@ -230,7 +247,8 @@ export const WorkGroup = memo(function WorkGroup({ entries, live, showToolCalls,
   const active = tools.some(hasRunning) || thinking || live;
   const now = useNow(active);
   const [seenAt] = useState(() => Date.now());
-  const disclosure = useDisclosure(active);
+  const disclosure = useDisclosure();
+  const current = useMemo(() => active ? currentActivity(tools) : undefined, [active, tools]);
   const artifacts = tools.map(tool => <div className="agent-terminal-tool-entry" key={tool.callId}><ToolArtifacts tool={tool} renderTool={renderTool} /></div>);
   if (!showToolCalls) return <div className="agent-work">
     {entries.map(entry => entry.kind === "reasoning" ? <div key={entry.id}>{renderEntry(entry)}</div> : null)}
@@ -250,12 +268,12 @@ export const WorkGroup = memo(function WorkGroup({ entries, live, showToolCalls,
         <StatusIcon status={status} />
         <span className="agent-work-heading">
           <strong>{heading}{duration !== undefined && duration >= 1000 ? ` for ${formatElapsed(duration)}` : active ? "…" : ""}</strong>
-          {parts.map(part => <span key={part}>{part}</span>)}
+          {current ? <span className="agent-work-current">{current}</span> : parts.map(part => <span key={part}>{part}</span>)}
           {failed ? <span className="is-failed">{failed} failed</span> : null}
         </span>
         <ChevronRight className="agent-tool-chevron" aria-hidden="true" />
       </summary>
-      <div className="agent-work-body">{items}</div>
+      {disclosure.open ? <div className="agent-work-body">{items}</div> : null}
     </details>
     {artifacts}
   </div>;
@@ -292,7 +310,7 @@ export const SubagentBlock = memo(function SubagentBlock({ agentId, role, entrie
   const { parts, failed } = summarizeWork(tools);
   const errors = entries.filter(entry => entry.kind === "error").length;
   const answer = [...entries].reverse().find(entry => entry.kind === "assistant");
-  const disclosure = useDisclosure(false);
+  const disclosure = useDisclosure();
   const status = active ? "running" : failed || errors ? "failed" : "completed";
   const preview = answer && answer.kind === "assistant" ? answer.text.split("\n").map(line => line.trim()).find(Boolean) : undefined;
   return <details className={`agent-terminal-child agent-subagent is-${status}`} data-agent-id={agentId}

@@ -1,4 +1,5 @@
 import type { ToolActivity } from "nanocodex-react/agent";
+import { presentAgentError } from "./errorPresentation.js";
 import { presentTool } from "./toolPresentation.js";
 
 /** Semantic category used for icons, grouping summaries, and specialized bodies. */
@@ -410,7 +411,7 @@ export function modelTool(tool: ToolActivity): ToolModel {
     kind,
     ...(presentation.source && kind !== "command" ? { source: presentation.source } : {}),
     ...(presentation.duration ? { duration: presentation.duration } : {}),
-    ...(failed ? { error: firstLine(readableError(output) ?? outputText) ?? "Failed" } : {}),
+    ...(failed ? { error: firstLine(readableError(output) ?? (outputText ? presentAgentError(outputText).summary : undefined)) ?? "Failed" } : {}),
     ...(rawInput ? { inputText: rawInput } : {}),
     ...(rawOutput ? { outputText: rawOutput } : {}),
   };

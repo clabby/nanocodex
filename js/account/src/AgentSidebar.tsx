@@ -209,7 +209,7 @@ export function AgentSidebar({
                         {sidebarStatus(conversation)}
                         {conversation.lastUserMessageAt ? <time dateTime={new Date(conversation.lastUserMessageAt).toISOString()}>{threadAge(conversation.lastUserMessageAt)}</time> : null}
                       </span>
-                      {conversation.presentation?.activity && conversation.presentation.activeTurnIds.includes(conversation.presentation.activityTurnId ?? "") ? (
+                      {conversation.presentation?.activity && !/^\s*[{[]/.test(conversation.presentation.activity) && conversation.presentation.activeTurnIds.includes(conversation.presentation.activityTurnId ?? "") ? (
                         <span className="agent-navigation-activity">{conversation.presentation.activity}</span>
                       ) : null}
                       {conversation.presentation?.lastUserPrompt ? (

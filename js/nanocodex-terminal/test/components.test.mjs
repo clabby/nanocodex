@@ -113,7 +113,10 @@ test("voice preferences reconnect an active call with the saved subscription set
   await act(async () => renderer.unmount());
 });
 
-test("composer keeps stop available beside send throughout an active turn", async () => {
+test("composer keeps stop available throughout an active turn and sends drafts beside it", async () => {
+  // A coarse pointer with a hardware keyboard (hover available): Enter sends.
+  const matchMedia = window.matchMedia;
+  window.matchMedia = (query) => ({ matches: !query.includes("hover: none") });
   const changes = [];
   const submissions = [];
   const textareaNode = { value: "ship it" };
@@ -181,14 +184,34 @@ test("composer keeps stop available beside send throughout an active turn", asyn
     onChange() {},
     onSubmit(value) { submissions.push(value); },
   })));
+  // With nothing to send, Stop is the single primary action.
   assert.deepEqual(
     renderer.root.findAllByType("button").map((button) => button.props["aria-label"]),
-    ["Stop response", "Send message"],
+    ["Stop response"],
   );
-  assert.equal(renderer.root.findByProps({ "aria-label": "Send message" }).props.disabled, true);
   await act(async () => renderer.root.findByProps({ "aria-label": "Stop response" }).props.onClick());
   assert.equal(cancelled, 2);
   await act(async () => renderer.unmount());
+
+  // Phone keyboards have no Shift key: Enter inserts a newline and the button sends.
+  window.matchMedia = () => ({ matches: true });
+  const phoneSubmissions = [];
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(TerminalComposer, {
+      draft: "two\nlines", pending: false, running: false, status: "ready",
+      onCancel() {}, onChange() {}, onSubmit(value) { phoneSubmissions.push(value); },
+    }), { createNodeMock: (element) => element.type === "textarea" ? { value: "two\nlines" } : {} });
+  });
+  let phonePrevented = 0;
+  await act(async () => renderer.root.findByType("textarea").props.onKeyDown({
+    key: "Enter", nativeEvent: { isComposing: false, key: "Enter", shiftKey: false }, preventDefault() { phonePrevented += 1; },
+  }));
+  assert.deepEqual(phoneSubmissions, []);
+  assert.equal(phonePrevented, 0);
+  await act(async () => renderer.root.findByType("form").props.onSubmit({ preventDefault() {} }));
+  assert.deepEqual(phoneSubmissions, ["two\nlines"]);
+  await act(async () => renderer.unmount());
+  window.matchMedia = matchMedia;
 });
 
 test("automatic history keeps the reader anchored while output streams and the reader moves", async () => {

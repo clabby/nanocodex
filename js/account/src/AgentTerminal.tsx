@@ -260,6 +260,9 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
     reasoningMode: wireSettings.reasoning_mode, fastMode: wireSettings.fast_mode,
   } : terminalDefaultSettings(source);
   const settingsReady = stateQuery.isSuccess && Boolean(wireSettings);
+  // Images and text files reach every model; inline PDFs need a Claude model.
+  const documents = settings.model.startsWith("claude-");
+  const attachmentPolicy = useMemo(() => ({ documents }), [documents]);
   const [locallyStarted, setLocallyStarted] = useState(false);
   const conversationStarted = locallyStarted || stateQuery.data?.accepted_turns !== 0;
   const settingsMutation = useMutation({
@@ -333,6 +336,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
     <PhoneCallsPanel key={`${accountId}:${agentId}`} parentAgentId={agentId} enabled={Boolean(accountId) && mode !== "hidden"} />
     <AgentTerminalView
       agent={startupReady ? agent : undefined}
+      attachments={attachmentPolicy}
       initialDraft={initialDraft}
       agentError={stateQuery.error?.message}
       inactiveMessage={({ agentError, agentStatus }) => inactiveTerminalMessage({

@@ -26,7 +26,7 @@ import { ElevenLabsSettings } from "./ElevenLabsSettings.js";
 const defaultElevenLabsManager = createElevenLabsManager();
 
 import { SlidersHorizontal, X } from "lucide-react";
-import { TerminalComposer } from "./TerminalComposer.js";
+import { TerminalComposer, type ComposerAttachment, type ComposerAttachmentPolicy } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 import type { VoiceTerminalEntry } from "./TerminalTranscriptSurface.js";
 import type {
@@ -43,6 +43,7 @@ export type AgentTerminalAccessory = Readonly<{
 /** Shared website terminal presentation. Runtime and authorization policy stay with its consumer. */
 export function AgentTerminalView({
   accessory,
+  attachments,
   agent,
   agentError,
   composer,
@@ -66,6 +67,8 @@ export function AgentTerminalView({
   welcome,
 }: {
   accessory?(controls: AgentTerminalAccessory): ReactNode;
+  /** Enables composer attachments; the agent must accept structured prompt input. */
+  attachments?: ComposerAttachmentPolicy | undefined;
   agent: Agent | undefined;
   agentError: string | undefined;
   /** Replaces the default composer without detaching the transcript controller. */
@@ -97,6 +100,7 @@ export function AgentTerminalView({
   const [touchDraft, setTouchDraft] = useState(initialDraft ?? "");
   const [pendingTouchSubmission, setPendingTouchSubmission] = useState<{
     input: string;
+    attachments: readonly ComposerAttachment[];
     submittedAt: number;
   }>();
   const [followTailRequest, setFollowTailRequest] = useState(0);
@@ -197,15 +201,15 @@ export function AgentTerminalView({
   }, [agentError, agentStatus, onStateChange, retryAgent]);
 
   const unavailableMessage = inactiveMessage?.({ agentError, agentStatus });
-  const submitTouchPrompt = useCallback((input: string) => {
-    if (!input.trim()) return;
+  const submitTouchPrompt = useCallback((input: string, attached: readonly ComposerAttachment[] = []) => {
+    if (!input.trim() && attached.length === 0) return;
     const submittedAt = performance.now();
     setFollowTailRequest((current) => current + 1);
     if (agentStatus !== "ready") {
-      setPendingTouchSubmission({ input, submittedAt });
+      setPendingTouchSubmission({ input, attachments: attached, submittedAt });
       return;
     }
-    void voiceState.noteTypedInput().then(() => submitPrompt(controller, submittedPrompts.current, input, submittedAt, promptIntent));
+    void voiceState.noteTypedInput().then(() => submitPrompt(controller, submittedPrompts.current, input, submittedAt, promptIntent, attached));
     setTouchDraft("");
   }, [agentStatus, controller, promptIntent, voiceState.noteTypedInput]);
   useEffect(() => {
@@ -216,6 +220,7 @@ export function AgentTerminalView({
       pendingTouchSubmission.input,
       pendingTouchSubmission.submittedAt,
       promptIntent,
+      pendingTouchSubmission.attachments,
     ));
     setPendingTouchSubmission(undefined);
     setTouchDraft("");
@@ -251,6 +256,7 @@ export function AgentTerminalView({
           </div>)}
         </div> : null}
         <TerminalComposer
+          attachments={attachments}
           controls={(voice || controls) ? <>
             {voice ? <VoiceControl agentReady={agentStatus === "ready"} voice={voiceState} initialSettings={voiceOptions} elevenLabsManager={elevenLabsManager} /> : null}
             {controls?.({ agentReady: agentStatus === "ready" })}
@@ -477,7 +483,13 @@ function submitPrompt(
   input: string,
   submittedAt: number,
   intent?: "queue" | "steer",
+  attachments: readonly ComposerAttachment[] = [],
 ) {
+  if (attachments.length > 0) {
+    // The controller reports structured prompts by their readable marker text.
+    void controller.submit(input, { attachments: attachments.map(({ item }) => item) });
+    return;
+  }
   retainSubmittedPrompt(submittedPrompts, input, submittedAt);
   void controller.submit(input, intent === undefined ? undefined : { intent });
 }

@@ -37,7 +37,8 @@ export type Agent = Readonly<{
     | import("nanocodex/connect").ConnectAgent
     | undefined;
   turn: Readonly<{
-    prompt(options: Readonly<{ input: string }>): AgentTurn;
+    /** Structured input is supplied only when a submission carries attachments. */
+    prompt(options: Readonly<{ input: string | readonly PromptAttachment[] }>): AgentTurn;
   }>;
   events: Readonly<{
     watch(): AgentEventWatcher;
@@ -90,7 +91,9 @@ export type PlanUpdate = Readonly<{
 }>;
 
 export type AgentEntry = Readonly<(
-  | { id: string; kind: "user"; text: string; author?: "guest" | undefined; promptId?: number | undefined }
+  | { id: string; kind: "user"; text: string; author?: "guest" | undefined; promptId?: number | undefined;
+      /** Local previews for attachments submitted from this controller; history uses text markers. */
+      attachments?: readonly PromptAttachmentPreview[] | undefined }
   | { id: string; kind: "reasoning"; text: string; streaming: boolean }
   | { id: string; kind: "assistant"; text: string; streaming: boolean }
   | { id: string; kind: "tool"; tool: ToolActivity }
@@ -107,7 +110,28 @@ export type AgentControllerEvent = Readonly<{
 export type SubmitOptions = Readonly<{
   /** Auto-steers an active turn by default; queue always starts a new queued root turn. */
   intent?: "queue" | "steer" | undefined;
+  /**
+   * Structured prompt content sent after the text. A submission with attachments
+   * always starts a root turn, and the transcript shows markers instead of payloads.
+   */
+  attachments?: readonly PromptAttachment[] | undefined;
 }>;
+
+/** Image and document attachments use the prompt protocol; text files use an attached_file envelope. */
+export type PromptAttachment = Readonly<
+  | { type: "image"; image_url: string; detail?: "auto" | "low" | "high" | "original" | undefined }
+  | { type: "file"; file_data: string; filename?: string | undefined }
+  | { type: "text"; text: string }
+>;
+
+export type PromptAttachmentPreview = Readonly<{
+  kind: "image" | "file" | "document";
+  name?: string | undefined;
+  url?: string | undefined;
+}>;
+
+/** Readable transcript text for prompt input; attachment payloads become markers such as `[image]`. */
+export function promptInputText(input: string | readonly PromptAttachment[]): string;
 
 export type AgentControllerSnapshot = Readonly<{
   entries: readonly AgentEntry[];
