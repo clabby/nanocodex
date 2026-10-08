@@ -117,6 +117,27 @@ try {
     assert.equal(palette.radius, '18px', 'Composer is a rounded homepage-style panel');
     log(`${name}:palette`, palette);
 
+    // Header: one row, readable title; secondary actions collapse into a menu on mobile.
+    const header = await page.locator('.agent-chat-header').boundingBox();
+    assert.ok(header.height <= 60, `Header is a single row (${header.height})`);
+    const heading = await page.locator('.agent-chat-heading strong').boundingBox();
+    if (mobile) {
+      assert.ok(heading.width >= 120, `Mobile title has room (${heading.width})`);
+      assert.equal(await page.locator('.agent-chat-secondary').isVisible(), false, 'Secondary actions are hidden behind More');
+      await page.getByRole('button', { name: 'More actions' }).click();
+      const items = page.locator('.agent-chat-secondary.is-open > button');
+      assert.equal(await items.count(), 4, 'More menu lists secondary actions');
+      for (const box of await items.evaluateAll(els => els.map(e => e.getBoundingClientRect().toJSON()))) {
+        assert.ok(box.height >= 44 && box.right <= viewport.width && box.left >= 0, `Menu item fits (${JSON.stringify(box)})`);
+      }
+      await shot('header-menu');
+      await page.locator('.agent-chat-menu-backdrop').click({ position: { x: 10, y: 400 } });
+      assert.equal(await page.locator('.agent-chat-secondary.is-open').count(), 0, 'Backdrop closes the menu');
+    } else {
+      assert.equal(await page.getByRole('button', { name: 'More actions' }).isVisible(), false, 'Desktop shows actions inline');
+      assert.equal(await page.locator('.agent-chat-secondary > button').first().isVisible(), true, 'Desktop secondary actions visible');
+    }
+
     // Sidebar: no Home entry (the brand mark already links home); composer shows no voice name.
     assert.equal(await page.locator('.agent-navigation-primary').getByText('Home', { exact: true }).count(), 0, 'Sidebar has no Home button');
     assert.equal(await page.locator('.agent-voice-select').count(), 0, 'No inline voice picker');

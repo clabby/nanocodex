@@ -630,3 +630,34 @@ html[data-theme="light"] .chat-workspace {
 .chat-running-agents { display: inline-flex; gap: 6px; align-items: center; min-height: 30px; padding: 3px 10px; border: 0; border-radius: 999px; color: var(--chat-muted); background: transparent; cursor: pointer; font-size: 12px; font-variant-numeric: tabular-nums; }
 .chat-running-agents:hover { color: var(--chat-text); background: var(--chat-hover); }
 .chat-running-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--chat-accent); }
+
+/* Header secondary actions: inline icons on desktop, overflow menu on mobile. */
+.agent-chat-secondary { display: contents; }
+.agent-chat-secondary > button > span { display: none; }
+.chat-workspace .agent-chat-more, .agent-chat-menu-backdrop { display: none; }
+.agent-chat-heading { flex: 1 1 auto; }
+@media (max-width: 760px) {
+  .agent-chat-header { gap: 2px; padding-inline: 4px; }
+  .agent-chat-heading { padding-left: 2px; }
+  .agent-chat-heading strong { font-size: 15px; font-weight: 600; }
+  .agent-chat-header-actions { position: relative; gap: 0; flex-shrink: 0; }
+  .chat-running-agents { min-height: 44px; padding-inline: 10px; }
+  .chat-workspace .agent-chat-more { display: grid; }
+  .agent-chat-secondary { display: none; }
+  .agent-chat-secondary.is-open {
+    position: absolute; z-index: 60; top: calc(100% + 6px); right: 0; display: grid; min-width: 220px; padding: 6px;
+    border: 1px solid var(--chat-line); border-radius: 14px; background: var(--chat-background);
+    box-shadow: 0 12px 32px rgb(0 0 0 / 0.28);
+  }
+  .chat-workspace .agent-chat-secondary.is-open > button {
+    display: flex; width: 100%; height: 44px; gap: 12px; align-items: center; justify-content: flex-start; padding: 0 12px;
+    border-radius: 10px; color: var(--chat-text); font-size: 15px; text-align: left;
+  }
+  .agent-chat-secondary.is-open > button > span { display: inline; }
+  .agent-chat-secondary.is-open > button svg { width: 18px; height: 18px; color: var(--chat-muted); }
+  .agent-chat-menu-backdrop { position: fixed; z-index: 59; inset: 0; display: block; }
+  /* Voice errors span the composer instead of covering the input from the mic button. */
+  .chat-workspace .agent-voice-control { position: static; }
+  .chat-workspace .agent-voice-feedback { left: max(10px, env(safe-area-inset-left)); right: max(10px, env(safe-area-inset-right)); bottom: calc(100% + 6px); width: auto; max-width: none; }
+  .chat-workspace :is(.agent-voice-status, .agent-voice-error) { font-size: 13px; box-shadow: 0 8px 24px rgb(0 0 0 / 0.2); }
+}

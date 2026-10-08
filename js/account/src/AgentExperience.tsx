@@ -17,7 +17,7 @@ import {
 import type { AgentControllerEvent } from "nanocodex-react/agent";
 import { AccountChooser } from "nanocodex-connect-ui/AccountChooser";
 import { Link, useNavigate } from "react-router";
-import { Moon, PanelLeft, Share2, SquarePen, Sun } from "lucide-react";
+import { Ellipsis, Moon, PanelLeft, ScanSearch, Share2, SquarePen, Sun, Users } from "lucide-react";
 import type { AgentStatus, AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 import { AgentTerminal, ManagedAgentTerminal } from "./AgentTerminal";
 import { TerminalComposer, TerminalTranscriptSurface } from "nanocodex-terminal";
@@ -67,6 +67,7 @@ export const AgentExperience = memo(function AgentExperience({
 }) {
   const navigate = useNavigate();
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [teamChooserOpen, setTeamChooserOpen] = useState(false);
   const [ephemeralThreadId, setEphemeralThreadId] = useState(() => crypto.randomUUID());
@@ -342,12 +343,16 @@ export const AgentExperience = memo(function AgentExperience({
           <button ref={sidebarTriggerRef} className="agent-sidebar-toggle chat-icon-button" type="button" onClick={() => { if (window.matchMedia("(min-width: 761px)").matches) toggleDesktopSidebar(); else setRailOpen(true); }} aria-label="Open sidebar" aria-expanded={railOpen} aria-controls="agent-navigation"><PanelLeft aria-hidden="true" /></button>
           <div className="agent-chat-heading"><strong>{landing ? "Nanocodex" : title}</strong>{!landing && <span className="agent-scope">{scopeQuery.data?.scope?.type === "team" ? `Team session · ${scopeQuery.data.scope.team_id}` : scopeQuery.isError ? "Scope unavailable" : scopeQuery.data ? "Private session" : "Loading scope…"}</span>}</div>
           <div className="agent-chat-header-actions">
-            {!landing && canCreateManaged && <button type="button" disabled={createPending} onClick={() => setTeamChooserOpen(true)}>New team session</button>}
             {!landing ? <button className="chat-running-agents" type="button" aria-label="Running agents" title="Show running agents" onClick={() => { setRunningOnly(true); setRailOpen(true); if (window.matchMedia("(min-width: 761px)").matches) setSidebarCollapsed(false); }}><span className="chat-running-dot" aria-hidden="true" />{runningCount}<span className="agent-terminal-sr-only"> running agents</span></button> : null}
-            {!landing && visibleManagedConversationId && !visibleManagedConversationId.startsWith("pending:") ? <button className="chat-icon-button" type="button" aria-label="Share thread" title="Share thread" onClick={() => setShareOpen(true)}><Share2 aria-hidden="true" /></button> : null}
-            {managedConversationId && <button type="button" onClick={() => setInspectorOpen(open => !open)} aria-expanded={inspectorOpen}>Inspect</button>}
+            <div className={`agent-chat-secondary${headerMenuOpen ? " is-open" : ""}`} id="agent-chat-secondary" onClick={event => { if ((event.target as HTMLElement).closest("button")) setHeaderMenuOpen(false); }}>
+              {!landing && canCreateManaged && <button className="chat-icon-button" type="button" disabled={createPending} onClick={() => setTeamChooserOpen(true)} aria-label="New team session" title="New team session"><Users aria-hidden="true" /><span>New team session</span></button>}
+              {!landing && !!visibleManagedConversationId && !visibleManagedConversationId.startsWith("pending:") ? <button className="chat-icon-button" type="button" aria-label="Share thread" title="Share thread" onClick={() => setShareOpen(true)}><Share2 aria-hidden="true" /><span>Share thread</span></button> : null}
+              {managedConversationId && <button className="chat-icon-button" type="button" onClick={() => setInspectorOpen(open => !open)} aria-expanded={inspectorOpen} aria-label="Inspect agent" title="Inspect agent"><ScanSearch aria-hidden="true" /><span>Inspect</span></button>}
+              <button className="chat-icon-button" type="button" onClick={() => onThemeChange(theme === "light" ? "dark" : "light")} aria-label={`Use ${theme === "light" ? "dark" : "light"} appearance`} title={`Use ${theme === "light" ? "dark" : "light"} appearance`}>{theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}<span>{theme === "light" ? "Dark appearance" : "Light appearance"}</span></button>
+            </div>
+            {headerMenuOpen && <div className="agent-chat-menu-backdrop" aria-hidden="true" onClick={() => setHeaderMenuOpen(false)} />}
+            <button className="chat-icon-button agent-chat-more" type="button" aria-label="More actions" aria-expanded={headerMenuOpen} aria-controls="agent-chat-secondary" onClick={() => setHeaderMenuOpen(open => !open)}><Ellipsis aria-hidden="true" /></button>
             {agentStatus === "starting" || agentStatus === "error" ? <span className={`agent-chat-status is-${agentStatus}`} role="status"><i aria-hidden="true" />{agentStatus === "starting" ? "Connecting…" : "Needs attention"}</span> : null}
-            <button className="chat-icon-button" type="button" onClick={() => onThemeChange(theme === "light" ? "dark" : "light")} aria-label={`Use ${theme === "light" ? "dark" : "light"} appearance`} title={`Use ${theme === "light" ? "dark" : "light"} appearance`}>{theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}</button>
             <button className="chat-icon-button" type="button" disabled={createPending || (!landing && sessionChecking)} onClick={newChat} aria-label={landing ? "New chat" : "New agent"} title={landing ? "New chat" : "New agent"}><SquarePen aria-hidden="true" /></button>
           </div>
         </header>

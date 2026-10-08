@@ -96,6 +96,7 @@ const conversations = [
 
 function Workspace() {
   const [open, setOpen] = React.useState(false);
+  const [menuOpen, setMenuOpen] = React.useState(false);
   const close = React.useCallback(() => setOpen(false), []);
   return <div className="nanocodex-demo chat-workspace is-full" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
     <div className="conversation-workspace">
@@ -106,7 +107,13 @@ function Workspace() {
         <header className="agent-chat-header">
           <button className="agent-sidebar-toggle chat-icon-button" type="button" aria-label="Open sidebar" onClick={() => setOpen(true)}>☰</button>
           <div className="agent-chat-heading"><strong>Fix the release check</strong></div>
-          <div className="agent-chat-header-actions"><button className="chat-running-agents" type="button"><span className="chat-running-dot" />1</button></div>
+          <div className="agent-chat-header-actions"><button className="chat-running-agents" type="button"><span className="chat-running-dot" />1</button>
+            <div className={`agent-chat-secondary${menuOpen ? " is-open" : ""}`} onClick={() => setMenuOpen(false)}>
+              {["New team session", "Share thread", "Inspect", "Light appearance"].map(label => <button key={label} className="chat-icon-button" type="button" aria-label={label}><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" /><span>{label}</span></button>)}
+            </div>
+            {menuOpen && <div className="agent-chat-menu-backdrop" onClick={() => setMenuOpen(false)} />}
+            <button className="chat-icon-button agent-chat-more" type="button" aria-label="More actions" aria-expanded={menuOpen} onClick={() => setMenuOpen(open => !open)}>⋯</button>
+            <button className="chat-icon-button" type="button" aria-label="New agent">+</button></div>
         </header>
         <AgentTerminalView agent={agent as any} agentError={undefined} attachments={{ documents: true }} mode="full" voice
           controls={() => <div className="agent-runtime-controls"><button type="button" className="agent-model-trigger" aria-label="Model settings: Opus 5.5, Medium">
