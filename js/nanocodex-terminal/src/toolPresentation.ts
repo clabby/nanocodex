@@ -4,9 +4,6 @@ type JsonRecord = Record<string, unknown>;
 
 export type ToolPresentation = Readonly<{
   duration?: string;
-  inputDetail?: Readonly<{ label: string; value: string }>;
-  outputSummary?: string;
-  outputDetails?: readonly Readonly<{ label: string; value: string }>[];
   previewUrl?: string;
   source?: string;
   subject?: string;
@@ -36,45 +33,13 @@ export function presentTool(tool: ToolActivity): ToolPresentation {
   const semanticWrapper = tool.name === "exec" && tool.children.length > 0;
   const previewUrl = ["sandbox_preview", "preview"].includes(family) ? safeHttpUrl(field(output, "url")) : undefined;
   const subject = semanticWrapper ? undefined : summarizeInput(family, input);
-  const outputSummary = semanticWrapper ? undefined : summarizeOutput(family, output);
   const source = toolSource(decodedName.sources, family, input, semanticWrapper);
-  const executionDetails = semanticWrapper ? undefined : semanticExecutionDetails(family, input, output);
   return {
     title: toolTitle(tool, family, input, output),
     ...(source ? { source } : {}),
     ...(subject ? { subject } : {}),
-    ...(outputSummary ? { outputSummary } : {}),
     ...(tool.durationNs === undefined || tool.status === "running" ? {} : { duration: formatDuration(tool.durationNs) }),
     ...(previewUrl ? { previewUrl } : {}),
-    ...executionDetails,
-  };
-}
-
-function semanticExecutionDetails(
-  family: string,
-  input: unknown,
-  output: unknown,
-): Pick<ToolPresentation, "inputDetail" | "outputDetails"> | undefined {
-  if (family !== "sandbox_exec" && family !== "sandbox_get_process" && family !== "exec_command" && family !== "write_stdin") return undefined;
-  const commandKey = family === "exec_command" ? "cmd" : "command";
-  const command = family === "sandbox_get_process"
-    ? isRecord(output) ? stringField(output, "command") : undefined
-    : isRecord(input) ? stringField(input, commandKey) : undefined;
-  const outputRecord = isRecord(output) ? output : undefined;
-  const stdout = outputRecord
-    ? stringField(outputRecord, family === "exec_command" || family === "write_stdin" ? "output" : "stdout")
-    : undefined;
-  const stderr = outputRecord ? stringField(outputRecord, "stderr") : undefined;
-  const exitCode = outputRecord ? numberField(outputRecord, "exit_code") : undefined;
-  return {
-    ...(command ? { inputDetail: { label: "Command", value: command } } : {}),
-    ...(stdout === undefined && stderr === undefined && exitCode === undefined ? {} : {
-      outputDetails: [
-        ...(exitCode === undefined ? [] : [{ label: "Exit code", value: String(exitCode) }]),
-        ...(stdout === undefined ? [] : [{ label: family === "exec_command" || family === "write_stdin" ? "Output" : "Stdout", value: stdout || "(empty)" }]),
-        ...(stderr === undefined ? [] : [{ label: "Stderr", value: stderr || "(empty)" }]),
-      ],
-    }),
   };
 }
 
@@ -98,14 +63,15 @@ function toolTitle(tool: ToolActivity, family: string, input: unknown, output: u
   );
 }
 
-export function boundedToolDetail(value: string): string {
+export function boundedToolDetail(value: string, maxLines = 24): string {
   let readable = value;
   try { readable = JSON.stringify(JSON.parse(value), null, 2); } catch { /* Plain text stays plain. */ }
   const lines = readable.trim().split("\n");
-  const output = lines.slice(0, 24).join("\n");
+  const output = lines.slice(0, maxLines).join("\n");
   const characters = [...output];
-  if (characters.length > 4_000) return `${characters.slice(0, 4_000).join("")}…`;
-  return lines.length > 24 ? `${output}\n…` : output;
+  const limit = Math.max(4_000, maxLines * 160);
+  if (characters.length > limit) return `${characters.slice(0, limit).join("")}…`;
+  return lines.length > maxLines ? `${output}\n…` : output;
 }
 
 function decodeToolName(name: string, metadata: unknown): { family: string; sources: string[] } {
@@ -187,118 +153,9 @@ function summarizeInput(family: string, input: unknown): string | undefined {
       const value = input[key];
       if (typeof value === "string" || typeof value === "number") return compact(String(value));
     }
-    const keys = Object.keys(input);
-    if (keys.length) return `${keys.length} input field${keys.length === 1 ? "" : "s"}`;
     return undefined;
   }
   return typeof input === "string" ? compact(input) : undefined;
-}
-
-function summarizeOutput(family: string, output: unknown): string | undefined {
-  if (Array.isArray(output)) {
-    const textParts = output.filter((part) => isRecord(part)
-      && ["input_text", "output_text", "text"].includes(String(part.type))
-      && typeof part.text === "string");
-    return compact(textParts.length === output.length
-      ? textParts.map((part) => part.text).join("\n")
-      : stringify(output));
-  }
-  if (isRecord(output)) {
-    if (SUBAGENT_TOOLS.has(family)) {
-      const summary = summarizeSubagentOutput(family, output);
-      if (summary) return summary;
-    }
-    if (family === "sandbox_get_process") {
-      if (output.found === false) return "Not found";
-      const parts = executionSummaryParts(output);
-      const status = stringField(output, "status");
-      if (status) parts.unshift(humanize(status));
-      if (parts.length) return parts.join(" · ");
-    }
-    if (family === "sandbox_kill_process") {
-      if (output.found === false) return "Not found";
-      const status = stringField(output, "status");
-      if (status) return humanize(status);
-    }
-    if (family === "sandbox_exec" || family === "exec_command") {
-      const parts = executionSummaryParts(output);
-      if (family === "exec_command") addLineCount(parts, output, "output");
-      if (parts.length) return parts.join(" · ");
-    }
-    if (family === "sandbox_start_process") {
-      const parts: string[] = [];
-      const processId = stringField(output, "process_id");
-      const pid = numberField(output, "pid");
-      const status = stringField(output, "status");
-      const port = numberField(output, "ready_port");
-      if (pid !== undefined) parts.push(`PID ${pid}`);
-      else if (processId) parts.push(`Process ${compact(processId)}`);
-      if (status) parts.push(humanize(status));
-      if (port !== undefined) parts.push(`Port ${port} ready`);
-      if (parts.length) return parts.join(" · ");
-    }
-    if (["sandbox_preview", "preview"].includes(family) && safeHttpUrl(field(output, "url"))) return "Preview ready";
-    if (family === "accountInfo") {
-      const parts: string[] = [];
-      const status = stringField(output, "status");
-      if (status) parts.push(humanize(status));
-      const connectorAccounts = recordField(output, "connectorAccounts");
-      const connectorCount = connectorAccounts
-        ? Object.values(connectorAccounts).reduce<number>(
-          (count, value) => count + (Array.isArray(value) ? value.length : 0),
-          0,
-        )
-        : arrayField(output, "authenticated")?.length;
-      if (connectorCount !== undefined) parts.push(counted(connectorCount, "connector"));
-      const machines = arrayField(output, "machines");
-      if (machines) parts.push(counted(machines.length, "machine"));
-      const vault = arrayField(output, "vault");
-      if (vault) parts.push(counted(vault.length, "Vault item"));
-      if (parts.length) return parts.join(" · ");
-    }
-    return compact(stringify(output));
-  }
-  if (typeof output === "string") return compact(output);
-  if (output === undefined || output === null) return undefined;
-  return compact(String(output));
-}
-
-function executionSummaryParts(output: JsonRecord): string[] {
-  const parts: string[] = [];
-  const exitCode = numberField(output, "exit_code");
-  if (exitCode !== undefined) parts.push(`Exit ${exitCode}`);
-  addLineCount(parts, output, "stdout");
-  addLineCount(parts, output, "stderr");
-  return parts;
-}
-
-function summarizeSubagentOutput(family: string, output: JsonRecord): string | undefined {
-  if (family === "submit_result" && output.status === "superseded") return "Continue with updated instructions";
-  if (family === "spawn_agent") {
-    const parts: string[] = [];
-    const id = numberField(output, "agent_id");
-    const state = nestedState(output.status);
-    if (id !== undefined) parts.push(`Agent ${id}`);
-    if (state) parts.push(humanize(state));
-    return parts.length ? parts.join(" · ") : undefined;
-  }
-  if (family === "wait_agent") {
-    if (output.timed_out === true) return "Timed out";
-    const agents = arrayField(output, "agents");
-    if (!agents?.length) return undefined;
-    return agents.slice(0, 3).flatMap((agent) => {
-      if (!isRecord(agent)) return [];
-      const id = numberField(agent, "agent_id");
-      const role = stringField(agent, "role");
-      const state = nestedState(agent.status);
-      const identity = role ? compact(role) : id === undefined ? "Agent" : `Agent ${id}`;
-      return [`${identity}${role && id !== undefined ? ` (${id})` : ""}${state ? ` · ${humanize(state)}` : ""}`];
-    }).join("; ");
-  }
-  const state = nestedState(output.status);
-  if (state) return humanize(state);
-  if (output.accepted === true) return "Accepted";
-  return undefined;
 }
 
 function subagentTarget(input: unknown, output: unknown, allowMany = false): string {
@@ -323,19 +180,8 @@ function subagentTarget(input: unknown, output: unknown, allowMany = false): str
   return allowMany ? "agents" : "agent";
 }
 
-function nestedState(value: unknown): string | undefined {
-  return isRecord(value) && typeof value.state === "string" ? value.state : undefined;
-}
-
 function recordString(value: unknown, key: string): string | undefined {
   return isRecord(value) ? stringField(value, key) : undefined;
-}
-
-function addLineCount(parts: string[], output: JsonRecord, key: string): void {
-  const value = stringField(output, key);
-  if (!value) return;
-  const lines = value.split("\n").length;
-  parts.push(`${lines} ${key} line${lines === 1 ? "" : "s"}`);
 }
 
 function formatDuration(nanoseconds: number): string {
@@ -369,14 +215,6 @@ function compact(value: string): string {
   return [...normalized].length <= 140 ? normalized : `${[...normalized].slice(0, 140).join("")}…`;
 }
 
-function stringify(value: unknown): string {
-  try { return JSON.stringify(value); } catch { return String(value); }
-}
-
-function counted(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
 function safeHttpUrl(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   try {
@@ -403,10 +241,6 @@ function stringField(value: JsonRecord, key: string): string | undefined {
 
 function numberField(value: JsonRecord, key: string): number | undefined {
   return typeof value[key] === "number" ? value[key] : undefined;
-}
-
-function recordField(value: JsonRecord, key: string): JsonRecord | undefined {
-  return isRecord(value[key]) ? value[key] : undefined;
 }
 
 function arrayField(value: JsonRecord, key: string): unknown[] | undefined {

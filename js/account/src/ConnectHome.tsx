@@ -6,7 +6,8 @@ import { AccountChooser } from "nanocodex-connect-ui/AccountChooser";
 import { AccountMenu } from "./AccountMenu";
 import { Vault } from "./Vault";
 import { useAccountSession } from "./AccountSession";
-import { accountSectionPaths, pathForSurface } from "./navigation";
+import { accountSectionPaths } from "./navigation";
+import { MainNavigationLinks, NanocodexMark } from "./MainNavigation";
 import "./AccountWorkspace.css";
 
 const sections = [
@@ -55,13 +56,12 @@ export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
       <a className="account-skip" href="#account-content">Skip to content</a>
       <header className="account-hub-topbar">
         <NavLink to="/" className="account-hub-brand" aria-label="Nanocodex home">
-          <svg aria-hidden="true" viewBox="76 76 872 872"><rect x="76" y="76" width="872" height="872" rx="194" fill="#292929" /><path d="M326 695V332L638 695V332" fill="none" stroke="#f7f7f7" strokeWidth="67" strokeLinecap="round" strokeLinejoin="round" /><circle cx="742" cy="691" r="27" fill="#8cb38c" /></svg>
+          <NanocodexMark />
           <span>Nanocodex</span>
         </NavLink>
+        <MainNavigationLinks current="connect" className="account-hub-navigation" />
         <div className="account-hub-utilities">
           {account ? <button className="account-icon-button account-mobile-sign-out" type="button" disabled={session.operation !== null} onClick={() => void session.signOut()} aria-label="Sign out" title="Sign out"><LogOut aria-hidden="true" /></button> : null}
-          <NavLink to={pathForSurface("agent")} className="account-docs">Agents</NavLink>
-          <a href="/docs" className="account-docs">Docs <ArrowUpRight aria-hidden="true" /></a>
           <button className="account-icon-button" type="button" onClick={toggleTheme} aria-label={`Use ${theme === "light" ? "dark" : "light"} appearance`} title="Change appearance">
             {theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
           </button>
@@ -88,7 +88,7 @@ export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
             <div className="account-hub-cli">
               <span>From your terminal</span>
               <code>nanocodex2 login</code>
-              <a href="/docs/getting-started">Install the CLI <ArrowUpRight aria-hidden="true" /></a>
+              <a href="/#home-cli">Install the CLI <ArrowUpRight aria-hidden="true" /></a>
             </div>
             <div className="account-hub-identity">
               <CircleUserRound aria-hidden="true" />

@@ -38,26 +38,60 @@ try {
     // Completed work collapses to an informative summary; artifacts stay visible.
     assert.equal(await done.getAttribute('open'), null);
     const summary = await done.locator(':scope > summary').innerText();
-    assert.match(summary, /Worked for \d/); assert.match(summary, /edited 3 files/); assert.match(summary, /1 failed/);
+    assert.match(summary, /Worked for \d/); assert.match(summary, /edited 3 files/); assert.match(summary, /3 failed/);
     assert.equal(await page.getByRole('link', { name: /Open preview/ }).getAttribute('href'), 'https://preview.example.com/release');
     assert.ok(await page.locator('img[src^="data:image/svg"]').count() >= 1, 'Code Mode image stays visible');
     await done.locator(':scope > summary').click();
     assert.equal(await done.getAttribute('open'), '');
-    assert.match(await done.locator('.agent-tool-row.is-failed .agent-tool-error-line').innerText(), /FAIL release\.test\.ts/);
+    assert.match(await done.locator('[data-tool-kind="command"].is-failed .agent-tool-error-line').innerText(), /FAIL release\.test\.ts/);
     assert.match(await done.locator('[data-tool-kind="patch"] .agent-tool-target').innerText(), /2 files/);
-    assert.equal(await done.locator('[data-tool-kind="code"] .agent-tool-children > .agent-tool-row').count(), 2);
+    assert.equal(await done.locator('[data-tool-kind="code"] .agent-tool-children > .agent-tool-row').count(), 3);
     const edit = done.locator('[data-tool-kind="edit"]');
     await edit.locator(':scope > details > summary').click();
     await edit.locator('.agent-tool-diff').waitFor();
     assert.ok(await edit.locator('.agent-tool-diff-line.is-add').count() >= 2);
     assert.equal(await edit.locator('.agent-tool-diff-line.is-remove').count(), 1);
-    const failed = done.locator('.agent-tool-row.is-failed');
+    const failed = done.locator('[data-tool-kind="command"].is-failed');
     await failed.locator(':scope > details > summary').click();
     assert.match(await failed.locator('.agent-tool-terminal').innerText(), /\$ pnpm test[\s\S]*expected ready to be true[\s\S]*Exit code 1/);
     const agent = page.locator('.agent-subagent');
     assert.match(await agent.locator(':scope > summary').innerText(), /auditor · Agent 3[\s\S]*finished/);
     await agent.locator(':scope > summary').click();
     assert.match(await agent.locator('.agent-subagent-body').innerText(), /readiness check now blocks/);
+    // Generic and MCP tools read as labeled values; raw protocol needs an explicit Details click.
+    const mcp = done.locator('.agent-tool-row').filter({ has: page.locator(':scope > details > summary', { hasText: 'Linear · create issue' }) });
+    assert.match(await mcp.locator(':scope > details > summary').innerText(), /Title: Follow up/);
+    await mcp.locator(':scope > details > summary').click();
+    const mcpBody = mcp.locator(':scope > details > .agent-tool-body');
+    const readable = await mcpBody.evaluate(body => [...body.children].filter(el => !el.matches('.agent-tool-protocol')).map(el => el.innerText).join('\n'));
+    assert.match(readable, /Request[\s\S]*Title\s+Follow up[\s\S]*Team[\s\S]*Key\s+ENG[\s\S]*release[\s\S]*follow-up/);
+    assert.match(readable, /Result[\s\S]*ID\s+LIN-1[\s\S]*Assignee[\s\S]*Name\s+Ada Lovelace/);
+    assert.doesNotMatch(readable, /[{}"]|content|type/, 'No JSON or protocol envelope in readable tool view');
+    const protocol = mcpBody.locator('.agent-tool-protocol');
+    assert.equal(await protocol.getAttribute('open'), null);
+    assert.equal(await protocol.locator('pre').count(), 0, 'Raw payloads are not rendered until Details opens');
+    await protocol.locator(':scope > summary', { hasText: 'Details' }).click();
+    const raw = await protocol.innerText();
+    assert.match(raw, /mcp__linear__create_issue[\s\S]*Raw input[\s\S]*"title": "Follow up"[\s\S]*Raw output[\s\S]*"content"/);
+    await shot(page, `mcp-details-${name}`);
+    const errorLines = await done.locator('.agent-tool-row.is-failed > .agent-tool-error-line').allInnerTexts();
+    assert.ok(errorLines.includes('Validation failed: head branch release-fix does not exist'), JSON.stringify(errorLines));
+    assert.ok(errorLines.includes('Region quota exceeded (quota_exceeded)'), JSON.stringify(errorLines));
+    const generic = done.locator('[data-tool-kind="generic"].is-failed');
+    assert.match(await generic.locator(':scope > details > summary').innerText(), /Deploy service[\s\S]*Region: eu-west/);
+    await generic.locator(':scope > details > summary').click();
+    assert.match(await generic.locator('.agent-tool-readable.is-error').innerText(), /Error[\s\S]*Region quota exceeded/);
+    const nested = done.locator('[data-tool-kind="code"] .agent-tool-children > [data-tool-kind="mcp"]');
+    assert.match(await nested.locator(':scope > details > summary').innerText(), /Notion · search[\s\S]*Query: release plan/);
+    await nested.locator(':scope > details > summary').click();
+    assert.match(await nested.locator('.agent-tool-readable').last().innerText(), /Title\s+Release plan/);
+    for (const text of await done.locator('.agent-tool-row > details > summary').allInnerTexts()) {
+      assert.doesNotMatch(text, /[{}]|":/, `Row summary without JSON: ${text}`);
+    }
+    // Deliberate assistant code and JSON keep their formatting.
+    const answer = page.locator('.agent-terminal-markdown.is-assistant').filter({ hasText: 'deploy config' }).last();
+    assert.match(await answer.locator('pre').filter({ hasText: 'replicas' }).first().textContent(), /\{\s*"region": "eu-west",\s*"replicas": 2\s*\}/);
+    await answer.scrollIntoViewIfNeeded(); await shot(page, `assistant-json-${name}`);
     const rows = await done.locator('.agent-tool-row > details > summary').evaluateAll(list => list.map(el => ({ text: el.innerText.replace(/\s+/g, ' '), height: el.getBoundingClientRect().height, overflow: el.scrollWidth - el.clientWidth })));
     for (const row of rows) assert.ok(row.overflow <= 1 && row.height <= (mobile ? 58 : 34), `Compact row: ${JSON.stringify(row)}`);
     const groupHeight = await done.locator(':scope > summary').evaluate(el => el.getBoundingClientRect().height);

@@ -49,6 +49,28 @@ export const agentsNavigation = {
   description: "Your durable agents",
 } as const satisfies ProductNavigationItem;
 
+export const homeNavigation = {
+  surface: "home",
+  label: "Home",
+  description: "Overview",
+} as const satisfies ProductNavigationItem;
+
+/**
+ * The main app has exactly three surfaces. Every other surface below is a
+ * retired route: its modules remain in the repository but are no longer
+ * reachable from the main navigation, router or bundle.
+ */
+export type MainSurface = "home" | "agent" | "connect";
+export const mainNavigation = [
+  homeNavigation,
+  agentsNavigation,
+  accountNavigation,
+] as const satisfies ReadonlyArray<ProductNavigationItem & { surface: MainSurface }>;
+
+export function isMainSurface(surface: Surface): surface is MainSurface {
+  return surface === "home" || surface === "agent" || surface === "connect";
+}
+
 export const demoNavigation = [
   { surface: "chief-of-staff", label: "Chief of Staff", description: "Chat SDK channels" },
   { surface: "tools", label: "Attached Tools", description: "Browser tool host" },
@@ -122,8 +144,16 @@ export function legacyRedirectPath(url: Pick<URL, "pathname" | "search" | "hash"
   const pathname = url.pathname === "/" ? "/" : url.pathname.replace(/\/+$/, "");
   const search = new URLSearchParams(url.search);
   let destination: string | undefined;
+  if (isRetiredPath(pathname)) return "/";
+  if (pathname === "/" && search.has("view")) {
+    const view = search.get("view");
+    if (view === "agent") return "/agents";
+    if (view === "connect") return "/account";
+    return search.has("permission_request") ? null : "/";
+  }
   if (pathname === "/agent") {
-    if (search.get("demo") === "attached-tools") return null;
+    // The attached-tools demo is retired with the rest of the demo surfaces.
+    if (search.get("demo") === "attached-tools") return "/agents";
     destination = "/agents";
   } else if (/^\/agent\/[^/]+$/.test(pathname)) {
     destination = `/agents/${pathname.slice("/agent/".length)}`;
@@ -132,6 +162,26 @@ export function legacyRedirectPath(url: Pick<URL, "pathname" | "search" | "hash"
     destination = legacyAccountPaths[pathname];
   }
   return destination === undefined ? null : `${destination}${url.search}${url.hash}`;
+}
+
+const retiredPaths = new Set([
+  "/changelog",
+  "/code",
+  "/commits",
+  "/requests",
+  "/router",
+  "/world",
+  "/multiplayer",
+  "/demos/chief-of-staff",
+]);
+
+/** Legacy docs, evals, git and demo surfaces now resolve to the homepage. */
+function isRetiredPath(pathname: string): boolean {
+  if (retiredPaths.has(pathname)) return true;
+  if (pathname === "/docs" || pathname === "/evals") return true;
+  // Raw agent-readable documentation stays published as static text.
+  if (pathname === "/docs/llms.txt" || pathname === "/docs/llms-full.txt") return false;
+  return pathname.startsWith("/docs/") || pathname.startsWith("/evals/");
 }
 
 export function agentIdFromPath(pathname: string): string | undefined {

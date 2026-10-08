@@ -1,0 +1,18 @@
+/* Shared Home / Agents / Account chrome. */
+.nanocodex-mark { width: 30px; height: 30px; flex: none; }
+.main-navigation { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px; background: color-mix(in srgb, var(--text) 6%, transparent); font: 500 13px/1 var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif); }
+.main-navigation a { display: inline-flex; align-items: center; height: 30px; padding: 0 14px; border-radius: 999px; color: color-mix(in srgb, var(--text) 62%, transparent); text-decoration: none; letter-spacing: -.01em; transition: color .15s, background-color .15s; }
+.main-navigation a:hover { color: var(--text); }
+.main-navigation a.is-active { color: var(--text); background: var(--surface, transparent); box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 14%, transparent); }
+.main-navigation a:focus-visible { outline: 2px solid color-mix(in srgb, var(--text) 45%, transparent); outline-offset: 1px; }
+.home-landing-topbar, .account-hub-topbar { position: relative; }
+@media (min-width: 721px) {
+  .home-landing-topbar > .main-navigation, .account-hub-topbar > .main-navigation { position: absolute; left: 50%; transform: translateX(-50%); }
+}
+@media (max-width: 720px) {
+  .main-navigation a { padding: 0 10px; height: 28px; font-size: 12.5px; }
+  .home-landing-brand > span, .account-hub-brand > span { display: none; }
+}
+/* Agents sidebar uses the same brand mark and type as the homepage. */
+.agent-navigation-brand > a { font-size: 15px; font-weight: 500; letter-spacing: -.03em; }
+.agent-navigation-brand .nanocodex-mark { width: 26px; height: 26px; }

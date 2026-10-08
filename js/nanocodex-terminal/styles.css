@@ -381,7 +381,28 @@ details[open] > summary .agent-tool-chevron { transform: rotate(90deg); }
 .agent-tool-numbered { display: block; }
 .agent-tool-numbered > span { display: inline-block; width: 3ch; margin-right: 12px; color: var(--terminal-muted, #6b6b6b); text-align: right; user-select: none; }
 .agent-tool-empty { margin: 0; color: var(--terminal-muted, #6b6b6b); font-size: 12px; }
-.agent-tool-summary { margin: 0; color: var(--terminal-muted, #6b6b6b); }
+.agent-tool-readable { font-size: 13px; line-height: 1.5; }
+.agent-tool-readable pre.agent-tool-readable-text, .agent-tool-fields pre.agent-tool-readable-text {
+  max-height: 280px; padding: 8px 10px; font: 12.5px/1.5 var(--activity-sans); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.agent-tool-readable.is-error .agent-tool-readable-inline { color: var(--activity-negative); }
+.agent-tool-readable-inline { overflow-wrap: anywhere; }
+.agent-tool-fields { display: grid; gap: 4px; margin: 0; min-width: 0; }
+.agent-tool-fields > div { display: grid; gap: 2px 12px; min-width: 0; }
+.agent-tool-fields > div.is-inline { grid-template-columns: minmax(80px, max-content) minmax(0, 1fr); align-items: baseline; }
+.agent-tool-fields dt { color: var(--terminal-muted, #6b6b6b); font-size: 12px; }
+.agent-tool-fields dd { min-width: 0; margin: 0; }
+.agent-tool-fields > div.is-block > dd { padding-left: 10px; border-left: 2px solid var(--terminal-border, #ddd); }
+.agent-tool-readable-list { display: grid; gap: 4px; margin: 0; padding-left: 20px; }
+.agent-tool-readable-list > li::marker { color: var(--terminal-muted, #6b6b6b); font-size: 11px; }
+.agent-tool-protocol > summary {
+  display: inline-flex; align-items: center; gap: 4px; color: var(--terminal-muted, #6b6b6b); font-size: 11.5px;
+  cursor: pointer; list-style: none; user-select: none;
+}
+.agent-tool-protocol > summary::-webkit-details-marker { display: none; }
+.agent-tool-protocol > summary:hover { color: var(--terminal-foreground, #111); }
+.agent-tool-protocol > summary .agent-tool-chevron { width: 12px; height: 12px; }
+.agent-tool-protocol-body { display: grid; gap: 8px; margin-top: 6px; }
 .agent-tool-wire { margin: 0; color: var(--terminal-muted, #6b6b6b); font-size: 11px; }
 .agent-tool-wire code { font-size: 11px; }
 .agent-tool-thinking { color: var(--terminal-muted, #6b6b6b); font-size: 13px; }

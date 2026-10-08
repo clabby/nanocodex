@@ -5,7 +5,8 @@ import { AccountChooser } from "nanocodex-connect-ui/AccountChooser";
 import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import { useAccountSession } from "./AccountSession";
 import { pathForSurface } from "./navigation";
-import { preloadAgentExperience } from "./routeModulePreloads";
+import { preloadAgentExperience } from "./agentExperiencePreload";
+import { MainNavigationLinks, NanocodexMark } from "./MainNavigation";
 import "./HomeLanding.css";
 
 
@@ -101,24 +102,19 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
   return (
     <div className="home-landing" data-testid="home-landing">
       <header className="home-landing-topbar">
-        <a href="/" className="home-landing-brand" aria-label="Nanocodex home">
-          <svg aria-hidden="true" viewBox="76 76 872 872"><rect x="76" y="76" width="872" height="872" rx="194" fill="#292929" /><path d="M326 695V332L638 695V332" fill="none" stroke="#f7f7f7" strokeWidth="67" strokeLinecap="round" strokeLinejoin="round" /><circle cx="742" cy="691" r="27" fill="#8cb38c" /></svg>
+        <Link to="/" className="home-landing-brand" aria-label="Nanocodex home" aria-current="page">
+          <NanocodexMark />
           <span>Nanocodex</span>
-        </a>
-        <nav className="home-landing-links" aria-label="Site">
-          <a href="/docs">Docs</a>
-          <Link to={agentsPath} {...agentIntent}>Agents</Link>
-          <a href="/changelog">Changelog</a>
-          <a href="https://github.com/gakonst/nanocodex" target="_blank" rel="noreferrer">GitHub <ArrowUpRight aria-hidden="true" /></a>
+        </Link>
+        <MainNavigationLinks current="home" className="home-landing-navigation" />
+        <div className="home-landing-links">
           <button className="home-icon-button" type="button" onClick={toggleTheme} aria-label={`Use ${theme === "light" ? "dark" : "light"} appearance`} title="Change appearance">
             {theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
           </button>
-          {account ? (
-            <Link className="home-button home-button--small" to={accountPath}>Account</Link>
-          ) : checking ? null : (
+          {account || checking ? null : (
             <button className="home-button home-button--small" type="button" onClick={focusSignIn}>Sign in</button>
           )}
-        </nav>
+        </div>
       </header>
       <main className="home-landing-main">
         <section className="home-hero" aria-labelledby="home-title">
@@ -187,7 +183,7 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
       </main>
       <footer className="home-landing-footer">
         <span>Built by Paradigm</span>
-        <nav aria-label="Footer"><a href="/docs">Docs</a><a href="/code">Source</a><a href="/evals">Evals</a><a href="/router">Router</a></nav>
+        <a href="https://github.com/gakonst/nanocodex" target="_blank" rel="noreferrer">GitHub <ArrowUpRight aria-hidden="true" /></a>
       </footer>
     </div>
   );

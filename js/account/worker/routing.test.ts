@@ -29,7 +29,6 @@ test("canonical surfaces resolve to the expected app", () => {
   assert.equal(surface("/account/vault"), "connect");
   assert.equal(surface("/agents"), "agent");
   assert.equal(surface(`/agents/${agentId}`), "agent");
-  assert.equal(surface("/agent?demo=attached-tools"), "tools");
   assert.equal(pathForSurface("home"), "/");
   assert.equal(pathForSurface("connect"), "/account");
   assert.equal(pathForSurface("agent"), "/agents");
@@ -58,10 +57,40 @@ test("legacy paths redirect to canonical routes preserving query", async () => {
   assert.equal(legacyRedirectPath(new URL("https://x/connect/vault?a=1#h")), "/account/vault?a=1#h");
 });
 
-test("device auth, hosted services and the tools demo keep their URLs", async () => {
-  for (const path of ["/connect?user_code=ABCD-EFGH", "/connect/device", "/vault", "/services/phone", "/agent?demo=attached-tools"]) {
+test("device auth and hosted services keep their URLs", async () => {
+  for (const path of ["/connect?user_code=ABCD-EFGH", "/connect/device", "/vault", "/services/phone", "/?permission_request=00000000-0000-4000-8000-000000000002"]) {
     assert.equal(legacyRedirectPath(new URL(`https://x${path}`)), null, path);
     const response = await navigate(path);
     assert.equal(response?.status, 200, path);
+  }
+});
+
+test("retired docs, evals, git and demo surfaces redirect to the main app", async () => {
+  const cases: Array<[string, string]> = [
+    ["/docs", "/"],
+    ["/docs/getting-started", "/"],
+    ["/docs/no-such-page", "/"],
+    ["/evals", "/"],
+    ["/evals/worksets/a/tasks/b", "/"],
+    ["/changelog", "/"],
+    ["/code", "/"],
+    ["/commits?commit=abc", "/"],
+    ["/requests", "/"],
+    ["/router", "/"],
+    ["/world", "/"],
+    ["/multiplayer", "/"],
+    ["/demos/chief-of-staff", "/"],
+    ["/agent?demo=attached-tools", "/agents"],
+    ["/?view=docs", "/"],
+    ["/?view=agent", "/agents"],
+    ["/?view=connect", "/account"],
+  ];
+  for (const [from, to] of cases) {
+    const response = await navigate(from);
+    assert.equal(response?.status, 302, from);
+    assert.equal(response?.headers.get("location"), to, from);
+  }
+  for (const path of ["/docs/llms.txt", "/docs/llms-full.txt"]) {
+    assert.equal(legacyRedirectPath(new URL(`https://x${path}`)), null, path);
   }
 });

@@ -31,15 +31,23 @@ export const completed = [
   { id: "t-code", kind: "tool", tool: { ...tool("code", "exec", "completed", { code: "const r = await tools.exec_command({cmd:'pnpm build'});\nawait tools.view_image({path:'dash.png'});" }, "built"), children: [
     tool("/code-1", "exec_command", "completed", { cmd: "pnpm build" }, "Process exited with code 0\nOutput:\nbuilt in 2.1s"),
     tool("/code-2", "view_image", "completed", { path: "dash.png" }, "image", { images: [image] }),
+    tool("/code-3", "MCPExecute", "completed", { name: "mcp__notion__search", arguments: { query: "release plan" } },
+      { content: [{ type: "text", text: json({ results: [{ title: "Release plan", url: "https://notion.example.com/release" }] }) }] }),
   ] } },
   { id: "t-browser", kind: "tool", tool: tool("browser", "browser_execute", "completed", { code: "await page.goto('https://dashboard.example.com/releases')" }, "ok") },
   { id: "t-preview", kind: "tool", tool: tool("preview", "preview", "completed", { port: 3000 }, { url: "https://preview.example.com/release", port: 3000 }) },
+  { id: "t-mcp", kind: "tool", tool: tool("mcp", "mcp__linear__create_issue", "completed",
+    { title: "Follow up", team: { key: "ENG" }, labels: ["release", "follow-up"] },
+    { content: [{ type: "text", text: json({ id: "LIN-1", url: "https://linear.example.com/LIN-1", assignee: { name: "Ada Lovelace" } }) }] }) },
+  { id: "t-mcp-error", kind: "tool", tool: tool("mcp-error", "mcp__github__create_pull_request", "failed",
+    { head: "release-fix", base: "main" }, { content: [{ type: "text", text: "Validation failed: head branch release-fix does not exist" }], isError: true }) },
+  { id: "t-generic-error", kind: "tool", tool: tool("generic-error", "deploy_service", "failed",
+    { region: "eu-west", replicas: 3 }, { error: { code: "quota_exceeded", message: "Region quota exceeded" } }) },
   { id: "t-spawn", kind: "tool", tool: tool("spawn", "spawn_agent", "completed", { role: "auditor", task: "Review the release patch" }, { agent_id: 3, role: "auditor" }) },
   { id: "c1", kind: "tool", turnId: "turn-1", responseIdentity: { agentId: 3 }, tool: tool("child-read", "Read", "completed", { file_path: "src/release.ts" }, "export async function ship() {}") },
   { id: "c2", kind: "assistant", turnId: "turn-1", responseIdentity: { agentId: 3 }, streaming: false, text: "The patch is safe: the readiness check now blocks unsafe rollouts." },
-  { id: "t-mcp", kind: "tool", tool: tool("mcp", "mcp__linear__create_issue", "completed", { title: "Follow up" }, { id: "LIN-1" }) },
   { id: "t-unknown", kind: "tool", tool: tool("unknown", "mystery_tool", "completed", { anything: true }, { ok: true }) },
-  { id: "a1", kind: "assistant", streaming: false, text: "Fixed the readiness check. One test still fails; see the failed command above." },
+  { id: "a1", kind: "assistant", streaming: false, text: "Fixed the readiness check. One test still fails; see the failed command above.\n\nThe deploy config I proposed:\n\n```json\n{\n  \"region\": \"eu-west\",\n  \"replicas\": 2\n}\n```" },
 ];
 
 function Harness() {

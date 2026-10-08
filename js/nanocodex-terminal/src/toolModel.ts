@@ -33,9 +33,17 @@ export type ToolModel = Readonly<{
   code?: string;
   /** One-line failure summary shown without expanding. */
   error?: string;
+  /** Raw protocol payloads, shown only behind an explicit Details disclosure. */
   inputText?: string;
   outputText?: string;
 }>;
+
+/** Protocol-free structure used to show tool payloads as prose, lists, and labeled fields. */
+export type ReadableValue =
+  | Readonly<{ type: "text"; text: string; multiline: boolean }>
+  | Readonly<{ type: "fields"; fields: readonly ReadableField[] }>
+  | Readonly<{ type: "list"; items: readonly ReadableValue[]; more: number }>;
+export type ReadableField = Readonly<{ label: string; value: ReadableValue }>;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -71,6 +79,124 @@ function looseString(raw: string | undefined, key: string): string | undefined {
 
 function field(input: unknown, raw: string | undefined, ...keys: string[]): string | undefined {
   return str(input, ...keys) ?? keys.map(key => looseString(raw, key)).find(Boolean);
+}
+
+const MAX_READABLE_DEPTH = 4;
+const MAX_READABLE_ITEMS = 20;
+const MAX_READABLE_FIELDS = 30;
+const MAX_READABLE_TEXT = 4_000;
+
+/** Humanizes protocol keys: tool_name, toolName and tool-name all become "Tool name". */
+export function humanLabel(key: string): string {
+  const words = key.replace(/([a-z\d])([A-Z])/g, "$1 $2").replace(/[_\-.]+/g, " ").trim().toLowerCase();
+  if (!words) return "Value";
+  return `${words[0]!.toUpperCase()}${words.slice(1)}`.replace(/\b(id|url|uri|api|mcp|json|html|http|ip|pid)\b/gi, word => word.toUpperCase());
+}
+
+function boundedText(text: string): ReadableValue {
+  const characters = [...text];
+  const value = characters.length > MAX_READABLE_TEXT ? `${characters.slice(0, MAX_READABLE_TEXT).join("")}…` : text;
+  return { type: "text", text: value, multiline: value.includes("\n") || characters.length > 120 };
+}
+
+function structuredString(text: string): unknown {
+  const trimmed = text.trim();
+  if (!/^[[{]/.test(trimmed)) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return typeof parsed === "object" && parsed !== null ? parsed : undefined;
+  } catch { return undefined; }
+}
+
+function contentText(parts: readonly unknown[]): string | undefined {
+  if (!parts.length || !parts.every(part => isRecord(part) && typeof part.type === "string")) return undefined;
+  const text = parts.flatMap(part => {
+    const record = part as JsonRecord;
+    if (typeof record.text === "string") return [record.text];
+    if (/image/.test(String(record.type))) return ["Image attached"];
+    if (/resource|file/.test(String(record.type))) {
+      return [str(record, "name", "uri", "filename") ?? str(record.resource, "uri", "name") ?? "Attachment"];
+    }
+    return [];
+  });
+  return text.length === parts.length ? text.join("\n") : undefined;
+}
+
+/**
+ * Converts any tool payload into labeled, readable structure. Nested JSON
+ * strings and MCP content envelopes are unwrapped; nothing is serialized back
+ * to JSON, so readers see values rather than braces and quotes.
+ */
+export function readableValue(value: unknown, depth = 0): ReadableValue {
+  if (value === undefined || value === null) return { type: "text", text: "None", multiline: false };
+  if (typeof value === "boolean") return { type: "text", text: value ? "Yes" : "No", multiline: false };
+  if (typeof value === "number" || typeof value === "bigint") return { type: "text", text: String(value), multiline: false };
+  if (typeof value === "string") {
+    const nested = depth < MAX_READABLE_DEPTH ? structuredString(value) : undefined;
+    return nested === undefined ? boundedText(value) : readableValue(nested, depth + 1);
+  }
+  if (Array.isArray(value)) {
+    const text = contentText(value);
+    if (text !== undefined) return readableValue(text, depth);
+    if (!value.length) return { type: "text", text: "None", multiline: false };
+    if (depth >= MAX_READABLE_DEPTH) return { type: "text", text: `${value.length} item${value.length === 1 ? "" : "s"}`, multiline: false };
+    return {
+      type: "list",
+      items: value.slice(0, MAX_READABLE_ITEMS).map(item => readableValue(item, depth + 1)),
+      more: Math.max(0, value.length - MAX_READABLE_ITEMS),
+    };
+  }
+  if (isRecord(value)) {
+    const envelope = unwrapEnvelope(value);
+    if (envelope !== value) return readableValue(envelope, depth);
+    const keys = Object.keys(value);
+    if (!keys.length) return { type: "text", text: "None", multiline: false };
+    if (depth >= MAX_READABLE_DEPTH) return { type: "text", text: `${keys.length} field${keys.length === 1 ? "" : "s"}`, multiline: false };
+    const fields = keys.slice(0, MAX_READABLE_FIELDS).map(key => ({ label: humanLabel(key), value: readableValue(value[key], depth + 1) }));
+    if (keys.length > MAX_READABLE_FIELDS) {
+      fields.push({ label: "More", value: { type: "text", text: `${keys.length - MAX_READABLE_FIELDS} more fields`, multiline: false } });
+    }
+    return { type: "fields", fields };
+  }
+  return boundedText(String(value));
+}
+
+/** Removes transport wrappers such as MCP `{ content: [...] }` or `{ result: ... }`. */
+function unwrapEnvelope(value: JsonRecord): unknown {
+  const keys = Object.keys(value);
+  if (Array.isArray(value.content) && keys.every(key => ["content", "isError", "is_error", "structuredContent", "_meta"].includes(key))) {
+    if (value.structuredContent !== undefined && value.isError !== true) return value.structuredContent;
+    const text = contentText(value.content);
+    if (text !== undefined) return text;
+    return value.content;
+  }
+  if (keys.length === 1 && ["result", "data", "output", "response"].includes(keys[0]!)) return value[keys[0]!];
+  return value;
+}
+
+/** Best readable failure message hidden inside error payloads of any common shape. */
+export function readableError(output: unknown): string | undefined {
+  if (typeof output === "string") {
+    const nested = structuredString(output);
+    return nested === undefined ? output : readableError(nested);
+  }
+  if (Array.isArray(output)) return contentText(output);
+  if (!isRecord(output)) return undefined;
+  const error = output.error;
+  if (typeof error === "string" && error) return error;
+  if (isRecord(error)) {
+    const message = str(error, "message", "detail", "reason", "description");
+    const code = str(error, "code", "type", "status");
+    if (message) return code && !message.includes(code) ? `${message} (${code})` : message;
+  }
+  const message = str(output, "message", "detail", "reason", "stderr", "error_message", "errorMessage");
+  if (message) return message;
+  if (Array.isArray(output.content)) return contentText(output.content);
+  if (Array.isArray(output.errors)) {
+    const first = output.errors.find(item => typeof item === "string" || isRecord(item));
+    return typeof first === "string" ? first : readableError(first);
+  }
+  return undefined;
 }
 
 export function toolFamily(tool: ToolActivity): { family: string; server?: string } {
@@ -220,8 +346,46 @@ function outputString(output: unknown, raw: string | undefined): string | undefi
     const text = output.flatMap(part => isRecord(part) && typeof part.text === "string" ? [part.text] : []);
     if (text.length) return text.join("\n");
   }
-  if (isRecord(output)) return str(output, "output", "content", "text", "error", "message") ?? raw;
+  if (isRecord(output)) {
+    return str(output, "output", "content", "text", "error", "message")
+      ?? (Array.isArray(output.content) ? contentText(output.content) : undefined) ?? raw;
+  }
   return raw;
+}
+
+const DISPATCHERS = new Set(["MCPExecute", "ToolExecute"]);
+
+/** Readable request for the detail panel; dispatcher wrappers show the dispatched tool's arguments. */
+export function readableToolInput(tool: ToolActivity): ReadableValue | undefined {
+  const raw = tool.input ?? tool.arguments;
+  if (!raw) return undefined;
+  let input = parseJson(raw);
+  if (DISPATCHERS.has(toolFamily(tool).family) && isRecord(input) && "arguments" in input) input = input.arguments;
+  if (isRecord(input) && !Object.keys(input).length) return undefined;
+  return readableValue(input);
+}
+
+/** Readable result or failure for the detail panel, with protocol envelopes removed. */
+export function readableToolResult(tool: ToolActivity): ReadableValue | undefined {
+  const raw = tool.output ?? tool.result;
+  if (!raw) return undefined;
+  const output = parseJson(raw);
+  if (tool.status === "failed" || tool.status === "cancelled" || (isRecord(output) && output.isError === true)) {
+    const message = readableError(output);
+    if (message) return readableValue(message);
+  }
+  return readableValue(output);
+}
+
+/** Short `Label: value` summary of scalar fields, used where a row needs a hint rather than JSON. */
+export function readableSummary(value: ReadableValue | undefined, limit = 2): string | undefined {
+  if (!value) return undefined;
+  if (value.type === "text") return firstLine(value.text, 140);
+  if (value.type === "list") return `${value.items.length + value.more} item${value.items.length + value.more === 1 ? "" : "s"}`;
+  const parts = value.fields.flatMap(field => field.value.type === "text" && !field.value.multiline
+    ? [`${field.label}: ${field.value.text}`] : []).slice(0, limit);
+  if (parts.length) return firstLine(parts.join(" · "), 140);
+  return `${value.fields.length} field${value.fields.length === 1 ? "" : "s"}`;
 }
 
 function lineCount(value: string | undefined): number { return value ? value.replace(/\n$/, "").split("\n").length : 0; }
@@ -246,7 +410,7 @@ export function modelTool(tool: ToolActivity): ToolModel {
     kind,
     ...(presentation.source && kind !== "command" ? { source: presentation.source } : {}),
     ...(presentation.duration ? { duration: presentation.duration } : {}),
-    ...(failed ? { error: firstLine(outputText) ?? "Failed" } : {}),
+    ...(failed ? { error: firstLine(readableError(output) ?? outputText) ?? "Failed" } : {}),
     ...(rawInput ? { inputText: rawInput } : {}),
     ...(rawOutput ? { outputText: rawOutput } : {}),
   };
@@ -336,9 +500,8 @@ export function modelTool(tool: ToolActivity): ToolModel {
   if (kind === "browser") {
     const url = field(input, rawInput, "url");
     const action = field(input, rawInput, "action", "operation");
-    const label = family === "browser_execute" ? "Browser" : `Browser ${presentation.title.replace(/^Browser\s*/i, "").toLowerCase()}`.trim();
     const target = action ? `${action}${url ? ` ${hostOf(url)}` : ""}` : hostOf(url) ?? firstLine(field(input, rawInput, "code"), 100);
-    return { ...base, label: family === "browser_execute" ? "Browser" : presentation.title, ...(target ? { target } : {}), ...(label === "Browser" ? {} : {}) };
+    return { ...base, label: family === "browser_execute" ? "Browser" : presentation.title, ...(target ? { target } : {}) };
   }
   if (kind === "image") {
     const path = field(input, rawInput, "path", "prompt");
@@ -346,14 +509,13 @@ export function modelTool(tool: ToolActivity): ToolModel {
   }
   if (kind === "mcp") {
     const inner = field(input, rawInput, "name", "tool");
-    return {
-      ...base, label: server ? `${server.replace(/[_-]+/g, " ")} · ${family.replace(/[_-]+/g, " ")}` : presentation.title,
-      ...(inner ? { target: inner } : presentation.subject ? { detail: presentation.subject } : {}),
-    };
+    const innerName = inner ? /^mcp__(.+?)__(.+)$/.exec(inner) : undefined;
+    const label = server ? `${humanLabel(server)} · ${humanLabel(family).toLowerCase()}`
+      : innerName ? `${humanLabel(innerName[1]!)} · ${humanLabel(innerName[2]!).toLowerCase()}`
+        : inner ? humanLabel(inner) : presentation.title;
+    const detail = readableSummary(readableToolInput(tool));
+    return { ...base, label, ...(detail ? { detail } : {}) };
   }
-  return {
-    ...base, label: presentation.title,
-    ...(presentation.subject ? { detail: presentation.subject } : {}),
-    ...(!failed && presentation.outputSummary && kind !== "subagent" ? {} : {}),
-  };
+  const detail = kind === "subagent" ? presentation.subject : presentation.subject ?? readableSummary(readableToolInput(tool));
+  return { ...base, label: presentation.title, ...(detail ? { detail } : {}) };
 }

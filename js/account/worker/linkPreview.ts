@@ -175,7 +175,8 @@ export function documentStatusForPath(pathname: string): 200 | 404 | null {
     || pathname === "/account" || pathname === "/account/vault"
     || pathname === "/account/wallet" || pathname === "/account/access") return 200;
   if (Object.hasOwn(docsPreview, pathname) || isEvalDocumentPath(pathname)) return 200;
-  if (pathname.startsWith("/docs/") || pathname.startsWith("/evals/")) return 404;
+  // Retired docs and evals pages redirect to the homepage (see legacyRedirectPath).
+  if (pathname.startsWith("/docs/") || pathname.startsWith("/evals/")) return 200;
   return null;
 }
 
