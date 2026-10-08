@@ -22,7 +22,7 @@ FROM voice-chef AS voice
 COPY --from=voice-planner /source/recipe.json recipe.json
 # Cook only the recipe in this otherwise empty directory. Keep target AND Cargo
 # sources in image layers so a fresh builder can reuse the exported dependencies.
-RUN CARGO_BUILD_JOBS=2 cargo chef cook --release --locked -p nanocodex-phone --recipe-path recipe.json
+RUN cargo chef cook --release --locked -p nanocodex-phone --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY bin ./bin
 COPY crates ./crates
@@ -30,7 +30,7 @@ COPY examples ./examples
 COPY js/nanocodex ./js/nanocodex
 COPY py/bindings ./py/bindings
 COPY third_party ./third_party
-RUN CARGO_BUILD_JOBS=2 cargo build --release --locked -p nanocodex-phone && cp target/release/phone-voice-cloud /phone-voice-cloud
+RUN cargo build --release --locked -p nanocodex-phone && cp target/release/phone-voice-cloud /phone-voice-cloud
 
 FROM node:24.19.0-bookworm-slim
 # Explicit upstream refresh without disabling normal source-layer reuse.

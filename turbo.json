@@ -36,6 +36,13 @@
         "CARGO_PROFILE_*",
         "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_*"
       ],
+      "passThroughEnv": [
+        "SCCACHE_*",
+        "ACTIONS_CACHE_URL",
+        "ACTIONS_RESULTS_URL",
+        "ACTIONS_RUNTIME_TOKEN",
+        "ACTIONS_CACHE_SERVICE_V2"
+      ],
       "outputs": []
     },
     "@nanocodex/connect-api#build": {

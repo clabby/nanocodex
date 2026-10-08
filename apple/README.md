@@ -793,9 +793,7 @@ swift test --package-path apple/NanocodexContext
 xcodebuild -project apple/NanocodexInbox.xcodeproj -scheme NanocodexInbox -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- build
 ```
 
-The `Apple apps` workflow runs protocol/policy tests, builds the native Mac
-workspace from `macos/` with its background Hand checks, builds the iOS app,
-and drives native iPhone Debug demo journeys covering tabs, per-agent drafts, queue
+There is no Apple CI; run these locally. The iPhone UI test target drives native iPhone Debug demo journeys covering tabs, per-agent drafts, queue
 recovery, cancel failures, repeated taps, relaunch, thread continuity, and voice
 sheet dismissal/error handling. It attaches screenshots, simulator video, and the
 full Xcode result as `native-inbox-evidence`. Demo automation does not establish

@@ -68,8 +68,7 @@ line offset, requested limits and response status, with no credential headers.
 After a run, copy that file from the data container reported by
 `xcrun simctl get_app_container "$device" xyz.paradigm.centaur data` into the
 run's ignored evidence directory. The trace spans the test process launches.
-Run the four methods explicitly with the command above; the bounded PR selection
-in `apple-inbox.yml` does not currently include them. Compiling the test target
+Run the four methods explicitly with the command above; there is no Apple CI. Compiling the test target
 alone is not a UI pass.
 
 ## Attachment library and contained screen dock

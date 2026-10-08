@@ -34,13 +34,13 @@ FROM hand-chef AS hand
 COPY --from=hand-planner /source/recipe.json recipe.json
 # Cook only the recipe in this otherwise empty directory. Keep target AND Cargo
 # sources in image layers so a fresh builder can reuse the exported dependencies.
-RUN CARGO_BUILD_JOBS=2 cargo chef cook --release --locked -p nanocodex2-bin --bin nanocodex2 --recipe-path recipe.json
+RUN cargo chef cook --release --locked -p nanocodex2-bin --bin nanocodex2 --recipe-path recipe.json
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY .generated/remote-rust/ ./
 COPY --from=screen-helpers /out/linux-screen-helpers.tar.gz /opt/linux-screen-helpers.tar.gz
 RUN NANOCODEX_LINUX_SCREEN_BUNDLE=/opt/linux-screen-helpers.tar.gz \
-    CARGO_BUILD_JOBS=2 cargo build --release --locked -p nanocodex2-bin --bin nanocodex2 \
+    cargo build --release --locked -p nanocodex2-bin --bin nanocodex2 \
     && mkdir -p /out && cp target/release/nanocodex2 /out/nanocodex-remote \
     && python3 scripts/tests/linux-screen-helpers-bundle.py \
        --binary /out/nanocodex-remote /opt/linux-screen-helpers.tar.gz

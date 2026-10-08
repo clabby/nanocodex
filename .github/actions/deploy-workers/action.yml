@@ -31,6 +31,17 @@ runs:
       id: wasm
       if: steps.plan.outputs.wasm == 'true'
       uses: ./.github/actions/wasm-outputs
+    # Start the WASM compilation now, overlapping Node setup, dependency install
+    # and the early Worker phases. The later build-js-package.sh cargo call waits
+    # on Cargo's target-dir lock and then finds everything fresh. Starting the
+    # sccache server here (not under Turbo's filtered env) keeps the GHA backend.
+    - name: Start WASM compilation in the background
+      if: steps.plan.outputs.wasm == 'true' && steps.wasm.outputs.hit != 'true'
+      shell: bash
+      run: |
+        sccache --start-server
+        nohup cargo +1.97 build --locked -p nanocodex-wasm --target wasm32-unknown-unknown --profile wasm \
+          > "$RUNNER_TEMP/wasm-cargo.log" 2>&1 &
     - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       if: steps.plan.outputs.workspace == 'true'
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

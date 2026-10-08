@@ -37,13 +37,13 @@ manually dispatchable with a standalone build. The success gate requires each
 applicable build/check job; behavioral test steps are currently paused in the
 [CI workflow](../../.github/workflows/ci.yml).
 
-The [Apple workflow](../../.github/workflows/apple-inbox.yml) currently builds the
-iPhone app for a generic simulator; Swift package tests and the simulator journey
-are paused. The retained [package runner](../../scripts/ci/apple-package-tests.sh)
-runs five packages in two bounded lanes with independent build directories and
-per-package transcripts. Each lane finishes its packages even if one fails, and
-any failure fails the runner. The retained simulator journey uses
-`build-for-testing` for its selected device.
+Apple CI (iPhone, iPad, native Mac and Swift app workflows) is removed. Build and
+test Apple targets locally through `scripts/xcodebuild-guard.sh`.
+
+CI runs on pull requests, the merge queue, a daily schedule and manual dispatch,
+not on pushes to master. Deployment never waits on CI. The production WASM build
+starts in the background as soon as Rust is installed, and its sccache server is
+started outside Turbo so the GitHub Actions cache backend stays enabled.
 
 ## Measurement
 

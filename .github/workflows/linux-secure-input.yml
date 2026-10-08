@@ -3,11 +3,6 @@ name: Protected Linux secure input
 permissions: {}
 
 on:
-  push:
-    branches: [master]
-    paths:
-      - 'linux/secure-input/**'
-      - '.github/workflows/linux-secure-input.yml'
   pull_request:
     paths:
       - 'linux/secure-input/**'

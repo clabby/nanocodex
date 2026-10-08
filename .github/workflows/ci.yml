@@ -3,8 +3,8 @@ name: CI
 permissions: {}
 
 on:
-  push:
-    branches: [master]
+  # No push-to-master run: PRs and the merge queue gate changes, and the daily
+  # schedule keeps master caches warm for PRs. Deploys never wait on CI.
   pull_request:
     # ready_for_review reruns a draft's fast lane with the heavy matrix.
     types: [opened, synchronize, reopened, ready_for_review]
@@ -24,7 +24,7 @@ env:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # Only superseded PR runs are cancelled; master and merge-queue runs finish.
+  # Only superseded PR runs are cancelled; merge-queue and scheduled runs finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
