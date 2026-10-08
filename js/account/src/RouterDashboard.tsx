@@ -1,3 +1,4 @@
+import { Link } from "react-router";
 import { useCallback, useEffect, useState } from "react";
 import {
   RefreshCw,
@@ -293,7 +294,7 @@ export default function RouterDashboard() {
             <div className="router-notice" role="alert">
               <AlertTriangle size={18} />
               <span>
-                {error} <a href="/account">Account</a>
+                {error} <Link to="/account">Account</Link>
               </span>
             </div>
           ) : !snapshot ? (

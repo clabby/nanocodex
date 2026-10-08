@@ -29,7 +29,7 @@ createRoot(container).render(
 function BrowserApplication({ url }: { url: URL }) {
   return (
     <QueryClientProvider client={appQueryClient}>
-      <BrowserRouter useTransitions={false}>
+      <BrowserRouter useTransitions>
         <Suspense fallback={null}>
           <AccountSessionProvider>
             {url.pathname === "/" && url.searchParams.has("permission_request")
