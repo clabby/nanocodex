@@ -276,7 +276,7 @@ export function createNamespaceExecutionRuntime(
         const definition = tool.definition;
         if (!definition || typeof definition.description !== "string"
           || !definition.parameters || typeof definition.parameters !== "object") {
-          throw new Error(`Hand ${hand.root} has no discovered ${toolName} contract; reconnect its CUA provider`);
+          throw new Error(`Hand ${hand.root} has no discovered ${toolName} contract (status: unavailable). No action was dispatched.`);
         }
         return { ...definition, name: toolName };
       });

@@ -161,6 +161,10 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     this.#ownerId = ctx.storage.kv.get<string>("owner_id");
     this.#diagnostics = new DiagnosticJournal(ctx.storage, "hand.broker");
     this.#broker = new HostedToolsBroker(ctx, { resumeRetainedSockets: true,
+      // Observed living-Hand reconnects take 2-7s (one 5s connect timeout plus
+      // retry). New calls wait for that exact runtime epoch instead of telling
+      // the model to ask the user for a reconnect. Admitted calls never wait here.
+      reconnectAdmissionWaitMs: HAND_RECONNECT_ADMISSION_WAIT_MS,
       beforeCatalogPublish: candidate => this.#admitPublication(candidate),
       onCallObservation: (observation) => {
         try { annotateToolSpan({ "nanocodex.thread_id": observation.thread_id,
@@ -776,18 +780,37 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         : machineName === undefined
           ? undefined
           : catalog.machineTool(invocation.machine_id, machineName);
+      // Rejections carry this shard's ledger evidence. Call rows are never
+      // deleted and (session_id, source_call_id) is unique, so "none" proves
+      // this call identity was never admitted here; callers may then repin it.
+      const admitted = !tool || tool.routeToken !== invocation.route_token
+        ? this.ctx.storage.sql.exec<{ name: string; hand_id: string | null }>(
+          "SELECT name,hand_id FROM hosted_tool_calls WHERE session_id=? AND source_call_id=?",
+          invocation.session_id, invocation.call_id).toArray()[0]
+        : undefined;
+      // Ledger replay is limited to commands retained for this exact physical
+      // machine. Process polls/stdin and CUA stay on their original runtime route.
+      const replayRetained = tool !== undefined && admitted !== undefined
+        && invocation.machine_id !== undefined && invocation.name === "exec_command"
+        && admitted.name === "exec_command" && admitted.hand_id === invocation.machine_id;
       if (!tool) {
         observeHandCall("account.resolve", invocation.name, ownedAt, "unavailable", invocation.call_id, correlation);
-        return Response.json({ error: "tool_unavailable" }, { status: 404 });
+        return Response.json({ error: "tool_unavailable", admission: admitted ? "retained" : "none" }, { status: 404 });
       }
-      if (tool.routeToken !== invocation.route_token) {
+      if (tool.routeToken !== invocation.route_token && !replayRetained) {
         observeHandCall("account.resolve", invocation.name, ownedAt, "unavailable", invocation.call_id, correlation);
-        return Response.json({ error: "stale_catalog" }, { status: 409 });
+        return Response.json({ error: "stale_catalog", admission: admitted ? "retained" : "none" }, { status: 409 });
       }
+      // A retained call under a stale route resolves only through the broker
+      // ledger: its row pins the original lease/generation, so the current
+      // binding can replay a receipt or report ambiguity but never redispatch.
       // Capture the process owner's route before invoking. Exec can wait while
       // a replacement host publishes, and the caller may have refreshed an old
       // command route before admission. Its original snapshot is insufficient.
-      const processRoute = invocation.machine_id !== undefined && invocation.name === "exec_command"
+      // A retained receipt replayed through a replacement route never gains the
+      // replacement's process route: its process ownership stays with the
+      // original runtime (the broker reports such receipts as ambiguous).
+      const processRoute = invocation.machine_id !== undefined && invocation.name === "exec_command" && !replayRetained
         ? catalog.machineTool(invocation.machine_id, "write_stdin")?.routeToken : undefined;
       const resolvedAt = performance.now();
       observeHandCall("account.resolve", invocation.name, ownedAt, "ok", invocation.call_id, correlation);
@@ -1405,6 +1428,10 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   }
 }
 
+const HAND_RECONNECT_ADMISSION_WAIT_MS = 10_000;
+type HandFailureReason = "route_unavailable_after_recovery" | "route_replaced" | "route_unpublished" | "route_refresh_failed"
+  | "process_runtime_replaced" | "transport_failed" | "outcome_unknown";
+
 /** Caller-owned durable effect routing survives provider refresh and session restart. */
 export class AccountHostedToolsCallRoutes {
   constructor(private readonly storage: DurableObjectStorage) {
@@ -1420,6 +1447,15 @@ export class AccountHostedToolsCallRoutes {
       "SELECT name,machine_id,route_token FROM account_hand_call_routes WHERE session_id=? AND call_id=?", sessionId, callId).toArray()[0]!;
     if (retained.name !== name || retained.machine_id !== (machineId ?? "")) throw new Error("Hand call identity was reused for another tool or machine");
     return retained.route_token;
+  }
+  /**
+   * Compare-and-swap a call's route only after its shard ledger proved it was
+   * never admitted. Concurrent repins converge on whichever route won.
+   */
+  repin(sessionId: string, callId: string, name: string, machineId: string | undefined, expected: string, next: string): string {
+    this.storage.sql.exec("UPDATE account_hand_call_routes SET route_token=? WHERE session_id=? AND call_id=? AND route_token=?",
+      next, sessionId, callId, expected);
+    return this.pin(sessionId, callId, name, machineId, next);
   }
 }
 
@@ -1780,6 +1816,45 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     this.#screenTools = screenTools;
   }
 
+  /**
+   * Move a call that its shard ledger proved never admitted onto the Hand's
+   * current same-shard route: one shared refresh, one compare-and-swap repin,
+   * one fixed-policy attempt under the same call identity. The broker's unique
+   * (session, call) ledger still fences any concurrent earlier admission.
+   */
+  async #repinNeverAdmitted(
+    name: string,
+    routeToken: string,
+    region: string | undefined,
+    input: unknown,
+    context: InvocationContext,
+    machineId: string | undefined,
+    failed: (message: string, status: "ambiguous" | "unavailable", preAdmission?: boolean, reason?: HandFailureReason) => unknown,
+    optional = false,
+  ): Promise<unknown> {
+    try {
+      // Concurrent stale callers share one inventory load: only the first
+      // caller that still sees the rejected route invalidates the snapshot.
+      if (routeFor(this, name, machineId)?.routeToken === routeToken) {
+        this.invalidate();
+        await this.refresh();
+      } else await this.#refreshing;
+    } catch {
+      return optional ? undefined
+        : failed("Hand route refresh failed before this call was admitted; nothing was sent.", "unavailable", true, "route_refresh_failed");
+    }
+    const route = routeFor(this, name, machineId);
+    if (!route?.routeToken || route.routeToken === routeToken
+      || parseRelayRouteToken(route.routeToken)?.region !== region) {
+      return optional ? undefined
+        : failed("The Hand is not currently published on a reachable route; this call was not admitted and nothing was sent.", "unavailable", true, "route_unpublished");
+    }
+    let pinned: string;
+    try { pinned = this.#callRoutes!.repin(context.sessionId, context.callId, name, machineId, routeToken, route.routeToken); }
+    catch { return failed("Hand call identity conflicts with its retained route", "ambiguous"); }
+    return this.#invoke(name, pinned, input, context, machineId, "fixed");
+  }
+
   async #invoke(
     name: string,
     routeToken: string,
@@ -1816,9 +1891,9 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     timing: { fetch_ms?: number; decode_ms?: number } = {},
   ): Promise<unknown> {
     const correlation = { session_id: context.sessionId, thread_id: this.#threadId, turn_id: context.turnId };
-    const failed = (message: string, status: "ambiguous" | "unavailable", preAdmission = false): unknown => {
+    const failed = (message: string, status: "ambiguous" | "unavailable", preAdmission = false, reason?: HandFailureReason): unknown => {
       observeHandCall("account.fetch", name, startedAt, status, context.callId, correlation);
-      return failedToolResult(message, status, preAdmission);
+      return failedToolResult(message, status, preAdmission, reason ?? (status === "ambiguous" ? "outcome_unknown" : undefined));
     };
     const startedAt = performance.now();
     if (!this.#allowed(context)) {
@@ -1869,14 +1944,22 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
         } catch { /* Cancellation delivery is best effort; execution remains uncertain. */ }
       }
       timing.fetch_ms = performance.now() - startedAt;
-      return failed("Hand connection failed after possible dispatch; execution outcome is unknown. The command was not resent.", "ambiguous");
+      return failed("Hand connection failed after possible dispatch; execution outcome is unknown. The command was not resent.", "ambiguous", false, "transport_failed");
     }
     const responseAt = performance.now();
     timing.fetch_ms = responseAt - startedAt;
     if (response.ok) observeHandCall("account.fetch", name, startedAt, "ok", context.callId, correlation);
     if (!response.ok) {
-      try { await response.body?.cancel(); } catch { /* No call was admitted for 404/409. */ }
       const preAdmission = response.status === 404 || response.status === 409;
+      // Only the target shard's explicit ledger evidence proves non-admission;
+      // a bare status, unreadable body or older account worker does not.
+      let neverAdmitted = false;
+      if (preAdmission) {
+        try { neverAdmitted = (await response.json<{ admission?: unknown }>()).admission === "none"; }
+        catch { /* Unknown evidence keeps the call pinned and its outcome unknown. */ }
+      } else {
+        try { await response.body?.cancel(); } catch { /* Body is irrelevant to a failed status. */ }
+      }
       if (preAdmission && routePolicy === "screen") {
         // Screen routes fence one exact publication generation. Redirecting a
         // stale click to a replacement publisher would turn a safe routing
@@ -1887,8 +1970,8 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
           true,
         );
       }
-      if (preAdmission && !this.#callRoutes && routePolicy === "refresh" && name !== "write_stdin" && !context.signal?.aborted) {
-        // Only an explicit routing rejection permits local reconciliation. Keep
+      if (neverAdmitted && !this.#callRoutes && routePolicy === "refresh" && name !== "write_stdin" && !context.signal?.aborted) {
+        // Only explicit ledger-backed non-admission permits local reconciliation. Keep
         // the original effect identity so the broker replays any prior receipt;
         // transport/decoding failures and server errors never trigger a retry.
         this.invalidate();
@@ -1906,6 +1989,16 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
           && parseRelayRouteToken(route.routeToken)?.region === relay?.region) {
           return this.#invoke(name, route.routeToken, input, context, machineId, "fixed");
         }
+      }
+      if (neverAdmitted && this.#callRoutes && routePolicy === "refresh" && name !== "write_stdin" && !context.signal?.aborted) {
+        return this.#repinNeverAdmitted(name, routeToken, relay?.region, input, context, machineId, failed);
+      }
+      if (neverAdmitted && machineId !== undefined && name === "write_stdin" && response.status === 409) {
+        return failed("The Hand process runtime changed before this poll or stdin was admitted; nothing was sent. This saved process session cannot be routed to the replacement runtime.", "unavailable", true, "process_runtime_replaced");
+      }
+      if (neverAdmitted) {
+        // Fixed routes (CUA, secure input) stay pinned to their original runtime.
+        return failed("The Hand route changed before this call was admitted; nothing was sent. This pinned route is not moved to a replacement runtime.", "unavailable", true, "route_replaced");
       }
       if (machineId !== undefined && name === "write_stdin" && response.status === 409) {
         // A modern process route is stable across transport reconnects. A
@@ -1939,14 +2032,22 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
       : structuredStatus === "unavailable" ? "unavailable" : structuredStatus === "cancelled" ? "cancelled" : "failed", context.callId, correlation);
     if (machineId !== undefined && result.pre_admission_unavailable === true) {
       // The broker checked its call ledger: this invocation was never admitted.
-      // Let the agent recover the hand instead of indefinitely replaying the turn.
+      // Report precise transport state instead of indefinitely replaying the turn.
       // Do not infer this from discovery or HTTP errors: an earlier attempt may
       // have been admitted and must retain its identity for receipt recovery.
+      // The broker already waited (bounded) for the same runtime epoch. If the
+      // physical Hand republished under a replacement route, move this
+      // never-admitted call there once instead of asking the user to unblock.
+      if (this.#callRoutes && routePolicy === "refresh" && name !== "write_stdin" && !context.signal?.aborted) {
+        const moved = await this.#repinNeverAdmitted(name, routeToken, relay?.region, input, context, machineId, failed, true);
+        if (moved !== undefined) return moved;
+      }
       const reason = typeof result.output === "string" ? result.output : "hand unavailable";
       return failedToolResult(
-        `Account hand ${machineId} did not start tool execution: ${reason}. Reconnect or restart this hand, or select another available hand.`,
+        `Account hand ${machineId} did not start tool execution: ${reason}. The route remained unavailable after bounded automatic recovery; nothing ran and the command was not resent.`,
         "unavailable",
         true,
+        "route_unavailable_after_recovery",
       );
     }
     const branded = {
@@ -1964,6 +2065,12 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
     };
     return Object.freeze(branded);
   }
+}
+
+function routeFor(provider: { resolve(name: string): HostedToolsCodeTool | undefined;
+  machineTool(machineId: string, name: HostedMachineToolName): HostedToolsCodeTool | undefined },
+name: string, machineId: string | undefined): HostedToolsCodeTool | undefined {
+  return machineId === undefined ? provider.resolve(name) : provider.machineTool(machineId, name as HostedMachineToolName);
 }
 
 function machineToolKey(machineId: string, name: HostedMachineToolName): string {
@@ -2017,12 +2124,19 @@ async function ownerFromBody(request: Request): Promise<string | undefined> {
   }
 }
 
+/**
+ * Tool-facing transport state: never an instruction to manage the Hand.
+ * admitted=false is ledger-backed non-admission; "unknown" means the call may
+ * have run and is never resent automatically.
+ */
 function failedToolResult(
   message: string,
   status: "unavailable" | "ambiguous",
   preAdmissionUnavailable = false,
+  reason?: HandFailureReason,
 ): unknown {
-  const outcome = { status, message };
+  const outcome = { status, message, admitted: preAdmissionUnavailable ? false as const : status === "ambiguous" ? "unknown" as const : undefined,
+    resent: false as const, ...(reason === undefined ? {} : { reason }) };
   return Object.freeze({
     [TOOL_RESULT]: true,
     output: message,
