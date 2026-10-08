@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { Streamdown, extractTableDataFromElement, tableDataToTSV, tableDataToCSV } from "streamdown";
-import { code } from "@streamdown/code";
+import { lazyCode as code } from "./lazyCode.js";
 import { lazyMermaid as mermaid } from "./lazyMermaid.js";
 import { HtmlPreview } from "./HtmlPreview.js";
 import { splitHtmlFences } from "./htmlDocument.js";
