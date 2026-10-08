@@ -15,7 +15,7 @@ import { Claude } from 'nanocodex/worker';
 import { createManagedClaudeTools } from './claude-tools';
 import { managedClaudeTasks } from './claude-tasks';
 import type { Options as ClaudeOptions } from '../../nanocodex/runtime/claude.mjs';
-import { availableManagedModels, availableClaudeChildModels, defaultSettingsForModel, selectDefaultManagedModel } from "./model-catalog";
+import { availableManagedModels, availableClaudeChildModels, claudeModelAvailable, defaultSettingsForModel, selectDefaultManagedModel } from "./model-catalog";
 import { ManagedRecoverySafety, MANAGED_RECOVERY_UNKNOWN, createManagedCodeEffectJournal } from "./managed-recovery-safety";
 import { nativeAppValidator } from "./prompt-apps-native";
 import { gmailDecisionReceipts } from "./gmail-firehose-receipts";
@@ -2454,7 +2454,6 @@ async function managedFetchRoute(
       let creationConfiguration: AgentConfiguration = {};
       let modelCatalog: Awaited<ReturnType<typeof availableManagedModels>> | undefined;
       let modelCatalogMs: number | undefined;
-      const catalogTiming: { status_ms?: number } = {};
       try {
         const body = parseAgentCreateBody(await request.text());
         if (body.scope?.type === "team") {
@@ -2507,14 +2506,16 @@ async function managedFetchRoute(
         if (!settingsSelection && creationSettings.model.startsWith("claude-")) {
           if (creationConfiguration.output_schema !== undefined || creationConfiguration.prompt_cache !== undefined || creationConfiguration.tools?.includes("WebSearch")) return json({ error: "claude_capability_unsupported" }, { status: 409 });
           if (principal.connectGrant) return json({ error: "claude_forbidden" }, { status: 403 });
-          let catalog;
           // Default selection may already have read this same live catalog.
           // Reuse only within this request; no cross-request authorization cache.
           const catalogStartedAt = performance.now();
-          try { catalog = modelCatalog ?? await availableManagedModels(env.NANOCODEX, principal.userId, principal.connectGrant ? {} : env, catalogTiming); }
-          catch { return json({ error: "model_availability_unavailable" }, { status: 503 }); }
+          let available: boolean;
+          try {
+            available = modelCatalog ? modelCatalog.data.some(model => model.id === creationSettings.model)
+              : await claudeModelAvailable(env.NANOCODEX, principal.userId, creationSettings.model);
+          } catch { return json({ error: "model_availability_unavailable" }, { status: 503 }); }
           modelCatalogMs = roundMilliseconds(performance.now() - catalogStartedAt);
-          if (!catalog.data.some(model => model.id === creationSettings.model)) return json({ error: "claude_model_unavailable" }, { status: 409 });
+          if (!available) return json({ error: "claude_model_unavailable" }, { status: 409 });
         }
         validateAgentAdmissionSettings(creationSettings);
         // Routing requires an explicit creation policy (inline or saved definition).
@@ -2703,7 +2704,6 @@ async function managedFetchRoute(
         if (firstTurn && !streaming && phases.first_turn_settings) response.headers.set("x-nanocodex-settings", JSON.stringify(phases.first_turn_settings));
         response.headers.append("server-timing", `managed_create;dur=${createMs}, managed_session_create;dur=${sessionCreateMs}`);
         if (modelCatalogMs !== undefined) response.headers.append("server-timing", `managed_model_catalog;dur=${modelCatalogMs}`);
-        if (catalogTiming.status_ms !== undefined) response.headers.append("server-timing", `managed_model_catalog_status;dur=${catalogTiming.status_ms}`);
         if (firstTurn && Number.isFinite(phases.first_turn_admit_ms)) response.headers.append("server-timing", `managed_first_turn_admit;dur=${phases.first_turn_admit_ms}`);
         if (firstTurn && Number.isFinite(phases.storage_sync_ms)) response.headers.append("server-timing", `managed_session_storage_sync;dur=${phases.storage_sync_ms}`);
         if (firstTurn && hasBoundaryTimes && Number.isFinite(phases.first_turn_admitted_at_ms)) response.headers.append("server-timing", `managed_first_turn_admit_wall;dur=${phases.first_turn_admitted_at_ms - phases.response_ready_at_ms}`);

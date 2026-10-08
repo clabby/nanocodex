@@ -825,7 +825,8 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
     assert.equal((await call('/v1/agents','POST',{settings:{model:'claude-sonnet-5-5',thinking:'low',reasoning_mode:'standard',fast_mode:false}},409)).error,'claude_model_unavailable');
     catalogOutage=true;
     await call('/v1/agents','POST',{settings:{model:'gpt-6-astra',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201);
-    await call('/v1/agents','POST',{settings:{model:'claude-sonnet-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},409);
+    // Creation reuses the last successful Claude listing (egress isolate cache), so a later provider catalog outage does not block it.
+    await call('/v1/agents','POST',{settings:{model:'claude-sonnet-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201);
     await mf.dispose();options.workers[0].bindings.NANOCODEX_THREAD_ROUTING='true';options.workers[0].bindings.OPENROUTER_API_KEY='synthetic-gateway-key';options.workers[0].ai={binding:'AI'};mf=new Miniflare(options);
     const ownerToken=token;
     token=(await call('/__fixture','POST',{user:'11111111-1111-4111-8111-111111111144'})).token;

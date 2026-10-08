@@ -2595,7 +2595,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
 
   if (operation === "claude/models") {
     if (request.method !== "GET" || request.body !== null) return jsonError(405, "method_not_allowed");
-    return handleClaudeModels(env, userId);
+    return handleClaudeModels(env, userId, request.headers.get(CLAUDE_MODELS_CACHE_HEADER) === "allow");
   }
   if (operation?.startsWith("claude")) {
     const method = operation === "claude" ? "DELETE" : operation === "claude/login/status" ? "GET" : "POST";
@@ -2721,9 +2721,11 @@ async function hasRequestPayload(request: Request): Promise<boolean> {
  * unsupported/rejected catalog access remains unavailable, never guessed.
  */
 // Agent creation checks the live Claude catalog; Anthropic's /v1/models adds
-// ~1s per create. Reuse a successful listing for the credential cache window.
-async function handleClaudeModels(env: EgressEnv, userId: string): Promise<Response> {
-  const cached = cacheGet(caches(env).claudeModels, userId);
+// ~1s per create. Creation may opt in to the last successful listing within
+// the credential cache window; public catalog reads stay live and refresh it.
+const CLAUDE_MODELS_CACHE_HEADER = "x-nanocodex-catalog-cache";
+async function handleClaudeModels(env: EgressEnv, userId: string, allowCached: boolean): Promise<Response> {
+  const cached = allowCached ? cacheGet(caches(env).claudeModels, userId) : undefined;
   if (cached) return json({ models: cached, has_more: false }, 200);
   try {
     let result = await resolvePlainClaudeCredential(env, userId);
