@@ -64,6 +64,10 @@ All presets use H.264, preserve aspect ratio, and never enlarge a smaller source
 Desktop system output is encoded as AAC at 48 kHz stereo. Microphones are never
 selected as a fallback. Paired iPhone MJPEG streams carry video only.
 
+Playback links use 30 fps with two-second keyframes: 720p targets 2.5 Mbps and
+1080p targets 5 Mbps, plus 128 kbps audio. The following table describes RTMP
+broadcast presets.
+
 | Preset | Maximum dimensions | Output rate | Video target | Keyframe interval |
 | --- | --- | --- | --- | --- |
 | Source | 3840 × 2160 | 60 fps | 24 Mbps | 2 seconds |
