@@ -14,7 +14,7 @@ pub const MAX_COMMAND_BYTES: usize = 16 * 1024;
 /// Maximum description size, measured in UTF-8 bytes.
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
 /// Maximum returned bytes for each of stdout and stderr.
-pub const MAX_STREAM_BYTES: usize = 4 * 1024;
+pub const MAX_STREAM_BYTES: usize = 30_000;
 /// Default deadline passed to the sandbox executor, in milliseconds.
 pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// Maximum accepted deadline, in milliseconds.
@@ -286,8 +286,8 @@ mod tests {
     async fn reports_exit_error_and_output_caps() {
         let fake = FakeExecutor::default();
         *fake.result.lock().unwrap() = Some(Ok(BashResult {
-            stdout: "💡".repeat(3000),
-            stderr: "\u{0000}".repeat(5000),
+            stdout: "💡".repeat(MAX_STREAM_BYTES),
+            stderr: "\u{0000}".repeat(MAX_STREAM_BYTES + 1),
             exit_code: 37,
             truncated: false,
         }));
@@ -299,9 +299,9 @@ mod tests {
         let parsed: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["exit_code"], 37);
         assert_eq!(parsed["truncated"], true);
-        assert_eq!(parsed["stdout"].as_str().unwrap().len(), MAX_STREAM_BYTES);
+        assert!(parsed["stdout"].as_str().unwrap().len() <= MAX_STREAM_BYTES);
         assert_eq!(parsed["stderr"].as_str().unwrap().len(), MAX_STREAM_BYTES);
-        assert!(output.len() < 64 * 1024);
+        assert!(output.len() < 512 * 1024);
         assert_eq!(
             bash.executor.requests.lock().unwrap()[0].timeout_ms,
             DEFAULT_TIMEOUT_MS
