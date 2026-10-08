@@ -182,9 +182,9 @@ export class FixtureModel extends DurableObject {
         const body=JSON.parse(event.data);
         const definitions=[...(body.tools??[]),...(body.input??[]).filter(item=>item.type==='additional_tools').flatMap(item=>item.tools??[])];
         if(definitions.length) effectiveTools=definitions.map(tool=>tool.name??tool.function?.name);
-        this.record('provider.request',{catalog_ready:this.catalogReleased,vault_ready:this.vaultReady,setup_ready:this.setupFinished,
-          tools:effectiveTools,input:body.input,reasoning:body.reasoning,service_tier:body.service_tier});
         const id='resp_'+crypto.randomUUID();
+        this.record('provider.request',{response_id:id,previous_response_id:body.previous_response_id,catalog_ready:this.catalogReleased,vault_ready:this.vaultReady,setup_ready:this.setupFinished,
+          tools:effectiveTools,input:body.input,reasoning:body.reasoning,service_tier:body.service_tier});
         ++requestIndex;
         const inputText=JSON.stringify(body.input??[]);
         if(inputText.includes('VOICE_ORIGIN_HOLD') && !this.voiceHoldSent) {
@@ -650,21 +650,37 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     evidence={...evidence,settings_race:{accepted:raceSettings,patched:{thinking:"high",fast_mode:true},first_request:{reasoning:pinnedRequest.reasoning,service_tier:pinnedRequest.service_tier}}};
     assert.equal(pinnedRequest.reasoning?.effort,"low","public acceptance pins reasoning across bootstrap");
     assert.equal(Object.hasOwn(pinnedRequest,"service_tier"),false,"public acceptance pins fast-off and omits service_tier across bootstrap");
-    assert.equal(pinnedRequest.input.some(item=>item.type==="configuration_update"),false,"selected effort uses the request envelope");
-    assert.equal(pinnedRequest.input.at(-1).role,"user","accepted input remains the final prompt item");
+    // Astra preserves its initial envelope baseline for the context window.
+    // The harness appends trusted effort updates after user input (see Rust
+    // supported_reasoning_resume_preserves_pin); assert the actual wire contract.
+    const effortUpdates=request=>request.input.filter(item=>item.type==="configuration_update");
+    const lowUpdate={type:"configuration_update",reasoning:{effort:"low"}};
+    const highUpdate={type:"configuration_update",reasoning:{effort:"high"}};
+    assert.deepEqual(effortUpdates(pinnedRequest),[lowUpdate],"accepted effort is the sole initial override despite patched defaults");
+    assert.deepEqual(pinnedRequest.input.at(-1),lowUpdate);
+    assert.equal(pinnedRequest.input.at(-2).role,"user","initial override follows accepted user input");
+    assert.match(JSON.stringify(pinnedRequest.input.at(-2)),/Reply SETTINGS_PINNED/);
     const next=await call(`/v1/agents/${racing.agent_id}/turns`,"POST",{id:crypto.randomUUID(),input:"Reply SETTINGS_UPDATED"},202,raceToken);
     await waitRace(next.turn_id);
     const nextTrace=await(await backend.fetch("https://fixture.internal/__trace")).json();
     const nextRequests=nextTrace.filter(row=>row.event==="provider.request").slice(raceTrace.filter(row=>row.event==="provider.request").length);
+    assert.ok(nextRequests.length>1,"updated turn exercises provider sampling and tool continuation");
     const updatedRequest=nextRequests[0];
     evidence.settings_race.next_request={reasoning:updatedRequest.reasoning,service_tier:updatedRequest.service_tier,input:updatedRequest.input};
-    for(const request of nextRequests) {
-      assert.equal(request.reasoning?.effort,"high","later turn and tool continuation adopt the updated effort");
+    assert.deepEqual(effortUpdates(updatedRequest),[lowUpdate,highUpdate],"updated turn retains initial effort and appends exactly one changed override");
+    for(const [index,request] of nextRequests.entries()) {
+      assert.equal(request.reasoning?.effort,"low","later turn and tool continuation preserve the initial envelope baseline");
+      if(index>0) {
+        assert.equal(request.previous_response_id,nextRequests[index-1].response_id,"tool continuation retains the response carrying the effective effort");
+        assert.deepEqual(effortUpdates(request),[],"WebSocket delta adds no redundant effort override");
+        assert.ok(request.input.some(item=>item.type==="custom_tool_call_output"),"continuation submits the tool result");
+      }
       assert.equal(request.service_tier,"priority","later turn adopts fast mode update");
     }
-    assert.equal(updatedRequest.input.some(item=>item.type==="configuration_update"),false,"updated effort uses the request envelope");
-    assert.equal(updatedRequest.input.at(-1).role,"user","settings changes do not append synthetic prompt items");
-    assert.match(JSON.stringify(updatedRequest.input.at(-1)),/Reply SETTINGS_UPDATED/);
+    assert.deepEqual(updatedRequest.input.slice(0,pinnedRequest.input.length),pinnedRequest.input,"effort changes preserve the accepted prompt prefix");
+    assert.deepEqual(updatedRequest.input.at(-1),highUpdate);
+    assert.equal(updatedRequest.input.at(-2).role,"user","changed override follows the new user input");
+    assert.match(JSON.stringify(updatedRequest.input.at(-2)),/Reply SETTINGS_UPDATED/);
     const providerCount=nextTrace.filter(row=>row.event==="provider.request").length;
     const replay=await call(`/v1/agents/${racing.agent_id}/turns`,"POST",{id:racing.turn_id,input:"Reply SETTINGS_PINNED"},200,raceToken);
     assert.equal(replay.turn_id,racing.turn_id);

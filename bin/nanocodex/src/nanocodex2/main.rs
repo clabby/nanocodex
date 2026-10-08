@@ -696,15 +696,15 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
             .await
             .map_err(|_| ManagedError::Configuration("local recording control failed".into()));
     }
-    if let Some(Command::Attach(Attach { agent: Some(agent) })) = &cli.command {
-        if let Some(url) = &agent.shared_url {
-            if cli.managed2 {
-                return Err(ManagedError::Configuration(
-                    "Shared threads use the standard managed service".into(),
-                ));
-            }
-            return tui::run_shared(url).await;
+    if let Some(Command::Attach(Attach { agent: Some(agent) })) = &cli.command
+        && let Some(url) = &agent.shared_url
+    {
+        if cli.managed2 {
+            return Err(ManagedError::Configuration(
+                "Shared threads use the standard managed service".into(),
+            ));
         }
+        return tui::run_shared(url).await;
     }
     if cli.managed2 {
         return match cli.command {

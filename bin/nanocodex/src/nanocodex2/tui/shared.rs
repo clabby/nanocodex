@@ -279,14 +279,14 @@ async fn stream(guest: Guest, mut cursor: String, tx: mpsc::Sender<Update>) {
                     }
                     while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
                         let line: Vec<u8> = buffer.drain(..=end).collect();
-                        if let Some(data) = line.strip_prefix(b"data: ") {
-                            if let Ok(event) = serde_json::from_slice::<Value>(data) {
-                                if let Some(id) = event["cursor"].as_str() {
-                                    cursor = id.to_owned();
-                                }
-                                if tx.send(Update::Event(event)).await.is_err() {
-                                    return;
-                                }
+                        if let Some(data) = line.strip_prefix(b"data: ")
+                            && let Ok(event) = serde_json::from_slice::<Value>(data)
+                        {
+                            if let Some(id) = event["cursor"].as_str() {
+                                cursor = id.to_owned();
+                            }
+                            if tx.send(Update::Event(event)).await.is_err() {
+                                return;
                             }
                         }
                     }
