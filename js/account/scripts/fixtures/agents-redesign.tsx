@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { AgentTerminalView } from "../../../nanocodex-terminal/src/AgentTerminalView";
 import { AgentSidebar } from "../../src/AgentSidebar";
+import "../../src/index.css";
 import "../../../nanocodex-terminal/styles.css";
 import "../../src/Home.css";
 import "../../src/AgentTerminal.css";
@@ -107,7 +108,9 @@ function Workspace() {
           <div className="agent-chat-heading"><strong>Fix the release check</strong></div>
           <div className="agent-chat-header-actions"><button className="chat-running-agents" type="button"><span className="chat-running-dot" />1</button></div>
         </header>
-        <AgentTerminalView agent={agent as any} agentError={undefined} attachments={{ documents: true }} mode="full"
+        <AgentTerminalView agent={agent as any} agentError={undefined} attachments={{ documents: true }} mode="full" voice
+          controls={() => <div className="agent-runtime-controls"><button type="button" className="agent-model-trigger" aria-label="Model settings: Opus 5.5, Medium">
+            <span>Opus 5.5</span><span className="agent-model-effort">Medium</span></button></div>}
           onConversationActivity={() => {}} onStateChange={() => {}} retryAgent={() => {}} promptIntent="queue" composerPlaceholder="Ask Nanocodex" />
         <p className="agent-chat-footnote">Your agent keeps working when you leave.</p>
       </div>

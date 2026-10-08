@@ -19,7 +19,7 @@ const { chromium } = await import(new URL(`${entry}/node_modules/playwright-core
 const voiceStub = { name: 'voice-stub', setup(b) {
   b.onResolve({ filter: /^nanocodex-react$/ }, args => /nanocodex-terminal/.test(args.importer) ? { path: 'nanocodex-react', namespace: 'voice-stub' } : undefined);
   b.onLoad({ filter: /.*/, namespace: 'voice-stub' }, () => ({ loader: 'js', contents: `const idle = Object.freeze({ status: "idle", transcripts: Object.freeze([]), noteTypedInput: async () => {} });
-    export const useVoice = () => idle; export const createElevenLabsManager = () => ({}); export const Voice = { voices: [], defaultVoice: "alloy" };` }));
+    export const useVoice = () => idle; export const createElevenLabsManager = () => ({}); export const Voice = { voices: ["cove", "maple"], defaultVoice: "cove" };` }));
   // The brand mark's module also preloads every route; a static mark stands in.
   b.onResolve({ filter: /\/MainNavigation$/ }, () => ({ path: 'main-navigation', namespace: 'mark-stub' }));
   b.onLoad({ filter: /.*/, namespace: 'mark-stub' }, () => ({ loader: 'js', resolveDir: new URL('..', import.meta.url).pathname,
@@ -27,6 +27,8 @@ const voiceStub = { name: 'voice-stub', setup(b) {
   // Node-only SSH dependencies reachable from the sidebar's imports are never executed here.
   b.onResolve({ filter: /^(node:.*|fs|crypto|stream|net|tls|os|path|util|buffer|events|zlib|child_process|node-rsa)$/ }, () => ({ path: 'node-builtin', namespace: 'empty' }));
   b.onLoad({ filter: /.*/, namespace: 'empty' }, () => ({ loader: 'js', contents: 'module.exports = {};' }));
+  // The real app stylesheet references public assets such as /paradigm-mark.svg by absolute URL.
+  b.onResolve({ filter: /^\/[^/]/ }, args => args.kind === 'url-token' ? { path: args.path, external: true } : undefined);
   b.onResolve({ filter: /^(react|react-dom)(\/.*)?$/ }, args => ({ path: require.resolve(args.path) }));
 } };
 const bundle = await build({ entryPoints: [new URL('fixtures/agents-redesign.tsx', import.meta.url).pathname], bundle: true,
@@ -99,6 +101,36 @@ try {
     const form = await page.locator('form.agent-composer').boundingBox();
     assert.ok(form.y + form.height >= viewport.height - (mobile ? 16 : 48), `Composer pinned to the bottom (${form.y + form.height})`);
     assert.ok(Math.abs((form.x - main.x) - (main.x + main.width - form.x - form.width)) <= 2, 'Composer is centered');
+    // Homepage palette: the chat paints with the same --surface/--text/--brand-* tokens as /.
+    const palette = await page.evaluate(() => {
+      const paint = value => { const probe = document.body.appendChild(Object.assign(document.createElement('i'), { style: `color:${value}` }));
+        const color = getComputedStyle(probe).color; probe.remove(); return color; };
+      const workspace = getComputedStyle(document.querySelector('.chat-workspace'));
+      return { surface: paint('var(--surface)'), text: paint('var(--text)'), accent: paint('var(--brand-accent)'),
+        background: workspace.backgroundColor, color: workspace.color,
+        marker: getComputedStyle(document.querySelector('.agent-navigation-thread[aria-current="location"]'), '::before').backgroundColor,
+        radius: getComputedStyle(document.querySelector('.agent-touch-field')).borderRadius };
+    });
+    assert.equal(palette.background, palette.surface, 'Chat background is the homepage surface');
+    assert.equal(palette.color, palette.text, 'Chat text is the homepage text color');
+    if (!mobile) assert.equal(palette.marker, palette.accent, 'Selection marker uses the homepage accent');
+    assert.equal(palette.radius, '18px', 'Composer is a rounded homepage-style panel');
+    log(`${name}:palette`, palette);
+
+    // Sidebar: no Home entry (the brand mark already links home); composer shows no voice name.
+    assert.equal(await page.locator('.agent-navigation-primary').getByText('Home', { exact: true }).count(), 0, 'Sidebar has no Home button');
+    assert.equal(await page.locator('.agent-voice-select').count(), 0, 'No inline voice picker');
+    assert.doesNotMatch(await page.locator('form.agent-composer').innerText(), /cove|maple|voice active/i, 'Composer never shows the voice name');
+    assert.equal(await page.getByRole('button', { name: 'Voice settings' }).count(), 1, 'Voice preferences stay reachable');
+    const toolbar = await page.locator('.agent-composer-toolbar').evaluate(el => [...el.querySelectorAll(':scope > button, :scope > .agent-runtime-controls > button, .agent-voice-control button')]
+      .map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), top: Math.round(r.top), bottom: Math.round(r.bottom) }; }));
+    const centers = toolbar.map(b => (b.top + b.bottom) / 2);
+    assert.ok(Math.max(...centers) - Math.min(...centers) <= 1, `Composer controls share one baseline ${JSON.stringify(toolbar)}`);
+    const sendIdle = page.getByRole('button', { name: 'Send message' });
+    await textarea.fill('x');
+    assert.equal(await css(sendIdle, 'backgroundColor'), palette.text, 'Send is the homepage primary button');
+    await textarea.fill('');
+
     if (mobile) {
       await page.getByRole('button', { name: 'Open sidebar' }).click();
       await page.locator('.agent-navigation.is-open').waitFor();
@@ -138,6 +170,8 @@ try {
       if (mobile) await page.getByRole('button', { name: 'Send message' }).click(); else await textarea.press('Enter');
       await frames(page);
     };
+    const composerBox = async () => { const box = await page.locator('form.agent-composer').boundingBox(); return { y: Math.round(box.y), h: Math.round(box.height) }; };
+    const restingComposer = await composerBox();
     await send('Run the release check');
     assert.deepEqual(await prompts(), ['Run the release check']);
     assert.equal(await textarea.inputValue(), '', 'Draft clears after sending');
@@ -153,6 +187,13 @@ try {
     assert.match(await details.locator(':scope > summary').innerText(), /Working[\s\S]*pnpm test --watch=false/);
     assert.equal(await page.getByRole('button', { name: 'Send message' }).count(), 0, 'Empty draft while running: Stop only');
     assert.match(await page.getByRole('button', { name: 'Stop response' }).getAttribute('class'), /is-primary/);
+    // Stability: the composer does not move when a turn starts, and summaries keep one height as timers tick.
+    assert.deepEqual(await composerBox(), restingComposer, 'Composer stays put while a tool runs');
+    const summaryHeight = async () => Math.round((await details.locator(':scope > summary').boundingBox()).height);
+    const runningSummary = await summaryHeight();
+    const liveHeight = Math.round((await page.locator('.agent-live-status').boundingBox())?.height ?? 0);
+    await page.waitForTimeout(1100); // the live clock ticks
+    assert.equal(await summaryHeight(), runningSummary, 'Running summary height is stable across ticks');
     await textarea.fill('next');
     assert.equal(await page.getByRole('button', { name: 'Send message' }).count(), 1, 'A draft shows Send beside Stop');
     await textarea.fill('');
@@ -160,6 +201,9 @@ try {
     await fixture('play', 5); await frames(page);
     assert.equal(await details.getAttribute('open'), null, 'Still collapsed after more tool events');
     await fixture('drain'); await page.locator('.agent-live-status').waitFor({ state: 'detached' });
+    assert.equal(await summaryHeight(), runningSummary, 'Finishing does not resize the work summary');
+    assert.deepEqual(await composerBox(), restingComposer, 'Composer stays put after the turn');
+    log(`${name}:stability`, { composer: restingComposer, summary: runningSummary, liveStatus: liveHeight });
     const summary = await details.locator(':scope > summary').innerText();
     assert.match(summary, /Worked[\s\S]*2 commands[\s\S]*1 failed/);
     assert.equal(await details.getAttribute('open'), null, 'Finished work stays collapsed');
@@ -176,7 +220,8 @@ try {
     assert.ok(isReddish(await css(failedRow.locator('.agent-tool-status-icon.is-failed'), 'color')), 'Failed marker is red');
     assert.ok(!isReddish(await css(rows.first().locator('.agent-tool-status-icon'), 'color')), 'Success marker is monochrome');
     const sizes = await details.locator('.agent-tool-row > details > summary').evaluateAll(list => list.map(el => ({ h: el.getBoundingClientRect().height, o: el.scrollWidth - el.clientWidth, t: el.innerText.replace(/\s+/g, ' ') })));
-    for (const row of sizes) assert.ok(row.h <= (mobile ? 58 : 32) && row.o <= 1, `Compact row ${JSON.stringify(row)}`);
+    for (const row of sizes) assert.ok(row.h <= (mobile ? 36 : 30) && row.o <= 1, `Compact single-line row ${JSON.stringify(row)}`);
+    assert.equal(new Set(sizes.map(row => row.h)).size, 1, 'Every tool row has the same height, whatever its status or duration');
     await failedRow.locator(':scope > details > summary').click();
     assert.match(await failedRow.locator('.agent-tool-terminal').innerText(), /\$ pnpm test release\.test\.ts[\s\S]*FAIL release\.test\.ts[\s\S]*Exit code 1/);
     await shot('expanded');

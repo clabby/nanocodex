@@ -221,7 +221,7 @@ export const ToolRow = memo(function ToolRow({ tool }: { tool: ToolActivity }) {
           {nested && !open ? <span className="agent-tool-count">{nested} {nested === 1 ? "call" : "calls"}</span> : null}
           {model.source ? <span className="agent-tool-source">{model.source}</span> : null}
           <span className="agent-terminal-sr-only">{STATUS_TEXT[tool.status]}{model.error ? `: ${model.error}` : ""}</span>
-          {elapsed ? <span className="agent-tool-time" aria-hidden={running ? "true" : undefined}>{elapsed}</span> : null}
+          <span className="agent-tool-time" aria-hidden={running || !elapsed ? "true" : undefined}>{elapsed}</span>
           <ChevronRight className="agent-tool-chevron" aria-hidden="true" />
         </span>
       </summary>

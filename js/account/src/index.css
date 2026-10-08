@@ -47,6 +47,20 @@
   --content-max: 1120px;
   --wide-max: 1440px;
   --coarse-target-size: 44px;
+  /* Brand tokens shared by the homepage and the /agents chat. They derive
+     from --text/--surface, so both themes stay in step automatically. */
+  --brand-accent: #8cb38c;
+  --brand-accent-text: #9cc59c;
+  --brand-line: color-mix(in srgb, var(--text) 10%, transparent);
+  --brand-line-strong: color-mix(in srgb, var(--text) 16%, transparent);
+  --brand-soft: color-mix(in srgb, var(--text) 4%, var(--surface));
+  --brand-hover: color-mix(in srgb, var(--text) 6%, var(--surface));
+  --brand-selected: color-mix(in srgb, var(--text) 9%, var(--surface));
+  --brand-muted: color-mix(in srgb, var(--text) 62%, var(--surface));
+  --brand-faint: color-mix(in srgb, var(--text) 42%, var(--surface));
+  --brand-glow: radial-gradient(1200px 520px at 50% -180px, color-mix(in srgb, var(--brand-accent) 16%, transparent), transparent 70%);
+  --brand-radius-panel: 20px;
+  --brand-radius-control: 12px;
 }
 
 html[data-theme="light"] {
@@ -65,6 +79,7 @@ html[data-theme="light"] {
   --on-positive: var(--white);
   --on-negative: var(--white);
   --shadow-overlay: 0 24px 70px rgba(0, 0, 0, 0.13);
+  --brand-accent-text: #4c7a4c;
 }
 
 * {

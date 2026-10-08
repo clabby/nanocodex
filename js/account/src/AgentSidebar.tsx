@@ -1,7 +1,6 @@
 import {
   CircleUserRound,
   Layers,
-  House,
   PanelLeftClose,
   Search,
   SquarePen,
@@ -158,10 +157,6 @@ export function AgentSidebar({
             <SquarePen />
             <span>{landing ? "New chat" : "New agent"}</span>
           </button>
-          <Link to="/">
-            <House aria-hidden="true" />
-            <span>Home</span>
-          </Link>
           <Link to="/agents" aria-current={!landing ? "page" : undefined}>
             <Layers aria-hidden="true" />
             <span>Agents</span>

@@ -25,7 +25,7 @@ import {
 import { ElevenLabsSettings } from "./ElevenLabsSettings.js";
 const defaultElevenLabsManager = createElevenLabsManager();
 
-import { SlidersHorizontal, X } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 import { TerminalComposer, type ComposerAttachment, type ComposerAttachmentPolicy } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 import type { VoiceTerminalEntry } from "./TerminalTranscriptSurface.js";
@@ -321,7 +321,9 @@ export function VoiceControl({
   const [showSettings, setShowSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string>();
   const [applying, setApplying] = useState(false);
-  const statusText = voice.statusText ?? (voice.isActive ? voice.voice : undefined);
+  // The pressed mic already says voice is live; "Voice active (cove)" would only
+  // repeat the voice name, which belongs in preferences.
+  const statusText = voice.statusText && !/^Voice active\b/.test(voice.statusText) ? voice.statusText : undefined;
   const saveSettings = async () => {
     const next = { ...settings, voice: selectedVoice };
     if (next.outputProvider === "elevenlabs" && !next.elevenLabsVoiceId) {
@@ -342,6 +344,7 @@ export function VoiceControl({
     } finally { setApplying(false); }
   };
   return <>
+    <span className="agent-voice-control">
     <button
       className="agent-voice-button"
       type="button"
@@ -355,27 +358,10 @@ export function VoiceControl({
       </svg>
       <span className="agent-terminal-sr-only">Voice</span>
     </button>
-    {engaged ? <>
-      <button type="button" className="agent-voice-mute-button" aria-label={voice.muted ? "Unmute microphone" : "Mute microphone"}
-        aria-pressed={voice.muted} onClick={() => voice.toggleMuted()}>{voice.muted ? "Unmute" : "Mute"}</button>
-      <meter className="agent-voice-level" aria-label="Microphone level" min={0} max={1} value={voice.microphoneLevel} />
-      <meter className="agent-voice-level" aria-label="Speaker level" min={0} max={1} value={voice.speakerLevel} />
-    </> : null}
-    {(settings.outputProvider ?? "openai") === "openai" ? <select
-      aria-label="Voice"
-      className="agent-voice-select"
-      value={selectedVoice}
-      disabled={engaged}
-      onChange={(event) => { setSelectedVoice(event.target.value as NonNullable<UseVoiceReturnType["voice"]>); }}
-    >
-      {Voice.voices.map((name) => <option key={name} value={name}>
-        {name[0]!.toUpperCase() + name.slice(1)}
-      </option>)}
-    </select> : null}
     <div className="agent-voice-preferences">
-      <button type="button" aria-label="Voice settings" aria-expanded={showSettings}
+      <button type="button" aria-label="Voice settings" title="Voice settings" aria-expanded={showSettings}
         onClick={() => { setShowSettings(!showSettings); }}>
-        <SlidersHorizontal aria-hidden="true" />
+        <ChevronDown aria-hidden="true" />
       </button>
       {showSettings ? <div className="agent-voice-settings" role="group" aria-label="Voice preferences">
         <label>Speech provider<select value={settings.outputProvider ?? "openai"} onChange={(event) => {
@@ -417,6 +403,13 @@ export function VoiceControl({
         </button>
       </div> : null}
     </div>
+    </span>
+    {engaged ? <>
+      <button type="button" className="agent-voice-mute-button" aria-label={voice.muted ? "Unmute microphone" : "Mute microphone"}
+        aria-pressed={voice.muted} onClick={() => voice.toggleMuted()}>{voice.muted ? "Unmute" : "Mute"}</button>
+      <meter className="agent-voice-level" aria-label="Microphone level" min={0} max={1} value={voice.microphoneLevel} />
+      <meter className="agent-voice-level" aria-label="Speaker level" min={0} max={1} value={voice.speakerLevel} />
+    </> : null}
     {voice.isActive ? (
       <button
         className="agent-voice-cancel-button"
