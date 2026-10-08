@@ -233,7 +233,14 @@ test("retention keeps only the latest observation per cell and bounds total enve
     }
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM managed_code_observations").get().n, 128);
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM managed_code_observation_chunks").get().n, 128);
-    await assert.rejects(j.observations.recover("owner", "11111111-1111-4111-8111-111111111111:1"), /metadata is missing/);
+    const evicted = JSON.parse(await j.observations.recover("owner", "11111111-1111-4111-8111-111111111111:1"));
+    assert.equal(evicted.success, false);
+    assert.equal(evicted.cell, undefined);
+    assert.match(output(evicted), /"observation_retention":"evicted"/);
+    // A live owner can record a newer observation after earlier payload eviction.
+    await j.observations.record("owner", "11111111-1111-4111-8111-111111111111:1", encoded);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM managed_code_observation_evictions WHERE cell_id = ?").get("11111111-1111-4111-8111-111111111111:1").n, 0);
+    assert.equal(JSON.parse(await j.observations.recover("owner", "11111111-1111-4111-8111-111111111111:1")).success, true);
     const final = JSON.parse(await j.observations.recover("owner", "11111111-1111-4111-8111-111111111111:130"));
     assert.equal(final.success, true);
     assert.deepEqual(final.nested_calls, []);
@@ -284,6 +291,70 @@ test("retention enforces aggregate byte bound as well as count", async () => {
     assert.ok(retained.bytes <= 32 * 1024 * 1024);
     const chunks = f.db.prepare("SELECT SUM(length(CAST(payload AS BLOB))) AS bytes FROM managed_code_observation_chunks").get();
     assert.equal(chunks.bytes, retained.bytes);
-    await assert.rejects(j.observations.recover("owner", "11111111-1111-4111-8111-111111111111:1"), /metadata is missing/);
+    const evicted = JSON.parse(await j.observations.recover("owner", "11111111-1111-4111-8111-111111111111:1"));
+    assert.equal(evicted.success, false);
+    assert.equal(evicted.cell, undefined);
+    assert.match(output(evicted), /"observation_retention":"evicted"/);
+  } finally { f.close(); }
+});
+
+test("explicit eviction after SQLite restart preserves original completed receipts and unknown intents read-only", async () => {
+  const f = fixture(), j = f.journal(), entered = gate(), release = gate();
+  let calls = 0, recovered;
+  const r = runtime(j, {
+    done: { handler: async () => { calls++; return "original-completed-receipt"; } },
+    pending: { handler: async () => { calls++; entered.resolve(); await release.promise; return "late"; } },
+  });
+  try {
+    const active = r.executeCodeObserved('await tools.done({}); await tools.pending({ operation_id: "stable-pending" });', "owner", "origin");
+    await entered.promise; r.preempt("owner", "origin");
+    const id = cellId(await parse(active));
+    const context = { ...identity(), sessionId: "owner", parentCallId: "filler", callId: "filler", source: 'text("ok")', name: "code-cell", input: null };
+    const encoded = JSON.stringify({ output: "filler", success: true, cell: { running: false, origin_call_id: "filler" }, nested_calls: [] });
+    for (let i = 1; i <= 128; i++) {
+      const fillerId = "11111111-1111-4111-8111-111111111111:" + i;
+      await j.observations.register(context, fillerId);
+      await j.observations.record("owner", fillerId, encoded);
+    }
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM managed_code_observations WHERE cell_id = ?").get(id).n, 0);
+    assert.equal(f.db.prepare("SELECT sequence FROM managed_code_observation_evictions WHERE cell_id = ?").get(id).sequence, 1);
+    f.journal(); await r.reset(); release.resolve(); await tick();
+    f.reopen();
+    recovered = runtime(f.journal(), {}, { evaluate: () => { throw new Error("must not evaluate"); } });
+    const before = f.db.prepare("SELECT total_changes() AS n").get().n;
+    const evidence = await parse(recovered.waitCodeObserved(JSON.stringify({ cell_id: id }), "owner", "after-eviction"));
+    const text = output(evidence);
+    const details = JSON.parse(text.slice(text.indexOf("\n{") + 1));
+    assert.equal(details.observation_retention, "evicted");
+    assert.equal(details.previous_observation, null);
+    assert.deepEqual(details.pending_effect_call_ids, ["origin/code-2"]);
+    assert.equal(details.completed_effect_receipts[0].call_id, "origin/code-1");
+    assert.match(JSON.stringify(details.completed_effect_receipts), /original-completed-receipt/);
+    assert.equal(evidence.success, false);
+    assert.equal(evidence.cell, undefined);
+    assert.deepEqual(evidence.nested_calls, []);
+    assert.deepEqual(await parse(recovered.waitCodeObserved(JSON.stringify({ cell_id: id, terminate: true }), "owner", "new-wait")), evidence);
+    const foreign = await parse(recovered.waitCodeObserved(JSON.stringify({ cell_id: id }), "stranger", "foreign"));
+    assert.doesNotMatch(output(foreign), /original-completed-receipt|stable-pending/);
+    assert.equal(f.db.prepare("SELECT total_changes() AS n").get().n, before);
+    assert.equal(calls, 2);
+  } finally { release.resolve(); await r.reset(); await recovered?.reset(); f.close(); }
+});
+
+test("unmarked missing metadata and mismatched eviction sequence fail closed", async () => {
+  const f = fixture();
+  let j = f.journal();
+  const id = "11111111-1111-4111-8111-111111111111:1";
+  const context = { ...identity(), sessionId: "owner", parentCallId: "origin", callId: "origin", source: 'text("ok")', name: "code-cell", input: null };
+  try {
+    await j.observations.register(context, id);
+    await j.observations.record("owner", id, JSON.stringify({ output: "ok", success: true, cell: { running: false, origin_call_id: "origin" }, nested_calls: [] }));
+    f.db.prepare("DELETE FROM managed_code_observations WHERE cell_id = ?").run(id);
+    // Upgrade from a ledger predating eviction markers must not guess eviction.
+    f.db.exec("DROP TABLE managed_code_observation_evictions");
+    f.reopen(); j = f.journal();
+    await assert.rejects(j.observations.recover("owner", id), /metadata is missing/);
+    f.db.prepare("INSERT INTO managed_code_observation_evictions VALUES (?, ?)").run(id, 2);
+    await assert.rejects(j.observations.recover("owner", id), /eviction identity mismatch/);
   } finally { f.close(); }
 });

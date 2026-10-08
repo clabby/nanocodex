@@ -21,7 +21,7 @@ production-only alternate implementation was added.
 Recovery authenticates through the caller's session and original cell mapping.
 It never executes guest source, admits effects, cancels providers, or mutates the
 journal. Completed original effect receipts remain historical evidence; pending
-intent stays outcome unknown. Missing legacy mappings, evicted observations,
+intent stays outcome unknown. Missing legacy mappings, unmarked missing observation metadata,
 corrupt chunks/checksums and stale ownership fail closed.
 
 A terminal observation proves the recorded script result. Its output and nested
@@ -45,6 +45,16 @@ with older payloads removed transactionally. Small summaries add bounded metadat
 over that payload limit. Original effect receipts and identity tombstones remain
 in their existing journals; this is not global garbage collection of all managed
 storage. Eviction sacrifices observation availability, never effect identity.
+An atomic tombstone records the exact evicted sequence. Recovery with a matching
+marker skips the missing observation payload and reads the original effect
+journal, explicitly reporting observation_retention=evicted in the textual
+evidence. Whole-script outcome stays unknown; completed receipts and pending
+intent IDs remain available without new nested events or writes. A newer
+observation clears the marker atomically. Missing metadata without a marker,
+conflicting retained metadata, or a mismatched sequence still fails closed;
+upgrading an older ledger does not retroactively classify missing data as eviction.
+Eviction markers, identity tombstones and original effect receipts are not
+covered by the observation payload cap.
 
 Wire fields are unchanged: output, success, optional cell, nested_calls, and
 notifications. The Rust CodeModeExecution deny_unknown_fields struct accepts
@@ -54,12 +64,14 @@ Outcome-unknown details continue to be carried in textual evidence.
 
 ## Validation (2026-10-08)
 
-- 10 tests passed in code-observation-recovery-node.test.mjs using native Node
+- 12 tests passed in code-observation-recovery-node.test.mjs using native Node
   22.23.3 SQLite on disk and actual database close/reopen. Tests include replayed
   yield, completed late receipts, pending external intent, lost terminal ACK,
   same/new observer IDs, foreign sessions, stale owners, corrupt receipt,
   missing legacy ID, cancellation before execution, oversized output, wait
-  budget, count/byte retention, and production Claude consumption.
+  budget, count/byte retention, production Claude consumption, explicit eviction
+  with original completed/unknown receipt reconciliation after restart, and
+  fail-closed missing-metadata migration and mismatched eviction markers.
 - 68 runtime/retention/lifecycle/preemption tests passed across native, QuickJS
   and worker evaluators, including Node host identity admission and Node/browser
   host ABI preemption. This is the complete test set from the prior 62-pass,
