@@ -41,6 +41,7 @@ it("fences pending combined startup snapshots when a personal memory is forgotte
   const org = crypto.randomUUID();
   const where = target(org, "team", "alice", "personal");
   const session = bindings.NANOCODEX_SESSIONS.getByName(crypto.randomUUID());
+  await session.fetch("https://session.internal/personalization/invalidate", { method: "POST" });
   await runInDurableObject(session, async (_obj, ctx) => {
     ctx.storage.sql.exec(`INSERT INTO session_state(singleton,session_id,owner_id,organization_id,team_id,
       authorization_epoch,public_origin,runtime_profile,accepted_turns,last_active)
