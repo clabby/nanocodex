@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
-import {
-  ConnectOnboarding,
-  type ConnectOnboardingHost,
-  type ConnectRequest,
+import type {
+  ConnectOnboardingHost,
+  ConnectRequest,
 } from "nanocodex-connect-ui/App";
 import {
   deviceApiOrigin,
@@ -26,6 +25,11 @@ import {
 import { ConnectHome } from "./ConnectHome";
 import "nanocodex-connect-ui/styles.css";
 import "./DeviceConnect.css";
+
+// The onboarding wizard pulls in the passkey account SDK and viem. Only CLI
+// device authorization (`?user_code=`) renders it, so the /account hub that
+// shares this route module must not download that graph.
+const ConnectOnboarding = lazy(() => import("nanocodex-connect-ui/App").then((module) => ({ default: module.ConnectOnboarding })));
 
 export function DeviceConnect({ theme, onThemeChange }: { theme?: "light" | "dark"; onThemeChange?: (theme: "light" | "dark") => void }) {
   const deviceRequest = new URL(window.location.href).searchParams.has("user_code");
@@ -123,7 +127,9 @@ function DeviceAuthorization() {
   if (!request) return null;
   return (
     <div className="device-connect-route" data-testid="device-connect-route">
-      <ConnectOnboarding host={host} presentation="wizard" request={request} />
+      <Suspense fallback={<p role="status">Loading authorization…</p>}>
+        <ConnectOnboarding host={host} presentation="wizard" request={request} />
+      </Suspense>
     </div>
   );
 }
