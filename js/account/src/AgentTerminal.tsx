@@ -38,7 +38,6 @@ import {
 } from "./browserMcp";
 import { clientFailureMessage } from "./clientFailure";
 import { AgentModelMenu } from "./AgentModelMenu";
-import { attachManagedBrowserHand } from "./managedBrowserHand";
 import { useAccountSession } from "./AccountSession";
 import { RemoteScreens } from "./RemoteScreens";
 import { managedConversationQueryOptions, managedTerminalAgent, openManagedAgent } from "./managedAgentRuntime";
@@ -276,46 +275,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       } : undefined);
     },
   });
-  const [browserHand, setBrowserHand] = useState<Awaited<ReturnType<typeof attachManagedBrowserHand>>>();
-  const [browserHandSettledFor, setBrowserHandSettledFor] = useState<typeof managed>();
-  const [browserHandAttempt, setBrowserHandAttempt] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    let hand: Awaited<ReturnType<typeof attachManagedBrowserHand>> | undefined;
-    let retry: ReturnType<typeof setTimeout> | undefined;
-    const reconnect = () => {
-      if (!controller.signal.aborted) {
-        retry = setTimeout(() => setBrowserHandAttempt((current) => current + 1), 1_000);
-      }
-    };
-    setBrowserHand(undefined);
-    void attachManagedBrowserHand(managed, controller.signal).then((attached) => {
-      if (controller.signal.aborted) {
-        void attached.close();
-        return;
-      }
-      hand = attached;
-      setBrowserHand(attached);
-      void hand.closed().then(() => {
-        if (controller.signal.aborted) return;
-        setBrowserHand(undefined);
-        reconnect();
-      });
-    }).catch((error) => {
-      if (controller.signal.aborted) return;
-      console.warn("nanocodex:browser_hand_attach_failed", { error: errorMessage(error) });
-      reconnect();
-    }).finally(() => {
-      if (!controller.signal.aborted) setBrowserHandSettledFor(managed);
-    });
-    return () => {
-      controller.abort();
-      if (retry) clearTimeout(retry);
-      if (hand) void hand.close();
-    };
-  }, [accountId, browserHandAttempt, managed]);
   const retryAgent = useCallback(() => {
-    setBrowserHandAttempt((current) => current + 1);
     void stateQuery.refetch();
   }, [stateQuery.refetch]);
   const recordConversationActivity = useCallback((input: string) => {
@@ -327,15 +287,11 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   ) => {
     await settingsMutation.mutateAsync(patch);
   }, [settingsMutation.mutateAsync]);
-  // Keep the first prompt queued while this page's hand is still attaching,
-  // so the host can include it in the initial environment snapshot. A failed
-  // optional hand does not block the managed brain or subsequent reconnects.
-  const startupReady = browserHandSettledFor === managed || (settingsReady && conversationStarted);
   return (
     <>
     <PhoneCallsPanel key={`${accountId}:${agentId}`} parentAgentId={agentId} enabled={Boolean(accountId) && mode !== "hidden"} />
     <AgentTerminalView
-      agent={startupReady ? agent : undefined}
+      agent={agent}
       attachments={attachmentPolicy}
       initialDraft={initialDraft}
       agentError={stateQuery.error?.message}
@@ -369,14 +325,6 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
           <RemoteScreens key={managed.id} />
         </>
       )}
-      accessory={({ agentReady, submit }) => browserHand ? (
-        <ArtifactDock
-          agentReady={agentReady}
-          onPrompt={(artifact, prompt, path) => submit(artifactFollowOnPrompt(artifact, path, prompt))}
-          workspace={browserHand.workspace}
-          workspaceId={browserHand.workspaceId}
-        />
-      ) : null}
     />
     </>
   );

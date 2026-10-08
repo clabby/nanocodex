@@ -23,7 +23,7 @@ const voiceStub = { name: 'voice-stub', setup(b) {
   // The brand mark's module also preloads every route; a static mark stands in.
   b.onResolve({ filter: /\/MainNavigation$/ }, () => ({ path: 'main-navigation', namespace: 'mark-stub' }));
   b.onLoad({ filter: /.*/, namespace: 'mark-stub' }, () => ({ loader: 'js', resolveDir: new URL('..', import.meta.url).pathname,
-    contents: `import { createElement } from "react"; export const NanocodexMark = () => createElement("svg", { className: "nanocodex-mark", viewBox: "0 0 24 24", "aria-hidden": true });` }));
+    contents: `import { createElement } from "react"; export const NanocodexMark = () => createElement("svg", { className: "nanocodex-mark", viewBox: "0 0 24 24", "aria-hidden": true }); export const MainNavigationLinks = () => null;` }));
   // Node-only SSH dependencies reachable from the sidebar's imports are never executed here.
   b.onResolve({ filter: /^(node:.*|fs|crypto|stream|net|tls|os|path|util|buffer|events|zlib|child_process|node-rsa)$/ }, () => ({ path: 'node-builtin', namespace: 'empty' }));
   b.onLoad({ filter: /.*/, namespace: 'empty' }, () => ({ loader: 'js', contents: 'module.exports = {};' }));
