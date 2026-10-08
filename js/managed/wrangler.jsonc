@@ -125,6 +125,7 @@
         "name": "NANOCODEX_ACCOUNT_TOOLS",
         "class_name": "AccountHostedTools"
       },
+      { "name": "NANOCODEX_HAND_RELAYS", "class_name": "RegionalHandRelay" },
       {
         "name": "NANOCODEX_SCREEN_PLAYBACK",
         "class_name": "ScreenPlayback"
