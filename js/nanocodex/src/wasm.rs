@@ -249,6 +249,9 @@ extern "C" {
         host_context_ref: Option<&str>,
     ) -> Result<(), JsValue>;
 
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = subagentStatus)]
+    fn host_subagent_status(session_id: &str, status_json: &str) -> Result<(), JsValue>;
+
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = releaseSubagentSession)]
     fn host_release_subagent_session(
         host_definition_id: u32,
@@ -3426,7 +3429,16 @@ fn forward_subagent_updates(
                         }
                     }
                 }
-                SubagentUpdate::Status { .. } | SubagentUpdate::Message(_) => {}
+                SubagentUpdate::Status { id, status } => {
+                    let session_id = sessions.borrow().get(&(root_session_id.clone(), id)).cloned();
+                    if let Some(session_id) = session_id
+                        && let Ok(encoded) = serde_json::to_string(&status)
+                        && let Err(error) = host_subagent_status(&session_id, &encoded)
+                    {
+                        report_subagent_host_error("forwarding a subagent status", &error);
+                    }
+                }
+                SubagentUpdate::Message(_) => {}
             }
         }
         let session_ids = sessions

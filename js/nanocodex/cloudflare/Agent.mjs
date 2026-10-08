@@ -1022,6 +1022,17 @@ function cloudflareSubagentSessions(reservation, lifecycle) {
       });
       bindings.set(sessionId, { descriptor, hostContextRef });
     },
+    status(sessionId, status) {
+      if (!mayBindCloudflareSubagentSession(reservation)) return;
+      const retained = bindings.get(sessionId);
+      if (!retained || retained.status === status.state) return;
+      retained.status = status.state;
+      notifySubagentLifecycle(lifecycle, {
+        type: "status", rootSessionId: reservation.sessionId, sessionId,
+        descriptor: retained.descriptor, hostContextRef: retained.hostContextRef,
+        status,
+      });
+    },
     release(sessionId, hostContextRef) {
       if (!mayReleaseCloudflareSubagentSession(reservation)) return;
       const retained = bindings.get(sessionId);

@@ -698,6 +698,9 @@ const hostBridge = Object.freeze({
       records,
     );
   },
+  subagentStatus(sessionId, statusJson) {
+    requiredSessionHost(sessionId).subagentStatus?.(sessionId, JSON.parse(statusJson));
+  },
   emitEvent(sessionId, eventJson, encodedBytes, encodedAgentId) {
     requiredSessionHost(sessionId).emitEvent(
       eventJson,

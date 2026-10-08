@@ -188,6 +188,9 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
       if (!subagentRouting) throw new Error('subagent routing is not configured');
       return subagentRouting.bind(request);
     },
+    subagentStatus(sessionId, status) {
+      subagentSessions?.status?.(sessionId, status);
+    },
     bindSubagentSession(sessionId, descriptor, hostContextRef) {
       descriptor = subagentSessions?.bindingDescriptor?.(sessionId, descriptor, hostContextRef) ?? descriptor;
       subagentSessions?.bind?.(sessionId, descriptor, hostContextRef);

@@ -676,6 +676,7 @@ export function createBrowserHost(options = {}) {
       return options.subagentRouting.bind(request);
     },
     bindSubagentSession: code.bindSubagentSession,
+    subagentStatus: code.subagentStatus,
     cancelCode: code.cancel,
     readWorkspaceFile: async (path) => {
       if (!options.filesystem) throw new Error("browser workspace is unavailable");

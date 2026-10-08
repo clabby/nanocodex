@@ -940,6 +940,45 @@ fn native_tools(
     Ok(native)
 }
 
+/// Converts a host tool-result document (a base64 data URL) into a Claude
+/// `document` block with the same bounds and media checks that
+/// `nanocodex-claude` applies to prompt documents.
+fn document_block(file_data: &str) -> std::result::Result<Value, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    const MAX_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
+    if file_data.len() > MAX_DOCUMENT_BYTES.div_ceil(3) * 4 + 64 {
+        return Err("Claude document exceeds 10 MiB".into());
+    }
+    let (header, data) = file_data
+        .strip_prefix("data:")
+        .and_then(|value| value.split_once(','))
+        .ok_or("Claude documents require a base64 data URL")?;
+    let media_type = header
+        .strip_suffix(";base64")
+        .ok_or("Claude document data URL must use base64")?;
+    let bytes = STANDARD
+        .decode(data)
+        .map_err(|_| "invalid Claude document base64")?;
+    if bytes.is_empty() || bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err("Claude document must contain 1 byte through 10 MiB".into());
+    }
+    let source = match media_type {
+        "application/pdf" if bytes.starts_with(b"%PDF-") => {
+            json!({"type":"base64","media_type":"application/pdf","data":data})
+        }
+        "application/pdf" => {
+            return Err("Claude document media type does not match its bytes".into());
+        }
+        "text/plain" => {
+            let text =
+                String::from_utf8(bytes).map_err(|_| "Claude text document must be UTF-8")?;
+            json!({"type":"text","media_type":"text/plain","data":text})
+        }
+        _ => return Err("Claude documents support application/pdf and text/plain".into()),
+    };
+    Ok(json!({"type":"document","source":source}))
+}
+
 fn output_reply(
     output: nanocodex::claude_tools::ToolOutput,
 ) -> std::result::Result<ClaudeToolReply, String> {
@@ -971,6 +1010,7 @@ fn output_reply(
                         };
                         json!({"type":"image","source":source})
                     }
+                    ToolResultBlock::Document { file_data } => document_block(&file_data)?,
                     ToolResultBlock::UnsupportedMedia { media_type } => {
                         return Err(format!(
                             "host returned media unsupported by the Claude adapter: {media_type}"
