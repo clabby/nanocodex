@@ -87,11 +87,18 @@ export class FixtureSandbox extends DurableObject {
   async destroy() {}
 }
 const codeCall = (name, callId, args) => ({type:'custom_tool_call',name:'exec',call_id:callId,input:'text(await tools.'+name+'('+JSON.stringify(args)+'));'});
+export class FixturePrewarm extends WorkerEntrypoint {
+  async prewarm(input) {
+    await this.env.MODEL.getByName('startup').fetch('https://fixture.internal/prewarm?owner='+input.owner+'&region='+input.region);
+    return { outcome: 'unavailable' };
+  }
+}
 export class FixtureModel extends DurableObject {
   originInventoryReleased=false; releaseOriginInventory; selectedReleased=false; releaseSelected;
   voiceHoldSent=false; voiceEnvironmentSent=false; voiceNewEnvironmentSent=false; originEnvironmentSent=false; walletEnvironmentSent=false; releaseVoice;
   holdPublication=true; releaseRegistration;
   walletEnabled=false; releaseWallet; holdVault=true; releaseVault; vaultReady=false; holdSetup=true; releaseSetup;
+  prewarmReleased=false; prewarmWaiters=[];
   events=[]; setupStarted=false; catalogStarted=false; catalogReleased=false; setupFinished=false; published=false; publicationAttempts=0; holdCatalog=true; catalogGate; release; releasePublication;
   record(event,extra={}) { const row={type:'fixture.startup',event,at:Date.now(),...extra};this.events.push(row);console.info(row); }
   async fetch(request) {
@@ -101,6 +108,8 @@ export class FixtureModel extends DurableObject {
     if(url.pathname==='/hold-origin-inventory') {this.originInventoryReleased=false;return new Response(null,{status:204});}
     if(url.pathname==='/origin-inventory') { if(!this.originInventoryReleased) await new Promise(resolve=>{this.releaseOriginInventory=resolve;}); return new Response(null,{status:204}); }
     if(url.pathname==='/release-origin-inventory') {this.originInventoryReleased=true;this.releaseOriginInventory?.();return new Response(null,{status:204});}
+    if(url.pathname==='/prewarm') {this.record('credential.prewarm',{owner:url.searchParams.get('owner'),region:url.searchParams.get('region')});if(!this.prewarmReleased) await new Promise(resolve=>this.prewarmWaiters.push(resolve));return new Response(null,{status:204});}
+    if(url.pathname==='/release-prewarm') {this.prewarmReleased=true;for(const resolve of this.prewarmWaiters)resolve();return new Response(null,{status:204});}
     if(url.pathname==='/trace') return Response.json(this.events);
     if(url.pathname==='/release-voice') { this.releaseVoice?.();return new Response(null,{status:204}); }
     if(url.pathname==='/key-lookup') { this.record('key.lookup');return new Response(null,{status:204}); }
@@ -200,11 +209,13 @@ export class FixtureModel extends DurableObject {
 }
 export default {async fetch(request,env,ctx) {
   const url=new URL(request.url);
+  if(url.pathname==='/__activation-probe') return Response.json(await env.NANOCODEX_SESSIONS.getByName('fresh-activation-probe').activationProbe());
   if(url.pathname==='/__origin-state') return env.NANOCODEX_SESSIONS.getByName(url.searchParams.get('agent')).fetch('https://session.internal/fixture-origin-state?turn='+url.searchParams.get('turn'));
   if(url.pathname==='/__fixture-hand') return env.NANOCODEX_ACCOUNT_TOOLS.getByName(url.searchParams.get('owner')).fetch(new Request('https://account-tools.internal/tool-host',request));
   if(env.EDGE) {
     if(request.headers.get('x-fixture-direct-run')==='required') env={...env,NANOCODEX_BACKEND:{fetch(){throw Error('managed Worker hop is held');}}};
-    return await routeManaged(request,env,url)??new Response(null,{status:404});
+    Object.defineProperty(request,'cf',{value:{colo:'SFO'}});
+    return await routeManaged(request,env,url,ctx)??new Response(null,{status:404});
   }
   if(url.pathname==='/__fixture') {
     const {user}=await request.json();await ensureAccount(env,user,true);
@@ -217,6 +228,7 @@ export default {async fetch(request,env,ctx) {
   if(url.pathname==='/__release-origin-inventory') return env.MODEL.getByName('startup').fetch('https://fixture.internal/release-origin-inventory');
   if(url.pathname==='/__release-publication') return env.MODEL.getByName('startup').fetch('https://fixture.internal/release-publication');
   if(url.pathname==='/__trace') return env.MODEL.getByName('startup').fetch('https://fixture.internal/trace');
+  if(url.pathname==='/__release-prewarm') return env.MODEL.getByName('startup').fetch('https://fixture.internal/release-prewarm');
   if(url.pathname==='/__release-voice') return env.MODEL.getByName('startup').fetch('https://fixture.internal/release-voice');
   if(url.pathname==='/__hold-vault' || url.pathname==='/__release-vault' || url.pathname==='/__release-setup' || url.pathname==='/__hold-catalog' || url.pathname==='/__release-catalog' || url.pathname==='/__allow-wallet') return env.MODEL.getByName('startup').fetch('https://fixture.internal/'+url.pathname.slice(3));
   return worker.fetch(request,env,ctx);
@@ -242,7 +254,7 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
   const common={modules,compatibilityDate:"2026-07-30",compatibilityFlags:["nodejs_compat","enable_request_signal"]};
   const mf=new Miniflare({port:0,handleRuntimeStdio(stdout,stderr){createInterface({input:stdout}).on("line",capture);createInterface({input:stderr}).on("line",capture);},
     durableObjectsPersist:join(output,"sqlite"),r2Persist:join(output,"r2"),workers:[
-      {...common,name:"edge",bindings:{EDGE:true},serviceBindings:{NANOCODEX_BACKEND:"managed"},
+      {...common,name:"edge",bindings:{EDGE:true},serviceBindings:{NANOCODEX_BACKEND:"managed",NANOCODEX_SESSION_CREDENTIAL_PREWARM:{name:"managed",entrypoint:"FixturePrewarm"}},
         durableObjects:{NANOCODEX_LIVE_API_KEYS:{className:"ApiKeyRecord",scriptName:"managed",useSQLite:true},
           NANOCODEX_LIVE_SESSIONS:{className:"OriginAgentSession",scriptName:"managed",useSQLite:true}}},
       {...common,name:"managed",bindings:{NANOCODEX_PERFORMANCE_TRACE:"true",MANAGED_AGENT_DIRECT_CREDENTIALS:"true",AGENT_IDLE_TIMEOUT_MS:"60000"},
@@ -255,6 +267,11 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
   try {
     const base=await mf.ready,backend=await mf.getWorker("managed");
     const fixture=async()=>{const response=await backend.fetch("https://fixture.internal/__fixture",{method:"POST",body:JSON.stringify({user:crypto.randomUUID()})});assert.equal(response.status,200);return response.json();};
+    const activationResponse=await backend.fetch("https://fixture.internal/__activation-probe");
+    assert.equal(activationResponse.status,200,"fresh activation probe works before schema admission");
+    const activation=await activationResponse.json();
+    assert.ok(activation.handler_entered_at_ms>=activation.constructor_entered_at_ms);
+    evidence.activation_probe=activation;
     const {token,user}=await fixture(),foreign=await fixture(),other=foreign.token;
     const handId="synthetic-origin-hand";
     const handTools=await createTools({tools:{}});
@@ -369,6 +386,9 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     };
     const ready=await waitMessage(message=>message.type==='ready'),liveTurn=crypto.randomUUID();
     assert.equal(upgradeStatus,101,'prepared live request upgrades while fresh discovery is held');
+    const warming=await (await backend.fetch('https://fixture.internal/__trace')).json();
+    assert.ok(warming.some(row=>row.event==='credential.prewarm' && row.region==='wnam'),'live admission starts prewarm while its reply is withheld');
+    await backend.fetch('https://fixture.internal/__release-prewarm');
     live.send(JSON.stringify({type:'prompt',id:liveTurn,input:'Reply STARTUP_OK'}));
     await waitMessage(message=>message.type==='turn_accepted' && message.id===liveTurn);
     // A fresh owner's discovery is withheld at the real service boundary.
@@ -603,22 +623,21 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     evidence={...evidence,settings_race:{accepted:raceSettings,patched:{thinking:"high",fast_mode:true},first_request:{reasoning:pinnedRequest.reasoning,service_tier:pinnedRequest.service_tier}}};
     assert.equal(pinnedRequest.reasoning?.effort,"low","public acceptance pins reasoning across bootstrap");
     assert.equal(Object.hasOwn(pinnedRequest,"service_tier"),false,"public acceptance pins fast-off and omits service_tier across bootstrap");
-    assert.deepEqual(pinnedRequest.input.at(-1),{type:"configuration_update",reasoning:{effort:"low"}},"first accepted turn retains its selected effort update");
-    assert.equal(pinnedRequest.input.at(-2).role,"user","initial config update follows the accepted user input");
-    evidence.settings_race.first_request.configuration_update=pinnedRequest.input.at(-1);
+    assert.equal(pinnedRequest.input.some(item=>item.type==="configuration_update"),false,"selected effort uses the request envelope");
+    assert.equal(pinnedRequest.input.at(-1).role,"user","accepted input remains the final prompt item");
     const next=await call(`/v1/agents/${racing.agent_id}/turns`,"POST",{id:crypto.randomUUID(),input:"Reply SETTINGS_UPDATED"},202,raceToken);
     await waitRace(next.turn_id);
     const nextTrace=await(await backend.fetch("https://fixture.internal/__trace")).json();
     const nextRequests=nextTrace.filter(row=>row.event==="provider.request").slice(raceTrace.filter(row=>row.event==="provider.request").length);
     const updatedRequest=nextRequests[0];
-    evidence.settings_race.next_request={reasoning:updatedRequest.reasoning,service_tier:updatedRequest.service_tier,configuration_update:updatedRequest.input.at(-1)};
+    evidence.settings_race.next_request={reasoning:updatedRequest.reasoning,service_tier:updatedRequest.service_tier,input:updatedRequest.input};
     for(const request of nextRequests) {
-      assert.equal(request.reasoning?.effort,"low","later turn and tool continuation retain request effort for caching");
+      assert.equal(request.reasoning?.effort,"high","later turn and tool continuation adopt the updated effort");
       assert.equal(request.service_tier,"priority","later turn adopts fast mode update");
     }
-    assert.deepEqual(updatedRequest.input.at(-1),{type:"configuration_update",reasoning:{effort:"high"}},"later selected effort is appended to prompt history");
-    assert.equal(updatedRequest.input.at(-2).role,"user","changed config update follows new user input");
-    assert.match(JSON.stringify(updatedRequest.input.at(-2)),/Reply SETTINGS_UPDATED/);
+    assert.equal(updatedRequest.input.some(item=>item.type==="configuration_update"),false,"updated effort uses the request envelope");
+    assert.equal(updatedRequest.input.at(-1).role,"user","settings changes do not append synthetic prompt items");
+    assert.match(JSON.stringify(updatedRequest.input.at(-1)),/Reply SETTINGS_UPDATED/);
     const providerCount=nextTrace.filter(row=>row.event==="provider.request").length;
     const replay=await call(`/v1/agents/${racing.agent_id}/turns`,"POST",{id:racing.turn_id,input:"Reply SETTINGS_PINNED"},200,raceToken);
     assert.equal(replay.turn_id,racing.turn_id);
@@ -687,8 +706,13 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     assert.equal(richer.status,503,await richer.text(),"richer recipes retain general admission");
     const revokedKey=await backend.fetch("https://fixture.internal/__revoke-key",{method:"POST",body:JSON.stringify({user:directOwner.user,id:directOwner.metadata.id})});
     assert.equal(await revokedKey.json(),true,"fixture revokes the real stored key through the account lifecycle");
+    const prewarmTrace=async()=>await (await backend.fetch('https://fixture.internal/__trace')).json();
+    const beforeRevoked=(await prewarmTrace()).filter(row=>row.event==='credential.prewarm');
+    assert.ok(beforeRevoked.some(row=>row.owner===directOwner.user && row.region==='wnam'),'HTTP run prewarms the authenticated owner in the trusted ingress region');
     const revoked=await directFetch();
     assert.equal(revoked.status,401,await revoked.text(),"direct admission checks live revocation on replay");
+    assert.equal((await prewarmTrace()).filter(row=>row.event==='credential.prewarm').length,beforeRevoked.length,'revoked admission never prewarms');
+    evidence.credential_prewarm=beforeRevoked;
     const afterDirect=await(await backend.fetch("https://fixture.internal/__trace")).json();
     assert.equal(afterDirect.filter(row=>row.event==="provider.request").length,directCount,"replay, conflict, invalid input and revocation start no new inference");
     evidence={...evidence,direct_run_without_managed_hop:true,direct_run_replay:true,direct_run_cross_route_identity:true,direct_run_live_revocation:true};

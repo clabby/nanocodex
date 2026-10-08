@@ -2,12 +2,16 @@ import { forwardManagedPreview, previewBridgeEnabled, type PreviewBridgeEnv } fr
 import { consumeRpcData } from "nanocodex/cloudflare/rpc";
 import { apiKeyDigest, apiKeyPrincipal } from "nanocodex/cloudflare/managed-auth";
 import { nativeLiveRequest, liveAgentSettings, liveAgentFailure, liveAgentRequest, newManagedAgentId, nativeRunRequest, nativeRunBody, runAgentRequest } from "nanocodex/cloudflare/managed-live";
-import { durablePlacementOptions, ingressColo, regionalApiKeyAuthorityName, regionalApiKeyAuthorityRegion } from "nanocodex/cloudflare/durable-placement";
+import { durablePlacementOptions, ingressColo, placementRegion, regionalApiKeyAuthorityName, regionalApiKeyAuthorityRegion } from "nanocodex/cloudflare/durable-placement";
 
 import { MANAGED_ACCESS_HEADER, MANAGED_ACCESS_TTL_MS, isHandViewerUpgrade, readManagedAccess, handRequestFailure, handBrokerRequest } from "nanocodex/cloudflare/managed-access";
 
 export type ManagedProxyEnv = PreviewBridgeEnv & {
   NANOCODEX_BACKEND?: Fetcher;
+  /** Private credential-only preparation; never sends a provider prompt. */
+  NANOCODEX_SESSION_CREDENTIAL_PREWARM?: {
+    prewarm(input: { owner: string; region: string }): Promise<unknown>;
+  };
   NANOCODEX_ACCESS_SECRET?: string;
   NANOCODEX_HAND_BROKER?: DurableObjectNamespace;
   NANOCODEX_LIVE_API_KEYS?: {
@@ -76,6 +80,7 @@ async function routeMeasuredManaged(
   request: Request,
   env: ManagedProxyEnv,
   url: URL,
+  context?: Pick<ExecutionContext, "waitUntil">,
 ): Promise<Response | undefined> {
   if (!isManagedRoutePath(url.pathname)) return undefined;
   if (/\bnci_/i.test(request.headers.get("authorization") ?? "")
@@ -118,7 +123,7 @@ async function routeMeasuredManaged(
       }
       // Undefined means ineligible/unconfigured before session creation. A failed
       // direct dispatch throws to the 503 boundary; never create a second agent.
-      response = await directLiveAgent(request, env) ?? await directAgentRun(request, env) ?? await env.NANOCODEX_BACKEND.fetch(request);
+      response = await directLiveAgent(request, env, context) ?? await directAgentRun(request, env, context) ?? await env.NANOCODEX_BACKEND.fetch(request);
     }
     if (url.pathname === "/v1/agent-runs" || /^\/v1\/agents(?:\/(?:live|[0-9a-f-]{36}(?:\/(?:routing|settings|done|prepare|ws|events(?:\/history)?|turns(?:\/[A-Za-z0-9_.:-]{1,128}\/cancel)?))?))?$/.test(url.pathname)) {
       // Match the managed receipt without reading a body or changing upgraded
@@ -181,8 +186,18 @@ async function liveKeyPrincipal(env: ManagedProxyEnv, digest: string, colo: stri
   return apiKeyPrincipal(consumeRpcData(await Reflect.apply(resolve, key, [])), digest, key.id?.toString());
 }
 
+/** Authenticated optimization only. Failure never changes admission or retries it. */
+function prewarmCredentials(env: ManagedProxyEnv, context: Pick<ExecutionContext, "waitUntil"> | undefined,
+  owner: string, colo: string | null): void {
+  const region = placementRegion(colo), binding = env.NANOCODEX_SESSION_CREDENTIAL_PREWARM;
+  if (!region || !binding || !context) return;
+  try {
+    context.waitUntil(binding.prewarm({ owner, region }).then(() => undefined, () => undefined));
+  } catch { /* Optional preparation must not reject a valid request. */ }
+}
+
 /** API-key-only entrypoint; authority still comes from the existing live key DO. */
-async function directLiveAgent(request: Request, env: ManagedProxyEnv): Promise<Response | undefined> {
+async function directLiveAgent(request: Request, env: ManagedProxyEnv, context?: Pick<ExecutionContext, "waitUntil">): Promise<Response | undefined> {
   if (!env.NANOCODEX_LIVE_API_KEYS || !env.NANOCODEX_LIVE_SESSIONS || !nativeLiveRequest(request)) return;
   const settings = liveAgentSettings(request);
   if (settings instanceof Response) return settings;
@@ -202,6 +217,7 @@ async function directLiveAgent(request: Request, env: ManagedProxyEnv): Promise<
   let response: Response;
   if (failure) response = failure;
   else {
+    prewarmCredentials(env, context, principal!.userId, colo);
     const agentId = newManagedAgentId();
     const internal = liveAgentRequest(request, principal!, settings, agentId, colo);
     let status: number | undefined;
@@ -230,7 +246,7 @@ async function directLiveAgent(request: Request, env: ManagedProxyEnv): Promise<
 }
 
 /** Reuse the live key authority and Session boundary without an extra Worker hop. */
-async function directAgentRun(request: Request, env: ManagedProxyEnv): Promise<Response | undefined> {
+async function directAgentRun(request: Request, env: ManagedProxyEnv, context?: Pick<ExecutionContext, "waitUntil">): Promise<Response | undefined> {
   if (!env.NANOCODEX_LIVE_API_KEYS || !env.NANOCODEX_LIVE_SESSIONS || !nativeRunRequest(request)) return;
   const run = await nativeRunBody(request);
   if (!run) return;
@@ -244,6 +260,7 @@ async function directAgentRun(request: Request, env: ManagedProxyEnv): Promise<R
   const authFinishedAt = Date.now();
   const failure = liveAgentFailure(request, principal);
   if (failure) return failure;
+  prewarmCredentials(env, context, principal!.userId, colo);
   const internal = await runAgentRequest(request, principal!, run, colo);
   const dispatchAt = Date.now();
   const response = await env.NANOCODEX_LIVE_SESSIONS.getByName(internal.agentId, durablePlacementOptions(colo)).fetch(internal.request);

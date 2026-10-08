@@ -3964,7 +3964,7 @@ const LazyWorkspaceOwner = withWorkspace(WorkspaceOwner, (self) => ({
 export class DurableAgentSession extends DurableComputerObject {
   #handPathsValue?: HandPaths;
   get #handPaths(): HandPaths { return this.#handPathsValue ??= new HandPaths(this.ctx.storage); }
-  #processSessions: NamespaceProcessSessions;
+  #processSessions!: NamespaceProcessSessions;
   #workspaceHolder?: InstanceType<typeof LazyWorkspaceOwner>;
 
   async #workspace() {
@@ -3974,13 +3974,17 @@ export class DurableAgentSession extends DurableComputerObject {
 
   /** Internal RPC after allocation authentication; labels never select a machine. */
   vmHostDisplayName(ownerId: string, machineId: string): string | undefined {
+    this.#initializeStorage();
     const session = this.#session();
     if (!session || session.owner_id !== ownerId || this.#deleting || this.#deleted) return;
     const mount = this.#managedMounts().find(mount => vmHostMountAllocation(mount)?.machine_id === machineId);
     return mount ? managedMountDisplayName(mount) : undefined;
   }
-  #operations: SessionOperations;
-  #connectInputs: ConnectInputs;
+  #operations!: SessionOperations;
+  #connectInputsValue?: ConnectInputs;
+  get #connectInputs(): ConnectInputs {
+    return this.#connectInputsValue ??= new ConnectInputs(this.ctx.storage);
+  }
   #brainStorage?: R2Bucket;
   #agent?: CloudflareAgent.Agent;
   #subagentBindings = new ManagedSubagentBindings();
@@ -3998,13 +4002,13 @@ export class DurableAgentSession extends DurableComputerObject {
   }
   #presentation?: AgentPresentationWriter;
   #events?: EventWatcher;
-  readonly #eventLog: DurableEventLog<StreamMessage>;
-  readonly #eventArchive: ManagedEventArchive<StreamMessage>;
+  #eventLog!: DurableEventLog<StreamMessage>;
+  #eventArchive!: ManagedEventArchive<StreamMessage>;
   #eventArchiveTask?: Promise<ManagedEventSealResult>;
-  readonly #archiveMaintenance: ArchiveMaintenance;
-  readonly #turnArchive: ManagedTurnArchive;
+  #archiveMaintenance!: ArchiveMaintenance;
+  #turnArchive!: ManagedTurnArchive;
   #turnArchiveTask?: Promise<ManagedTurnSealResult>;
-  readonly #realtimeArchive: ManagedRealtimeArchive;
+  #realtimeArchive!: ManagedRealtimeArchive;
   #realtimeArchiveTask?: Promise<ManagedRealtimeSealResult>;
   #portabilityArchiveValue?: ManagedPortabilityArchive;
   get #portabilityArchive(): ManagedPortabilityArchive {
@@ -4025,8 +4029,8 @@ export class DurableAgentSession extends DurableComputerObject {
   #preparationTask?: Promise<void>;
   #preparationExpiresAt = 0;
   readonly #cancellationTasks = new Map<string, Promise<void>>();
-  readonly #hostedTools: HostedToolsBroker;
-  readonly #diagnostics: DiagnosticJournal;
+  #hostedTools!: HostedToolsBroker;
+  #diagnostics!: DiagnosticJournal;
   #accountHostedTools?: AccountHostedToolsProvider;
   readonly #fileReadAuthorizations = new Map<string, TurnAuthorization>();
   readonly #pendingDeviceToolCalls = new Map<string, PendingDeviceToolCall>();
@@ -4035,11 +4039,11 @@ export class DurableAgentSession extends DurableComputerObject {
   readonly #inFlight = new Set<Promise<unknown>>();
   #realtimeEventBuffer?: AgentEvent[];
   #realtimeRouteTail: Promise<void> = Promise.resolve();
-  readonly #cronTriggers: CronTriggers;
-  readonly #goals: Goals;
-  readonly #goalRuntime: GoalRuntime;
+  #cronTriggers!: CronTriggers;
+  #goals!: Goals;
+  #goalRuntime!: GoalRuntime;
   #cronPresencePublished?: boolean;
-  readonly #startupContext: ManagedStartupContext;
+  #startupContext!: ManagedStartupContext;
   readonly #personalization = new PreparedPersonalizationCache();
   #settingsMutationTail: Promise<void> = Promise.resolve();
   // Request-scoped inference authority for idle manual compaction. Never
@@ -4069,8 +4073,8 @@ export class DurableAgentSession extends DurableComputerObject {
   #deletionTask?: Promise<void>;
   #deletionGeneration = 0;
   #runtimeOwnershipGeneration = 0;
-  readonly #recoverySafety: ManagedRecoverySafety;
-  readonly #codeEffectJournal: ReturnType<typeof createManagedCodeEffectJournal>;
+  #recoverySafety!: ManagedRecoverySafety;
+  #codeEffectJournal!: ReturnType<typeof createManagedCodeEffectJournal>;
   #commandReceiptsValue?: CommandReceipts;
   get #commandReceipts(): CommandReceipts { return this.#commandReceiptsValue ??= new CommandReceipts(this.ctx.storage); }
   #shareLinksValue?: ThreadShareLinks;
@@ -4091,7 +4095,21 @@ export class DurableAgentSession extends DurableComputerObject {
     super(ctx, env);
     this.#constructorEnteredAtMs = enteredAt;
     this.#constructorBaseMs = roundMilliseconds(performance.now() - constructorStartedAt);
-    ctx = this.ctx;
+    // A genuinely fresh object has no lifecycle fences to restore. Keep its
+    // constructor read-only so validated discovery can leave before first writes.
+    // Existing objects must restore recovery and deletion fences immediately.
+    if (ctx.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_state'").toArray().length > 0) {
+      this.#initializeStorage();
+    }
+    this.#constructorReadyAtMs = Date.now();
+    this.#constructorMs = roundMilliseconds(performance.now() - constructorStartedAt);
+  }
+
+  #storageInitialized = false;
+  #initializeStorage(): void {
+    if (this.#storageInitialized) return;
+    const ctx = this.ctx;
+    const constructorStartedAt = performance.now();
     this.#diagnostics = new DiagnosticJournal(ctx.storage, "managed");
     this.#recoverySafety = new ManagedRecoverySafety(ctx.storage);
     initializeTurnInputs(ctx.storage, "managed_history_projection_chunks");
@@ -4269,8 +4287,6 @@ export class DurableAgentSession extends DurableComputerObject {
     initializeManagedAgentSettingsSchema(this.ctx.storage);
     initializeVmHostScopeSchema(this.ctx.storage);
     this.#operations = new SessionOperations(this.ctx.storage);
-    new OutputCheckpoints(this.ctx.storage);
-    this.#connectInputs = new ConnectInputs(this.ctx.storage);
     discardObsoleteManagedSubagents(this.ctx.storage);
     // A pending realtime mutation belonged to the previous in-memory owner.
     // Its external outcome is unknown, so cold construction must not replay it.
@@ -4322,8 +4338,6 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
     const retainedSession = this.#session();
     this.#streamError = retainedSession?.stream_error ?? undefined;
-    const constructorSyncMs = roundMilliseconds(performance.now() - constructorStartedAt);
-    const restoreStartedAt = performance.now();
     performanceSyncScope(this.ctx.id.toString(), "session.constructor.restore", () => {
       // SQLite KV reads restore lifecycle fences before the constructor returns.
       const retained = this.ctx.storage.kv;
@@ -4347,16 +4361,10 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#resumeClientReplays();
       }
     });
-    this.#constructorReadyAtMs = Date.now();
-    this.#constructorMs = roundMilliseconds(performance.now() - constructorStartedAt);
-    if (!retainedSession || this.#constructorMs >= 100) {
-      console.info({ type: "managed.session.constructor", fresh: !retainedSession,
-        constructor_ms: this.#constructorMs,
-        constructor_base_ms: this.#constructorBaseMs,
-        constructor_sync_ms: constructorSyncMs,
-        constructor_restore_read_ms: this.#constructorRestoreReadMs,
-        constructor_sql_ms: this.#constructorSqlMs });
-    }
+    this.#storageInitialized = true;
+    console.info({ type: "managed.session.storage_initialized", fresh: !retainedSession,
+      initialization_ms: roundMilliseconds(performance.now() - constructorStartedAt),
+      schema_ms: this.#constructorSqlMs });
   }
 
   /** No user state: compare first activation of a named and a unique ID. */
@@ -4365,7 +4373,7 @@ export class DurableAgentSession extends DurableComputerObject {
     constructor_ms: number; constructor_base_ms: number; handler_entered_at_ms: number;
   }>> {
     const handlerEnteredAt = Date.now();
-    if (this.#session() || this.#credentialBinding || this.#initializationOwnership())
+    if (this.#storageInitialized && (this.#session() || this.#credentialBinding || this.#initializationOwnership()))
       throw new Error("activation_probe_not_empty");
     const phases = {
       constructor_entered_at_ms: this.#constructorEnteredAtMs,
@@ -4381,6 +4389,7 @@ export class DurableAgentSession extends DurableComputerObject {
   /** Private RPC: live ownership without serializing a streamed HTTP body. */
   resolveCredentialSubject(assertions: Record<string, string>, traceId?: string):
     { subject: string; strategy: "session_v1" | "directory_v1"; chatgpt_account_id?: string } | undefined {
+    this.#initializeStorage();
     return performanceSyncScope(traceId && /^[0-9a-f-]{36}$/.test(traceId) ? traceId : this.ctx.id.toString(), "voice.ownership", () => {
     const asserted = forwardedPrincipal(new Headers(assertions));
     const session = this.#session();
@@ -4415,6 +4424,7 @@ export class DurableAgentSession extends DurableComputerObject {
   /** Private delivery RPC. The persisted source binds agent, owner and connection;
    * callbacks cannot choose any of those authorities. Resolved events use durable idle-only admission. */
   async calendarPushReconcile(id: string): Promise<{ enabled: boolean; complete: boolean; nextAt?: number }> {
+    this.#initializeStorage();
     return this.#calendarPushSerial(() => this.#reconcileCalendarPush(id));
   }
   async #reconcileCalendarPush(id: string): Promise<{ enabled: boolean; complete: boolean; nextAt?: number }> {
@@ -4475,6 +4485,7 @@ export class DurableAgentSession extends DurableComputerObject {
 
   /** Account-bound Gmail processing. Receipts never create a conversation turn. */
   async gmailPushWake(value: unknown): Promise<GmailPushWakeResult> {
+    this.#initializeStorage();
     const wake = parseGmailPushWake(value);
     const result = this.#gmailPushQueue.then(() => this.#processGmailPush(wake));
     this.#gmailPushQueue = result.catch(() => {});
@@ -4578,6 +4589,7 @@ export class DurableAgentSession extends DurableComputerObject {
 
   /** Called only by the private EmailAgentBackend binding, never by fetch routing. */
   async resumeEmail(value: unknown): Promise<EmailResumeResult> {
+    this.#initializeStorage();
     const input = parseEmailResume(value);
     const session = this.#session();
     if (!session || this.#deleting || this.#deleted || session.runtime_profile !== "managed"
@@ -4615,6 +4627,7 @@ export class DurableAgentSession extends DurableComputerObject {
   /** Binding-only read surface. Operator identity comes from the guarded Worker,
    * never an owner assertion supplied to the ordinary session routes. */
   async inspectForAdmin(operatorId: string, raw: AdminThreadInput): Promise<{ status: number; body: string }> {
+    this.#initializeStorage();
     const reply = (status: number, body: unknown) => ({ status, body: JSON.stringify(body) });
     if (!this.env.NANOCODEX_ADMIN_USER_ID || operatorId !== this.env.NANOCODEX_ADMIN_USER_ID)
       return reply(403, { error: "forbidden" });
@@ -4676,6 +4689,10 @@ export class DurableAgentSession extends DurableComputerObject {
 
   async #measuredFetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/create-live") {
+      return this.#createLive(request, url);
+    }
+    this.#initializeStorage();
     if (url.pathname === "/personalization/invalidate" && request.method === "POST") {
       const session = this.#session();
       if (!session || this.#deleting || this.#deleted) return new Response(null, { status: 204 });
@@ -5084,6 +5101,9 @@ export class DurableAgentSession extends DurableComputerObject {
       }
     }
     if (request.method === "POST" && url.pathname === "/durability/export") {
+      // Feature schemas are normally absent on a plain text session.
+      new OutputCheckpoints(this.ctx.storage);
+      void this.#connectInputs;
       if (this.#settings().model.startsWith("claude-")) return json({ error: "claude_portability_unsupported" }, { status: 409 });
       if (this.#configuration().model_routing || this.#threadRoute() || ["@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"].includes(this.#settings().model)) {
         return json({ error: "routed_session_not_portable", message: "Thread-routed sessions are not yet portable." }, { status: 409 });
@@ -5812,6 +5832,7 @@ export class DurableAgentSession extends DurableComputerObject {
 
   /** Trusted container-proxy RPC; public HTTP routes never expose this method. */
   async brainFilesystem(request: Request, readOnly: boolean): Promise<Response> {
+    this.#initializeStorage();
     const session = this.#session();
     if (!session || this.#deleting || this.#deleted || this.#durabilityExported
       || this.#durabilityImportState === "pending") return new Response(null, { status: 409 });
@@ -5819,6 +5840,7 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    this.#initializeStorage();
     if (this.#durabilityExported || this.#durabilityImportState === "pending") {
       closeSocket(socket, 1008, "agent durability transfer fenced this connection");
       return;
@@ -5852,6 +5874,7 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   webSocketClose(socket: WebSocket, code: number, reason: string): void {
+    this.#initializeStorage();
     if (this.#hostedTools.owns(socket)) {
       this.#hostedTools.close(socket, reason || "peer closed");
     } else {
@@ -5862,6 +5885,7 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   webSocketError(socket: WebSocket): void {
+    this.#initializeStorage();
     if (this.#hostedTools.owns(socket)) {
       this.#hostedTools.close(socket, "WebSocket failed");
     } else {
@@ -5872,6 +5896,7 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async alarm(): Promise<void> {
+    this.#initializeStorage();
     if (this.#deleting) {
       try {
         await this.#deleteOwnedSession();
@@ -6435,7 +6460,7 @@ export class DurableAgentSession extends DurableComputerObject {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Expected WebSocket upgrade", { status: 426 });
     }
-    if (this.#deleting || this.#deleted || this.#sessionId() || this.#credentialBinding) {
+    if (this.#deleting || this.#deleted || (this.#storageInitialized && this.#sessionId()) || this.#credentialBinding) {
       return json({ error: "agent_initialized" }, { status: 409 });
     }
     const asserted = forwardedPrincipal(request.headers);
@@ -6484,6 +6509,7 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#accountCatalog.vault(this.env.NANOCODEX, asserted.ownerId, authorityKey),
       ]).then(() => {}));
     }
+    this.#initializeStorage();
     const credentialBinding: CredentialBindingOwnership = {
       cleanup_at: Date.now(),
       owner_id: asserted.ownerId,
@@ -9455,7 +9481,7 @@ export class DurableAgentSession extends DurableComputerObject {
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     ).toArray().map(({ name }) => name));
     this.ctx.storage.transactionSync(() => {
-      for (const table of ["managed_recovery_safety", "managed_recovery_progress", "managed_recovery_call_indices", "managed_code_effect_legacy_parents", "managed_code_effect_legacy_sessions", "managed_code_effect_migration", "managed_code_effect_runtime", "managed_code_effects", "managed_code_effect_receipt_chunks", "managed_configuration", "managed_environment_setup", "managed_webhook", "managed_webhook_deliveries", "managed_turn_usage", "managed_model_usage", "managed_artifacts", "managed_artifact_publications", "managed_output_checkpoints", "managed_output_checkpoint_chunks", "managed_turn_file_owners", "managed_connect_inputs"]) this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
+      for (const table of ["managed_recovery_safety", "managed_recovery_progress", "managed_recovery_call_indices", "managed_code_effect_legacy_parents", "managed_code_effect_legacy_sessions", "managed_code_effect_migration", "managed_code_effect_runtime", "managed_code_effects", "managed_code_effect_receipt_chunks", "managed_configuration", "managed_environment_setup", "managed_webhook", "managed_webhook_deliveries", "managed_turn_usage", "managed_model_usage", "managed_artifacts", "managed_artifact_publications", "managed_output_checkpoints", "managed_output_checkpoint_chunks", "managed_turn_file_owners", "managed_connect_inputs"]) if (initializedTables.has(table)) this.ctx.storage.sql.exec(`DELETE FROM ${table}`);
       this.ctx.storage.sql.exec("DROP TABLE IF EXISTS managed_fork_seed");
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_dispatch_chunks");
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_input_chunks");
