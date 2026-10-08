@@ -3999,6 +3999,12 @@ const LazyWorkspaceOwner = withWorkspace(WorkspaceOwner, (self) => ({
 export class DurableAgentSession extends DurableComputerObject {
   #handPathsValue?: HandPaths;
   get #handPaths(): HandPaths { return this.#handPathsValue ??= new HandPaths(this.ctx.storage); }
+  /** Follow the account's canonical roots; only its complete registry releases this agent's paths. */
+  #handRoots(machines: readonly Readonly<{ id: string; name: string }>[], reserved: readonly string[],
+    provider: AccountHostedToolsProvider | undefined = this.#accountHostedTools) {
+    return this.#handPaths.resolve(machines, reserved, { preferred: provider?.machineRoots(),
+      inheritedAliases: provider?.machineAliases(), registry: provider?.machineRegistry() });
+  }
   #processSessions!: NamespaceProcessSessions;
   #workspaceHolder?: InstanceType<typeof LazyWorkspaceOwner>;
 
@@ -5423,10 +5429,11 @@ export class DurableAgentSession extends DurableComputerObject {
           ? [`cf:${mount.provider_resource_id}`] : [vmHostMountAllocation(mount)?.machine_id].filter((id): id is string => id !== undefined)));
         const machines = discovered.filter(machine => !leased.has(machine.id)
           && discovered.filter(candidate => candidate.id === machine.id).length === 1);
-        const roots = this.#handPaths.assign(machines, mounts.map(mount => mount.root), provider.machineRoots());
+        const { roots, aliases } = this.#handRoots(machines, mounts.map(mount => mount.root), provider);
         const root = `/${path.split("/")[1]}`;
         const mount = mounts.find(mount => mount.root === root);
-        const machine = machines.find(machine => roots.get(machine.id) === root || machineMountRoot(machine.id) === root);
+        const machine = machines.find(machine => roots.get(machine.id) === root || machineMountRoot(machine.id) === root
+          || aliases.get(machine.id)?.includes(root));
         const context: ToolContext = { sessionId: downloadSessionId, callId: `download-${crypto.randomUUID()}`,
           parentCallId: "", model: "file-download", signal: request.signal };
         this.#fileReadAuthorizations.set(downloadSessionId, turnAuthorization);
@@ -10539,7 +10546,7 @@ export class DurableAgentSession extends DurableComputerObject {
       const authorization = this.#authorizationForToolContext(context);
       if (!this.#canUseExecutionNamespace(authorization)) return [];
       const userHands = this.#hasFullAccountAuthority(authorization) ? this.#userHandMachines(context) : [];
-      const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root), this.#accountHostedTools?.machineRoots());
+      const { roots, aliases } = this.#handRoots(userHands, this.#managedMounts().map(mount => mount.root));
       return [
         ...this.#availableManagedMounts(authorization).map((mount) => ({
           id: `sandbox:${mount.id}`,
@@ -10551,7 +10558,7 @@ export class DurableAgentSession extends DurableComputerObject {
         ...userHands.map((machine) => ({
             id: `user:${machine.id}`,
             root: roots.get(machine.id)!,
-            aliases: [machineMountRoot(machine.id)],
+            aliases: [machineMountRoot(machine.id), ...aliases.get(machine.id) ?? []],
             workspace: machine.workspace,
           })),
       ];
@@ -12326,7 +12333,7 @@ export class DurableAgentSession extends DurableComputerObject {
   ): readonly AccountMachine[] {
     if (!this.#canUseExecutionNamespace(authorization)) return [];
     const userHands = this.#hasFullAccountAuthority(authorization) ? this.#userHandMachines(context) : [];
-    const roots = this.#handPaths.assign(userHands, this.#managedMounts().map(mount => mount.root), this.#accountHostedTools?.machineRoots());
+    const { roots, aliases } = this.#handRoots(userHands, this.#managedMounts().map(mount => mount.root));
     return Object.freeze(projectHandProviders([
       ...this.#availableManagedMounts(authorization).map((mount) => {
         const hostMachine = mount.provider === "host" ? this.#hostMachineForMount(mount) : undefined;
@@ -12351,7 +12358,7 @@ export class DurableAgentSession extends DurableComputerObject {
             kind: "user" as const,
             online: this.#accountHostedTools?.machineOnline(machine.id, context) === true,
             mount,
-            aliases: [machineMountRoot(machine.id)],
+            aliases: [machineMountRoot(machine.id), ...aliases.get(machine.id) ?? []],
             workspace: mount,
             capabilities: machine.capabilities,
             ...(machine.resources === undefined ? {} : { resources: machine.resources }),

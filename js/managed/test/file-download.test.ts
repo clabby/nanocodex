@@ -44,9 +44,11 @@ it("authenticates file reads and streams the exact brain bytes from the owning c
   await runInDurableObject(sessions.getByName(id), async (_session, ctx) => {
     ctx.storage.sql.exec("INSERT INTO managed_hand_paths(machine_id, root) VALUES (?, ?)", "offline-box", "/offline-box");
   });
-  const offline = await call(principal, "/offline-box/output.zip");
-  expect(offline.status).toBe(503);
-  expect(await offline.json()).toMatchObject({ error: "hand_unavailable" });
+  // The account registry no longer knows this identity, so its path is released;
+  // offline registered Hands stay mapped (hand-paths-journey).
+  const released = await call(principal, "/offline-box/output.zip");
+  expect(released.status).toBe(404);
+  expect(await released.json()).toMatchObject({ error: "file_path_unmapped" });
 });
 
 it("does not permit ambiguous or traversing download paths", () => {

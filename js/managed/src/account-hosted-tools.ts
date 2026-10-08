@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { CUA_JS_NAME, CUA_RESET_NAME } from "nanocodex-computer/contract";
-import { HandPaths } from "./hand-paths";
+import { HandPaths, type HandRegistry } from "./hand-paths";
 import { HandShareStore } from "./hand-share-store";
 import { HandRemoteBroker, REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { validRecordingCapability, screenTool, type ScreenTarget } from "./hand-remote-agent";
@@ -69,6 +69,13 @@ type AccountHostedToolsSnapshot = Readonly<{
   screens?: readonly ScreenTarget[];
   publications?: readonly HandPublication[];
   mount_roots?: Readonly<Record<string, string>>;
+  /** Historical roots of the same identities; never projected as Hands. */
+  mount_aliases?: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Every identity the owner's registry still holds, assigned a root or not.
+   * Present only on complete owner views; never merged from a selected-Hand lookup.
+   */
+  mount_registry?: Readonly<{ ids: readonly string[]; observed_at: number }>;
   inventory_unknown_ids?: readonly string[];
 }>;
 
@@ -129,6 +136,9 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   #ownerId: string | undefined;
   readonly #regional: boolean;
   readonly #directory: RegionalHandDirectory;
+  #handPathsValue?: HandPaths;
+  /** One instance per object keeps reclamation ordered against this instance's assignments. */
+  get #handPaths(): HandPaths { return this.#handPathsValue ??= new HandPaths(this.ctx.storage); }
   #publicationQueue: Promise<unknown> = Promise.resolve();
   #region: HandRelayRegion | undefined;
   /** Owner only: which location/generation may publish each machine's screens. */
@@ -340,8 +350,8 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   async listMachines(ownerId: string) {
     if (!isUserId(ownerId) || !this.#owns(ownerId)) return [];
     const snapshot = await this.#snapshot();
-    const roots = new HandPaths(this.ctx.storage).assign(snapshot.machines.map(entry => entry.machine));
-    return snapshot.machines.filter(entry => entry.online)
+    const roots = new Map(Object.entries(snapshot.mount_roots ?? {}));
+    return snapshot.machines.filter(entry => entry.online && roots.has(entry.machine.id))
       .map(({ machine }) => ({ id: machine.id, name: machine.name, capabilities: machine.capabilities, workspace: roots.get(machine.id)! }));
   }
 
@@ -444,6 +454,8 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       }
       this.#shares.revokeMachine(machineId);
       this.#directory.forget(machineId);
+      // Only this owner deletion releases the identity's current and historical paths.
+      this.#handPaths.forget(machineId);
       return removed;
     });
   }
@@ -873,7 +885,8 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     return this.#withRoots({ ...owned,
       tools: [...owned.tools, ...available.flatMap(entry => entry.shared_screen_tools)],
       screens: [...owned.screens ?? [], ...available.flatMap(entry => entry.shared_screens)],
-      machines: [...owned.machines, ...available.map(({ shared_screens, shared_screen_tools, ...entry }) => entry)] });
+      machines: [...owned.machines, ...available.map(({ shared_screens, shared_screen_tools, ...entry }) => entry)] },
+      machineId === undefined);
   }
 
   async #ownedSnapshot(machineId?: string): Promise<AccountHostedToolsSnapshot> {
@@ -892,7 +905,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     const directory = this.#directory.entries().filter(entry => machineId === undefined || entry.machine.id === machineId);
     const screenAuthority = [...this.#screens!.hosts()].filter(([machine, host]) => host.region !== "legacy" && host.generation
       && (machineId === undefined || machine === machineId));
-    if (!directory.length && !screenAuthority.length) return this.#withRoots(local);
+    if (!directory.length && !screenAuthority.length) return this.#withRoots(local, machineId === undefined);
     const regions = [...new Set([...directory.filter(entry => !entry.pending && entry.region !== "legacy").map(entry => entry.region as HandRelayRegion),
       ...screenAuthority.map(([, host]) => host.region as HandRelayRegion)])];
     const snapshots = await Promise.all(regions.map(async region => {
@@ -940,11 +953,46 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         }
       }
     }
-    return this.#withRoots({ tools, machines: [...machines.values()], screens, inventory_unknown_ids: inventoryUnknownIds });
+    return this.#withRoots({ tools, machines: [...machines.values()], screens, inventory_unknown_ids: inventoryUnknownIds },
+      machineId === undefined);
   }
 
-  #withRoots(snapshot: AccountHostedToolsSnapshot): AccountHostedToolsSnapshot {
-    return { ...snapshot, mount_roots: Object.fromEntries(new HandPaths(this.ctx.storage).assign(snapshot.machines.map(entry => entry.machine))) };
+  #withRoots(snapshot: AccountHostedToolsSnapshot, complete = false): AccountHostedToolsSnapshot {
+    // Read the registry synchronously with assignment: no owner deletion or
+    // publication can interleave between the two.
+    const registry = this.#regional ? undefined : this.#registry();
+    const machines = snapshot.machines.map(entry => entry.machine)
+      .filter(machine => registry === undefined || registry.ids.has(machine.id));
+    // A filtered view still knows the full ledger, but reclamation runs only on complete owner views.
+    const assigned = this.#handPaths.resolve(machines, [], { registry: complete ? registry : undefined });
+    const listed = (id: string) => registry === undefined ? machines.some(machine => machine.id === id) : registry.ids.has(id);
+    return { ...snapshot,
+      mount_roots: Object.fromEntries([...assigned.roots].filter(([id]) => listed(id))),
+      mount_aliases: Object.fromEntries([...assigned.aliases].filter(([id]) => listed(id))),
+      ...(complete && registry ? { mount_registry: { ids: [...registry.ids], observed_at: registry.observedAt } } : {}) };
+  }
+
+  /**
+   * Every identity the account still owns, independent of presence, relay
+   * reachability or duplicate-ID discovery fencing. Unreadable ledgers return
+   * no registry, so nothing is reclaimed.
+   */
+  #registry(): HandRegistry | undefined {
+    const ids = new Set<string>();
+    try {
+      for (const row of this.ctx.storage.sql.exec<{ machines_json: string }>(
+        "SELECT machines_json FROM hosted_tool_routes WHERE machines_json IS NOT NULL").toArray()) {
+        const machines = JSON.parse(row.machines_json) as unknown;
+        if (!Array.isArray(machines)) return undefined;
+        for (const machine of machines) {
+          if (!machine || typeof machine.id !== "string") return undefined;
+          ids.add(machine.id);
+        }
+      }
+    } catch { return undefined; }
+    for (const entry of this.#directory.entries()) ids.add(entry.machine.id);
+    for (const share of this.#shares.received()) ids.add(`shared:${share.id}`);
+    return { ids, observedAt: Date.now() };
   }
 
   async #admitPublication(candidate: Parameters<NonNullable<import("./hosted-tools-broker").HostedToolsBrokerOptions["beforeCatalogPublish"]>>[0]): Promise<() => boolean> {
@@ -1390,6 +1438,8 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   #candidates: readonly HostedToolsCatalogCandidate[] = [];
   #machines: readonly HostedMachine[] = [];
   #machineRoots: ReadonlyMap<string, string> = new Map();
+  #machineAliases: ReadonlyMap<string, readonly string[]> = new Map();
+  #machineRegistry: HandRegistry | undefined;
   #onlineMachineIds = new Set<string>();
   #tools = new Map<string, RoutedHostedTool>();
   #machineTools = new Map<string, HostedToolsCodeTool>();
@@ -1448,6 +1498,16 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
 
   machineRoots(): ReadonlyMap<string, string> {
     return this.#allowed() ? this.#machineRoots : new Map();
+  }
+
+  /** Account-retained historical roots of the same identities. */
+  machineAliases(): ReadonlyMap<string, readonly string[]> {
+    return this.#allowed() ? this.#machineAliases : new Map();
+  }
+
+  /** The account's complete identity registry, or undefined for partial, failed or restricted views. */
+  machineRegistry(): HandRegistry | undefined {
+    return this.#allowed() ? this.#machineRegistry : undefined;
   }
 
   machineOnline(machineId: string, context?: AuthorizationContext): boolean {
@@ -1559,12 +1619,15 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
       .map(target => screenTool(target).route_token));
     const screens = (snapshot.screens ?? []).filter(target => target.machine_id === machineId);
     const routes = new Set(screens.map(target => screenTool(target).route_token));
-    this.#publish({ ...this.#snapshot,
+    // A selected lookup cannot prove the earlier full registry is still current.
+    const { mount_registry: _stale, ...current } = this.#snapshot;
+    this.#publish({ ...current,
       screens: [...(this.#snapshot.screens ?? []).filter(target => target.machine_id !== machineId), ...screens],
       tools: [...this.#snapshot.tools.filter(tool => tool.provider !== "screens" || !removed.has(tool.route_token)),
         ...snapshot.tools.filter(tool => tool.provider === "screens" && routes.has(tool.route_token))],
       machines: [...this.#snapshot.machines.filter(entry => entry.machine.id !== machineId), ...snapshot.machines],
       mount_roots: { ...this.#snapshot.mount_roots, ...snapshot.mount_roots },
+      mount_aliases: { ...this.#snapshot.mount_aliases, ...snapshot.mount_aliases },
     });
   }
 
@@ -1619,6 +1682,11 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   #publish(snapshot: AccountHostedToolsSnapshot): void {
     this.#snapshot = snapshot;
     this.#machineRoots = new Map(Object.entries(snapshot.mount_roots ?? {}));
+    this.#machineAliases = new Map(Object.entries(snapshot.mount_aliases ?? {})
+      .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every(root => typeof root === "string")));
+    const registry = snapshot.mount_registry;
+    this.#machineRegistry = registry && Array.isArray(registry.ids) && registry.ids.every(id => typeof id === "string")
+      && Number.isFinite(registry.observed_at) ? { ids: new Set(registry.ids), observedAt: registry.observed_at } : undefined;
     const tools = new Map<string, RoutedHostedTool>();
     for (const entry of snapshot.tools) {
       const definition = entry.definition;
