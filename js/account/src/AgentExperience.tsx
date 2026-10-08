@@ -174,9 +174,11 @@ export const AgentExperience = memo(function AgentExperience({
     const refresh = refreshManagedList.current;
     refreshManagedList.current = false;
     if (agentId) {
+      // The route is authoritative: open the requested thread immediately
+      // instead of blanking the workspace until the list round-trip resolves.
+      if (selectionRef.current !== agentId) setRuntimeState(undefined);
       selectionRef.current = agentId;
-      setManagedConversationId((current) => current === agentId ? current : undefined);
-      setRuntimeState(undefined);
+      setManagedConversationId(agentId);
     }
     setManagedError(undefined);
     void loadManagedConversationSelection({

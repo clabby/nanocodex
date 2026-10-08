@@ -144,7 +144,13 @@ export function useModelSession({
   const requests = useRef(new GenerationRequestOwner<
     Awaited<ReturnType<typeof deploymentHealth.read>> | undefined
   >());
+  // Identical results keep their identity so consumers do not re-render or
+  // re-run effects on every background revalidation.
+  const published = useRef<{ key: string; status: ModelSessionStatus; source: CredentialSource; accountId?: string } | undefined>(undefined);
   const publish = useCallback((next: ModelSessionStatus, source: CredentialSource) => {
+    const key = JSON.stringify([next, source]);
+    if (published.current?.key === key) return;
+    published.current = { key, status: next, source, accountId: observedAccountId.current };
     setStatus(next);
     onStatusChange(next);
     onSourceChange(source);
@@ -171,6 +177,10 @@ export function useModelSession({
         return health;
       } catch (cause) {
         if (generation.current !== current) return;
+        // Stale-while-revalidate: a failed background refresh keeps the last
+        // good session instead of tearing down the open conversation.
+        if (fresh && published.current?.status.state === "ready"
+          && published.current.accountId === account.id) return;
         publish({
           state: "error",
           error: clientFailureMessage(cause, "Could not check the model connection. Try again."),
