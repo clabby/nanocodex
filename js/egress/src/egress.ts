@@ -2725,16 +2725,8 @@ async function hasRequestPayload(request: Request): Promise<boolean> {
 // the credential cache window; public catalog reads stay live and refresh it.
 const CLAUDE_MODELS_CACHE_HEADER = "x-nanocodex-catalog-cache";
 async function handleClaudeModels(env: EgressEnv, userId: string, allowCached: boolean): Promise<Response> {
-  // Isolate memory first, then the colo-shared Cache API (model IDs only, no
-  // secrets): egress requests fan out across many isolates.
-  const colo = caches_default();
-  const coloKey = `https://claude-models.cache.internal/${encodeURIComponent(userId)}`;
-  if (allowCached) {
-    const cached = cacheGet(caches(env).claudeModels, userId);
-    if (cached) return json({ models: cached, has_more: false }, 200);
-    const shared = await colo?.match(coloKey).catch(() => undefined);
-    if (shared?.ok) return json({ models: await shared.json<ClaudeModelRows>(), has_more: false }, 200);
-  }
+  const cached = allowCached ? cacheGet(caches(env).claudeModels, userId) : undefined;
+  if (cached) return json({ models: cached, has_more: false }, 200);
   try {
     let result = await resolvePlainClaudeCredential(env, userId);
     if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
@@ -2788,8 +2780,6 @@ async function handleClaudeModels(env: EgressEnv, userId: string, allowCached: b
           if (secrets.some(secret => secret && model.display_name.includes(secret))) model.display_name = model.id;
         }
         cachePut(caches(env).claudeModels, userId, rows, CREDENTIAL_CACHE_MS);
-        await colo?.put(coloKey, new Response(JSON.stringify(rows), { headers: {
-          "content-type": "application/json", "cache-control": `max-age=${CREDENTIAL_CACHE_MS / 1000}` } })).catch(() => undefined);
         return json({ models: rows, has_more: false }, 200);
       }
       const last = value.data[value.data.length - 1];
@@ -3405,15 +3395,11 @@ function cachePut<T>(cache: Map<string, { value: T; until: number }>, key: strin
   if (cache.size >= CREDENTIAL_CACHE_MAX) cache.delete(cache.keys().next().value!);
   cache.set(key, { value, until: Date.now() + ttl });
 }
-function caches_default(): Cache | undefined {
-  return (globalThis as { caches?: { default?: Cache } }).caches?.default;
-}
 /** Drop cached reads for a user after any credential mutation in this isolate. */
 export function forgetCachedCredentials(env: EgressEnv, userId: string): void {
   caches(env).model.delete(userId);
   caches(env).claude.delete(userId);
   caches(env).claudeModels.delete(userId);
-  void caches_default()?.delete(`https://claude-models.cache.internal/${encodeURIComponent(userId)}`).catch(() => undefined);
 }
 
 async function resolveUserCredential(
