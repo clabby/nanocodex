@@ -48,12 +48,38 @@ runs:
       if: steps.plan.outputs.any == 'true'
       with:
         node-version: 24
-        cache: pnpm
-        cache-dependency-path: pnpm-lock.yaml
-    - name: Install only selected application dependencies
+        # The pnpm store is only needed when installed modules miss.
+        cache: ''
+    # Restore installed dependencies for every deployable Worker in one entry.
+    # A hit skips pnpm install (~22s plus the store restore) entirely.
+    - name: Restore deployment dependencies
+      id: modules
       if: steps.plan.outputs.any == 'true'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          node_modules
+          js/*/node_modules
+          examples/*/node_modules
+        key: deploy-modules-v1-${{ runner.os }}-node24-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'patches/**', 'examples/astra-mpp-trial/package-lock.json', 'scripts/cloudflare/worker-inputs.mjs') }}
+    - name: Install every deployable Worker's dependencies
+      if: steps.plan.outputs.any == 'true' && steps.modules.outputs.cache-hit != 'true'
       shell: bash
-      run: node scripts/cloudflare/release-plan.mjs install --defer-astra
+      run: |
+        node scripts/cloudflare/release-plan.mjs install --all
+        npm ci --prefer-offline --no-audit --no-fund --prefix examples/astra-mpp-trial
+    - name: Save deployment dependencies
+      if: steps.plan.outputs.any == 'true' && steps.modules.outputs.cache-hit != 'true' && github.ref == 'refs/heads/master'
+      continue-on-error: true
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          node_modules
+          js/*/node_modules
+          examples/*/node_modules
+        key: ${{ steps.modules.outputs.cache-primary-key }}
+    - uses: ./.github/actions/turbo-cache
+      if: steps.plan.outputs.any == 'true'
     - name: Deploy selected Workers and record successful releases
       id: release
       if: steps.plan.outputs.any == 'true'
@@ -64,6 +90,10 @@ runs:
         ASTRA_MPP_SECRET: ${{ inputs.astra-mpp-secret }}
         TEMPO_API_KEY: ${{ inputs.tempo-api-key }}
       run: node scripts/cloudflare/release-workers.mjs
+    - uses: ./.github/actions/turbo-cache
+      if: ${{ !cancelled() && steps.plan.outputs.any == 'true' }}
+      with:
+        save: "true"
     - name: Retain verified WASM outputs
       if: ${{ !cancelled() && steps.release.outputs.wasm-built == 'true' && github.ref == 'refs/heads/master' }}
       uses: ./.github/actions/save-wasm-outputs

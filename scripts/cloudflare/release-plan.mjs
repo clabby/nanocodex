@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,21 +56,36 @@ export function installSelected(plan, run=execFileSync, {deferAstra=false}={}) {
   if(packages.length)run('pnpm',['install','--frozen-lockfile','--filter','nanocodex-monorepo',...packages.flatMap(name=>['--filter',`${name}...`])],{stdio:'inherit'});
   if(plan.selected.includes('astra')&&!deferAstra)run('npm',['ci','--prefix','examples/astra-mpp-trial'],{stdio:'inherit'});
 }
+// Explicit tiers keep JS-only SDK users away from nanocodex's WASM build,
+// while retaining compiled dependency ordering from a clean checkout.
+export const tiers = [
+  ['nanocodex-tools', 'nanocodex-connect-protocol', 'nanocodex'],
+  ['nanocodex-connect-ui', 'nanocodex-terminal'],
+  ['@nanocodex/connect-api', '@nanocodex/connect-dialog', '@nanocodex/connect-playground', 'nanocodex-web'],
+];
+// Deploys only bundle the leaf apps: their `build` scripts also typecheck
+// (tsc --noEmit) and lint docs, which PR CI owns. connect-api's build is only a
+// typecheck; Wrangler bundles its source directly.
+export const bundleOnly = {
+  '@nanocodex/connect-api': null,
+  '@nanocodex/connect-dialog': ['--filter', '@nanocodex/connect-dialog', 'exec', 'vite', 'build'],
+  '@nanocodex/connect-playground': ['--filter', '@nanocodex/connect-playground', 'exec', 'vite', 'build'],
+  'nanocodex-web': ['--filter', 'nanocodex-web', 'exec', 'vite', 'build'],
+};
 export function buildSelected(plan, run=execFileSync, completedTargets=new Set()) {
   const targets=[...new Set(plan.selected.flatMap(name=>workerSpecs[name].buildTargets ?? []))];
-  // Explicit tiers keep JS-only SDK users away from nanocodex's WASM build,
-  // while retaining compiled dependency ordering from a clean checkout.
-  const tiers = [
-    ['nanocodex-tools', 'nanocodex-connect-protocol', 'nanocodex'],
-    ['nanocodex-connect-ui', 'nanocodex-terminal'],
-    ['@nanocodex/connect-api', '@nanocodex/connect-dialog', '@nanocodex/connect-playground', 'nanocodex-web'],
-  ];
-  for (const tier of tiers) {
+  for (const [index, tier] of tiers.entries()) {
     const selected = tier.filter(name => targets.includes(name) && !completedTargets.has(name));
-    if (selected.length) {
-      run('pnpm', ['exec','turbo','run','build','--only',...selected.flatMap(name=>['--filter',name])], {stdio:'inherit'});
-      for (const name of selected) completedTargets.add(name);
+    if (!selected.length) continue;
+    if (index === tiers.length - 1) {
+      for (const name of selected) {
+        if (bundleOnly[name]) run('pnpm', bundleOnly[name], {stdio:'inherit'});
+        completedTargets.add(name);
+      }
+      continue;
     }
+    run('pnpm', ['exec','turbo','run','build','--only',...selected.flatMap(name=>['--filter',name])], {stdio:'inherit'});
+    for (const name of selected) completedTargets.add(name);
   }
   if(plan.selected.includes('managed')){
     run(process.execPath,['js/managed/scripts/prepare-code-evaluator.mjs'],{stdio:'inherit'});
@@ -79,6 +94,48 @@ export function buildSelected(plan, run=execFileSync, completedTargets=new Set()
     run(process.execPath,['js/managed/scripts/prepare-just-bash-lazy.mjs'],{stdio:'inherit'});
   }
   if(plan.selected.includes('astra'))run('npm',['run','build:client','--prefix','examples/astra-mpp-trial'],{stdio:'inherit'});
+}
+// Start every selected build at once, off the deployment critical path. Tiers
+// keep their order, leaf bundles run in parallel, and each Worker phase awaits
+// only its own targets, so early phases upload while later apps still build.
+export function startBuilds(plan, {cwd=process.cwd(), env=process.env, launch=spawn, completedTargets=new Set()}={}) {
+  const children=new Set();
+  const run=(command,args)=>new Promise((done,fail)=>{
+    const child=launch(command,args,{cwd,env,stdio:'inherit'});
+    children.add(child);
+    child.once('error',fail);
+    child.once('close',code=>{children.delete(child);code===0?done():fail(new Error(`Build step failed: ${command} ${args.slice(0,4).join(' ')}`));});
+  });
+  const targets=new Set(plan.selected.flatMap(name=>workerSpecs[name].buildTargets ?? []));
+  const ready=new Map();
+  let previous=Promise.resolve();
+  for(const [index,tier] of tiers.entries()){
+    const selected=tier.filter(name=>targets.has(name)&&!completedTargets.has(name));
+    if(!selected.length)continue;
+    const after=previous;
+    if(index===tiers.length-1){
+      for(const name of selected)ready.set(name,after.then(()=>bundleOnly[name]&&run('pnpm',bundleOnly[name])).then(()=>completedTargets.add(name)));
+      continue;
+    }
+    previous=after.then(()=>run('pnpm',['exec','turbo','run','build','--only',...selected.flatMap(name=>['--filter',name])]))
+      .then(()=>{for(const name of selected)completedTargets.add(name);});
+    for(const name of selected)ready.set(name,previous);
+  }
+  const tools=ready.get('nanocodex-tools')??Promise.resolve();
+  const extras={};
+  if(plan.selected.includes('managed'))extras.managed=tools
+    .then(()=>run(process.execPath,['js/managed/scripts/prepare-code-evaluator.mjs']))
+    .then(()=>run(process.execPath,['js/managed/scripts/prepare-just-bash-lazy.mjs']));
+  // The deploy action installs Astra's npm dependencies with the rest.
+  if(plan.selected.includes('astra'))extras.astra=tools
+    .then(()=>run('npm',['run','build:client','--prefix','examples/astra-mpp-trial']));
+  for(const promise of [...ready.values(),...Object.values(extras)])promise.catch(()=>{});
+  return {
+    async ready(names){
+      await Promise.all(names.flatMap(name=>[...(workerSpecs[name].buildTargets ?? []).map(target=>ready.get(target)).filter(Boolean),extras[name]].filter(Boolean)));
+    },
+    stop(){for(const child of children)child.kill();},
+  };
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const command=process.argv[2];
@@ -92,8 +149,10 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
     console.log(plan.selected.length?`Selected Workers: ${plan.selected.join(', ')}`:'No Worker changes since their last successful deployments');
   }else if(command==='install'){
     const args=process.argv.slice(3);
-    assert.ok(args.length===0||(args.length===1&&args[0]==='--defer-astra'));
-    installSelected(readPlan(),execFileSync,{deferAstra:args.includes('--defer-astra')});
+    assert.ok(args.length===0||(args.length===1&&['--defer-astra','--all'].includes(args[0])));
+    // --all installs every deployable Worker so one cached node_modules serves any selection.
+    if(args[0]==='--all')installSelected({selected:Object.keys(workerSpecs)},execFileSync,{deferAstra:true});
+    else installSelected(readPlan(),execFileSync,{deferAstra:args.includes('--defer-astra')});
   }
   else if(command==='build')buildSelected(readPlan());
   else throw new Error('Usage: release-plan.mjs plan|install|build');

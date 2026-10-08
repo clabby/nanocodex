@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { selectRelease, readPlan, planPath, installSelected, buildSelected, scopedRelease } from './release-plan.mjs';
+import { selectRelease, readPlan, planPath, installSelected, buildSelected, scopedRelease, startBuilds } from './release-plan.mjs';
 import { workerSpecs } from './worker-inputs.mjs';
 const fingerprints = Object.fromEntries(Object.keys(workerSpecs).map(name => [name, 'a'.repeat(64)]));
 
@@ -62,4 +62,37 @@ test('managed-only scope includes its private media dependency before managed', 
   assert.throws(() => scopedRelease(selected, 'media'));
   assert.deepEqual(commands(installSelected, ['media'])[0][1].slice(-2), ['--filter', 'nanocodex-media-service...']);
   assert.deepEqual(commands(buildSelected, ['media'])[0][1].slice(-2), ['--filter', 'nanocodex-tools']);
+});
+
+test('background builds let early phases deploy while leaf apps bundle, and surface failures', async () => {
+  const { EventEmitter } = await import('node:events');
+  const started = [], pending = [];
+  const launch = (command, args) => {
+    const child = new EventEmitter(); child.kill = () => {};
+    started.push(args.join(' ')); pending.push({ args: args.join(' '), child });
+    return child;
+  };
+  const finish = async (match, code = 0) => {
+    await new Promise(resolve => setImmediate(resolve));
+    const index = pending.findIndex(row => row.args.includes(match));
+    assert.ok(index >= 0, `no running step matching ${match}: ${started.join(' | ')}`);
+    pending.splice(index, 1)[0].child.emit('close', code);
+    await new Promise(resolve => setImmediate(resolve));
+  };
+  const completed = new Set();
+  const builds = startBuilds({ selected: ['managed', 'account'] }, { launch, env: {}, completedTargets: completed });
+  let managed = false; const managedReady = builds.ready(['managed']).then(() => { managed = true; });
+  const account = builds.ready(['account']); account.catch(() => {});
+  await finish('nanocodex-tools');
+  await finish('prepare-code-evaluator');
+  await finish('prepare-just-bash-lazy');
+  await managedReady;
+  assert.ok(managed, 'managed is ready before second-tier and leaf builds finish');
+  assert.ok(completed.has('nanocodex') && !completed.has('nanocodex-web'));
+  await finish('nanocodex-connect-ui');
+  // Leaf apps only bundle: no typecheck or turbo build script.
+  assert.ok(started.some(args => args === '--filter nanocodex-web exec vite build'));
+  await finish('nanocodex-web', 1);
+  await assert.rejects(account, /Build step failed/);
+  assert.ok(!completed.has('nanocodex-web'));
 });
