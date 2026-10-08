@@ -2,6 +2,7 @@ import type { AgentEvent, CodeEffectContext, CodeEffectJournal, CodeEffectReceip
 import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
 import { createHash } from "node:crypto";
 import { inputChunks } from "./managed-turn-input";
+import { createManagedCodeObservationJournal } from "./managed-code-observations";
 
 // Ordinary transient retries aren't owner loss. Abrupt loss and caught host
 // interruptions retain this lease until durable progress; projected IDs do not.
@@ -259,6 +260,7 @@ export function createManagedCodeEffectJournal(storage: DurableObjectStorage): C
     key, count, new TextEncoder().encode(encoded).byteLength, digest(encoded));
   };
   return {
+    observations: createManagedCodeObservationJournal(storage, generation, assertOwner),
     async beginCell(context) {
       const { cellKey, hash, operation, index, parentScope } = cellIdentity(context);
       const entries = storage.transactionSync(() => {

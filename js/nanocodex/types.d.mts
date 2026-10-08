@@ -574,6 +574,17 @@ export type CodeEffectReceipt = Readonly<{
  * A recovered intent without an outcome is unknown, never permission to execute again.
  * Keys must scope [sessionId, operationId ?? "", modelCallIndex ?? 0, parentCallId, callId]; validate identity/input and fence concurrent runtime generations. */
 export type CodeEffectJournal = Readonly<{
+  /** Optional host-owned public-cell ledger. register must persist the original
+   * operation/model/parent mapping before execution or any yielded ID escapes.
+   * record durably saves an observation before acknowledgement. recover is
+   * read-only and session-scoped: return terminal evidence or
+   * explicitly historical receipt evidence (nested_calls must be empty), never resume/reexecute guest source.
+   * Returned JSON uses the existing CodeModeExecution wire schema. */
+  observations?: Readonly<{
+    register(context: CodeEffectContext, cellId: string): Promise<void>;
+    record(sessionId: string, cellId: string, encodedObservation: string): Promise<void>;
+    recover(sessionId: string, cellId: string): Promise<string | null>;
+  }>;
   /** Optional durable cell store protocol; provide both methods together.
    * Context uses name="code-cell", callId=parentCallId, input=null. beginCell
    * pins and returns immutable starting entries before evaluation. commitStore
