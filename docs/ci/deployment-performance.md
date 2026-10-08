@@ -40,8 +40,8 @@ applicable build/check job; behavioral test steps are currently paused in the
 Apple CI (iPhone, iPad, native Mac and Swift app workflows) is removed. Build and
 test Apple targets locally through `scripts/xcodebuild-guard.sh`.
 
-CI runs on pull requests, the merge queue, a daily schedule and manual dispatch,
-not on pushes to master. Deployment never waits on CI. The production WASM build
+Master only deploys. CI runs on pull requests, the merge queue and manual
+dispatch, never on master pushes or a schedule. Deployment never waits on CI. The production WASM build
 starts in the background as soon as Rust is installed, and its sccache server is
 started outside Turbo so the GitHub Actions cache backend stays enabled.
 

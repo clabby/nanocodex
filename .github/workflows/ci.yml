@@ -3,15 +3,13 @@ name: CI
 permissions: {}
 
 on:
-  # No push-to-master run: PRs and the merge queue gate changes, and the daily
-  # schedule keeps master caches warm for PRs. Deploys never wait on CI.
+  # Master only deploys (cloudflare.yml). CI runs on PRs, the merge queue and
+  # manual dispatch; nothing runs on master pushes or a schedule.
   pull_request:
     # ready_for_review reruns a draft's fast lane with the heavy matrix.
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   workflow_dispatch:
-  schedule:
-    - cron: "23 5 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +22,7 @@ env:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  # Only superseded PR runs are cancelled; merge-queue and scheduled runs finish.
+  # Only superseded PR runs are cancelled; merge-queue runs finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
