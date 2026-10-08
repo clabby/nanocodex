@@ -100,6 +100,7 @@ import { createVaultIntakeTool } from "./vault-intake-tool";
 import { createVaultRequestTool, routeVaultRequest } from "./vault-request";
 import { routeServicesRequest } from "./services-http";
 import { createPhoneNumbersTool } from "./phone-numbers-tool";
+import { createOpenRouterVideoTool } from "./openrouter-video-tool";
 import { permissionRequestTool, type PermissionToolInput } from "./permission-request-tool";
 import { validateBrowserVaultTakeoverAction, type BrowserVaultTakeoverAction } from "./browser-vault-takeover";
 import {
@@ -10065,13 +10066,13 @@ export class DurableAgentSession extends DurableComputerObject {
       }));
   }
 
-  #authorizeVaultTool(context: ToolContext): void {
+  #authorizeVaultTool(context: ToolContext, denial = "Vault tools require full account tool authority"): void {
     context.signal.throwIfAborted();
     const authorization = this.#authorizationForToolContext(context);
     if (!this.#hasFullAccountAuthority(authorization)
       || !authorization.capabilities.includes("agents:write")
       || !authorization.capabilities.includes("tools:use")) {
-      throw new ManagedRequestError(403, "forbidden", "Vault tools require full account tool authority");
+      throw new ManagedRequestError(403, "forbidden", denial);
     }
   }
 
@@ -10967,6 +10968,17 @@ export class DurableAgentSession extends DurableComputerObject {
       ...(multiplayer ? [] : [createVaultIntakeTool(context => this.#authorizeVaultTool(context)),
         createVaultRequestTool(this.#toolEgress(), () => this.#credentialSubject(), context => this.#authorizeVaultTool(context)),
         createPhoneNumbersTool(this.env.NANOCODEX, session.owner_id, context => this.#authorizeVaultTool(context))]),
+      ...(multiplayer || !this.env.NANOCODEX_CRM || !this.env.OPENROUTER_API_KEY?.trim() ? [] : [createOpenRouterVideoTool({
+        apiKey: this.env.OPENROUTER_API_KEY.trim(), db: this.env.NANOCODEX_CRM, owner: session.owner_id,
+        authorize: context => this.#authorizeVaultTool(context, "OpenRouter video requires full account tool authority"),
+        writeBrainFile: async (path, body, length, contentType) => {
+          const key = sharedBrainObjectKey(session.session_id, path);
+          if (key === undefined) throw new Error("video path must be beneath /brain");
+          this.#assertDurabilityAdmissionActive();
+          const object = await this.#brainBucket().put(key, body, { httpMetadata: { contentType } });
+          if (!object || object.size !== length) throw new Error("video was not stored completely");
+        },
+      })]),
       ...(multiplayer ? [] : createProviderVaultTools(this.env.NANOCODEX, session.owner_id, context => this.#authorizeVaultTool(context))),
       ...(multiplayer ? [] : [permissionRequestTool((input, context) => this.#requestPermissions(input, context))]),
       ...emailTools({
