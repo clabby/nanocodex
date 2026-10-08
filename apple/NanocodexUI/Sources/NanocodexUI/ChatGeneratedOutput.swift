@@ -82,12 +82,12 @@ public struct ChatGeneratedOutput: Identifiable, Equatable, Hashable, Sendable {
                     work.append(contentsOf: array.reversed().map(SanitizeStep.value))
                 } else if let object = value as? [String: Any] {
                     let type = object["type"] as? String ?? ""
-                    let binary = ["image", "input_image", "audio", "input_audio", "video", "input_video"].contains(type)
-                        || object["mimeType"] != nil || object["mime_type"] != nil
+                    let binary = ["image", "input_image", "output_image", "audio", "input_audio", "output_audio", "video", "input_video", "output_video"].contains(type)
+                        || object["mimeType"] != nil || object["mime_type"] != nil || object["media_type"] != nil || type == "base64"
                     let keys = object.keys.sorted()
                     work.append(.object(keys))
                     for key in keys.reversed() {
-                        work.append(.value(key == "blob" || (key == "data" && binary)
+                        work.append(.value(key == "blob" || key == "file_data" || (key == "data" && binary)
                             ? "Embedded attachment" : object[key]!))
                     }
                 } else { values.append(value) }
@@ -146,18 +146,27 @@ public struct ChatGeneratedOutput: Identifiable, Equatable, Hashable, Sendable {
             // A read tool may return serialized history or an echoed request.
             // Those user attachments keep their original conversation ownership.
             if type == "turn_accepted" || object["role"] as? String == "user" { return }
-            let mime = (object["mimeType"] ?? object["mime_type"]) as? String
-            let title = (object["title"] as? String) ?? (object["name"] as? String) ?? ""
-            if ["input_text", "text", "output_text", "image", "input_image", "image_url", "audio", "input_audio", "output_audio", "video", "input_video", "resource_link", "file", "input_file", "output_file", "resource", "unsupported"].contains(type) { recognized += 1 }
+            let mime = (object["mimeType"] ?? object["mime_type"] ?? object["media_type"]) as? String
+            let title = (object["title"] as? String) ?? (object["name"] as? String) ?? (object["filename"] as? String) ?? ""
+            if ["input_text", "text", "output_text", "document", "image", "input_image", "output_image", "image_url", "audio", "input_audio", "output_audio", "video", "input_video", "output_video", "resource_link", "file", "input_file", "output_file", "resource", "unsupported"].contains(type) { recognized += 1 }
+            if ["image", "document"].contains(type), let source = object["source"] as? [String: Any] {
+                let sourceMime = source["media_type"] as? String
+                if type == "document", source["type"] as? String == "text", let text = source["data"] as? String {
+                    walkResource(["text": text, "mimeType": "text/plain", "title": title])
+                } else {
+                    emitAsset(source, kind: type == "image" ? .image : .file, mime: sourceMime, title: title)
+                }
+                return
+            }
             switch type {
             case "input_text", "text", "output_text":
                 if let text = object["text"] { work.append(.value(text, includeText: true)) }
                 return
-            case "image", "input_image", "image_url":
+            case "image", "input_image", "output_image", "image_url":
                 emitAsset(object, kind: .image, mime: mime ?? "image/png", title: title); return
             case "audio", "input_audio", "output_audio":
                 emitAsset(object, kind: .audio, mime: mime ?? audioMime(object["format"] as? String), title: title); return
-            case "video", "input_video":
+            case "video", "input_video", "output_video":
                 emitAsset(object, kind: .video, mime: mime ?? "video/mp4", title: title); return
             case "resource_link", "file", "input_file", "output_file":
                 emitAsset(object, kind: kind(for: mime), mime: mime, title: title); return
@@ -212,7 +221,7 @@ public struct ChatGeneratedOutput: Identifiable, Equatable, Hashable, Sendable {
                 if let blob = (object["data"] ?? object["blob"]) as? String, let mime {
                     emitSource(blob.hasPrefix("data:") ? blob : "data:\(mime);base64," + blob, kind: kind, mime: mime, title: title); return
                 }
-                for key in ["image_url", "audio_url", "video_url", "url", "uri", "file_url"] {
+                for key in ["image_url", "audio_url", "video_url", "url", "uri", "file_url", "file_data"] {
                     if let source = object[key] as? String { emitSource(source, kind: kind, mime: mime, title: title); return }
                     if let nested = object[key] as? [String: Any], let source = nested["url"] as? String {
                         emitSource(source, kind: kind, mime: mime, title: title); return

@@ -107,3 +107,25 @@ test("a typed poll result keeps generated media on the original command with pro
   assert.equal(JSON.parse(tool.output).exit_code, 7);
   assert.ok(tool.generatedOutput.some(item => item.kind === "image" && item.url === png));
 });
+
+test("Claude image and document tool results survive history replay without exposing binary diagnostics", () => {
+  const content = [
+    { type: "image", source: { type: "base64", media_type: "image/png", data: png.split(",")[1] } },
+    { type: "document", title: "brief.pdf", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" } },
+    { type: "document", title: "notes.txt", source: { type: "text", media_type: "text/plain", data: "Meeting notes" } },
+    { type: "input_file", filename: "extra.pdf", file_data: "data:application/pdf;base64,JVBERi0x" },
+    { type: "document", title: "remote.pdf", source: { type: "url", url: "https://example.test/remote.pdf" } },
+  ];
+  const event = { request_id: "synthetic-media", seq: 1, type: "tool.result", payload: {
+    call_id: "media", status: "completed", turn_id: "turn", result: { content },
+  } };
+  const state = applyAgentEvents(initialState(), [event]);
+  const output = state.entries[0].tool.generatedOutput;
+  assert.deepEqual(output.map(item => item.kind), ["image", "file", "text", "file", "file", "file"]);
+  assert.equal(output[1].name, "brief.pdf");
+  assert.equal(output[4].name, "extra.pdf");
+  assert.equal(output[5].url, "https://example.test/remote.pdf");
+  assert.doesNotMatch(state.entries[0].tool.output, /iVBOR|JVBERi0/);
+  assert.equal(applyAgentEvents(state, [event]).entries.length, 1);
+  console.log("Claude result history: image, PDF, plain text, input_file, remote PDF retained; diagnostics redact bytes; replay deduplicated");
+});

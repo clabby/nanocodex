@@ -374,7 +374,7 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
         return sse({type:'text',text:'CLAUDE_TOOL_DONE_CANONICAL_CHILD'},'end_turn',`message-${calls}`);
       }
       if (encodedHistory.includes('MULTIMODAL_PROOF')) {
-        mediaRequests.push({model:body.model,latest:body.messages.at(-1)});
+        mediaRequests.push({model:body.model,latest:body.messages.at(-1),messages:body.messages});
         // Stream real text deltas so the transcript identity check is not vacuous.
         const id=`message-${calls}`, events=[
           {type:'message_start',message:{id,role:'assistant',model:body.model,content:[],usage:{input_tokens:10,output_tokens:0}}},
@@ -526,7 +526,12 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
       const pdf='data:application/pdf;base64,'+Buffer.from('%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n').toString('base64');
       await call(`/v1/agents/${media}/turns`,'POST',{input:[{type:'file',file_data:'data:application/zip;base64,UEsDBA==',filename:'x.zip'}],id:'journey-media-invalid'},400);
-      await turn(media,[{type:'text',text:'MULTIMODAL_PROOF describe both'},{type:'image',image_url:png},{type:'file',file_data:pdf,filename:'proof.pdf'}],'journey-media');
+      const images = [png, 'data:image/jpeg;base64,'+'/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAaADAAQAAAABAAAAAQAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAQABAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQAAf/aAAwDAQACEQMRAD8A/Syiiiv5XP4rP//Z',
+        'data:image/gif;base64,'+'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
+        'data:image/webp;base64,'+'UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA'];
+      const notes = 'Résumé: plain text survives replay.';
+      await turn(media,[{type:'text',text:'MULTIMODAL_PROOF describe both'},...images.map(image_url=>({type:'image',image_url})),{type:'file',file_data:pdf,filename:'proof.pdf'},
+        {type:'file',file_data:'data:text/plain;base64,'+Buffer.from(notes).toString('base64'),filename:'notes.txt'}],'journey-media');
       const sent=mediaRequests.at(-1).latest.content;
       assert.equal(mediaRequests.at(-1).model,'claude-opus-4-6');
       assert.ok(sent.some(block=>block.type==='text'&&block.text.includes('MULTIMODAL_PROOF')),JSON.stringify(sent).slice(0,2000));
@@ -535,6 +540,29 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       const document=sent.find(block=>block.type==='document');
       assert.deepEqual(document?.source,{type:'base64',media_type:'application/pdf',data:pdf.split(',')[1]});
       assert.equal(document.title,'proof.pdf');
+      assert.deepEqual(sent.filter(block=>block.type==='image').map(block=>block.source.media_type), ['image/png','image/jpeg','image/gif','image/webp']);
+      assert.deepEqual(sent.find(block=>block.title==='notes.txt')?.source,{type:'text',media_type:'text/plain',data:notes});
+      await mf.dispose(); mf=new Miniflare(options);
+      await turn(media,'MULTIMODAL_PROOF recall all attached documents','journey-media-reopen');
+      const replay=mediaRequests.at(-1).messages.flatMap(message=>Array.isArray(message.content)?message.content:[]);
+      for(const mime of ['image/png','image/jpeg','image/gif','image/webp','application/pdf','text/plain']) {
+        assert.ok(replay.some(block=>block.source?.media_type===mime), `reopened history retains ${mime}`);
+      }
+      // Exercise the same multipart upload + descriptor sent by iOS/macOS.
+      const attachmentId='01234567-89ab-4def-8123-456789abcdef';
+      const original=Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7','base64');
+      const attachmentPath=`/v1/agents/${media}/attachments/${attachmentId}`;
+      const upload=await call(attachmentPath,'POST',{name:'animation.gif',media_type:'image/gif',size:original.length});
+      const put=await mf.dispatchFetch('https://nanocodex.example'+attachmentPath+'/parts/1',{method:'PUT',headers:{authorization:'Bearer '+token,'content-type':'application/octet-stream','content-length':String(original.length)},body:original});
+      assert.equal(put.status,200,await put.text());
+      await call(attachmentPath+'/complete','POST');
+      const descriptor='Attached original image file.\n[Image attachment]\n'+JSON.stringify({path:upload.path,media_type:'image/gif',preview_path:`/brain/attachments/${attachmentId}/preview.jpg`});
+      await turn(media,[{type:'text',text:'MULTIMODAL_PROOF original upload'},{type:'text',text:descriptor}],'journey-original');
+      assert.deepEqual(mediaRequests.at(-1).latest.content.find(block=>block.type==='image')?.source,{type:'base64',media_type:'image/gif',data:original.toString('base64')});
+      const missing=descriptor.replaceAll(attachmentId,'01234567-89ab-4def-8123-456789abcdee');
+      await turn(media,[{type:'text',text:'MULTIMODAL_PROOF missing upload'},{type:'text',text:missing}],'journey-missing');
+      assert.match(JSON.stringify(mediaRequests.at(-1).latest.content),/Image attachment unavailable to Claude/);
+      trace.push({claude_attachments:{native_formats:sent.filter(block=>block.source).map(block=>block.source.media_type),replayed:true,uploaded_original:'image/gif',missing:'explicit notice'}});
       // Streamed deltas and the final message share one response identity, so
       // transcript clients fold them into one row instead of rendering twice.
       const mediaHistory=await call(`/v1/agents/${media}/events/history?after=0&limit=256`);
@@ -542,7 +570,7 @@ test('Managed native Claude and mixed-family public delegation, account gates, c
       const finals=assistantEvents.filter(event=>event.type==='assistant.message');
       const deltas=assistantEvents.filter(event=>event.type==='assistant.delta');
       assert.ok(finals.length>=1&&deltas.length>=2,JSON.stringify(assistantEvents).slice(0,2000));
-      assert.equal(deltas.map(event=>event.payload.text).join(''),finals.at(-1).payload.text,'streamed text equals the final message');
+      for(const final of finals) assert.equal(deltas.filter(event=>event.payload.item_id===final.payload.item_id).map(event=>event.payload.text).join(''),final.payload.text,'streamed text equals the final message');
       for(const event of assistantEvents.filter(event=>event.type==='assistant.delta')) {
         assert.equal(typeof event.payload.item_id,'string','Claude deltas identify their provider message');
         assert.ok(finals.some(final=>final.payload.item_id===event.payload.item_id&&final.payload.model_call_index===event.payload.model_call_index),'each delta folds into its final message');

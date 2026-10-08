@@ -265,6 +265,15 @@ async fn host_bridge_waits_for_user_and_preserves_real_identity_and_failures() {
 // A real one-pixel PNG; no provider credentials or external URLs are used.
 const PIXEL: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMQjD0JAAG6ATiGpB8nAAAAAElFTkSuQmCC";
+fn encoded_image(format: image::ImageFormat) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(1, 1)
+        .write_to(&mut bytes, format)
+        .unwrap();
+    STANDARD.encode(bytes.into_inner())
+}
+
 struct MediaHost;
 impl ClaudeHost for MediaHost {
     async fn execute(
@@ -275,30 +284,37 @@ impl ClaudeHost for MediaHost {
         let HostRequest::TaskOutput(request) = request else {
             return Err("unavailable".into());
         };
-        use nanocodex_claude_tools::{ImageSource, ToolResultBlock};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
         let content = match request.task_id.as_str() {
-            "image-task" => vec![
-                ToolResultBlock::Text {
-                    text: "Rendered task output".into(),
-                },
-                ToolResultBlock::Image {
-                    source: ImageSource::Base64 {
-                        media_type: "image/png".into(),
-                        data: PIXEL.into(),
-                    },
-                },
-            ],
-            "audio-task" => vec![ToolResultBlock::UnsupportedMedia {
-                media_type: "audio/wav".into(),
-            }],
+            "image-task" => json!([
+                {"type":"text","text":"Rendered task output"},
+                {"type":"resource","resource":{"uri":"fixture:chart","mimeType":"image/png","blob":PIXEL}},
+                {"type":"image","mimeType":"image/jpeg","data":encoded_image(image::ImageFormat::Jpeg)},
+                {"type":"image","mimeType":"image/gif","data":encoded_image(image::ImageFormat::Gif)},
+                {"type":"image","mimeType":"image/webp","data":encoded_image(image::ImageFormat::WebP)},
+                {"type":"resource","resource":{"uri":"fixture:invoice","mimeType":"application/pdf","blob":STANDARD.encode(b"%PDF-1.7\nfixture\n%%EOF")}},
+                {"type":"resource","resource":{"uri":"fixture:notes","mimeType":"text/plain","blob":STANDARD.encode("Invoice notes")}}
+            ]),
+            "audio-task" => {
+                json!([{"type":"resource","resource":{"uri":"fixture:audio","mimeType":"audio/wav","blob":"UklGRg=="}}])
+            }
+            "video-task" => {
+                json!([{"type":"resource","resource":{"uri":"fixture:video","mimeType":"video/mp4","blob":"AAAAAGZ0eXA="}}])
+            }
+            "bad-image-task" => {
+                json!([{"type":"image","mimeType":"image/png","data":"%%%"}])
+            }
+            "bad-pdf-task" => {
+                json!([{"type":"resource","resource":{"uri":"fixture:bad","mimeType":"application/pdf","blob":PIXEL}}])
+            }
             _ => return Err("unknown task".into()),
         };
-        Ok(ToolOutput::content(content))
+        nanocodex_claude_tools::host::mcp_tool_output(json!({"content":content}))
     }
 }
 
 #[tokio::test]
-async fn host_image_is_claude_content_and_unsupported_audio_is_an_explicit_error() {
+async fn host_mcp_resources_reach_claude_and_history_with_explicit_media_errors() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let log = requests.clone();
@@ -309,6 +325,9 @@ async fn host_image_is_claude_content_and_unsupported_audio_is_an_explicit_error
             let (block, stop) = match index {
                 1 => (json!({"type":"tool_use","id":"media-image","name":"TaskOutput","input":{"task_id":"image-task","block":false}}), "tool_use"),
                 2 => (json!({"type":"tool_use","id":"media-audio","name":"TaskOutput","input":{"task_id":"audio-task","block":false}}), "tool_use"),
+                3 => (json!({"type":"tool_use","id":"media-bad-pdf","name":"TaskOutput","input":{"task_id":"bad-pdf-task","block":false}}), "tool_use"),
+                4 => (json!({"type":"tool_use","id":"media-video","name":"TaskOutput","input":{"task_id":"video-task","block":false}}), "tool_use"),
+                5 => (json!({"type":"tool_use","id":"media-bad-image","name":"TaskOutput","input":{"task_id":"bad-image-task","block":false}}), "tool_use"),
                 _ => (json!({"type":"text","text":"Media handled"}), "end_turn"),
             };
             ([("content-type", "text/event-stream")], stream(block, stop))
@@ -339,16 +358,47 @@ async fn host_image_is_claude_content_and_unsupported_audio_is_an_explicit_error
         "Media handled"
     );
     let log = requests.lock().unwrap();
-    assert_eq!(log.len(), 3);
+    assert_eq!(log.len(), 6);
     let image = result_for(&log[1], "media-image");
     assert_ne!(image["is_error"], true);
+    // Tool image preparation normalizes GIF to a static PNG before history.
+    let gif = &image["content"][3];
+    assert_eq!(gif["type"], "image");
+    assert_eq!(gif["source"]["media_type"], "image/png");
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let gif_bytes = STANDARD
+        .decode(gif["source"]["data"].as_str().unwrap())
+        .unwrap();
+    let decoded = image::load_from_memory(&gif_bytes).unwrap().to_rgba8();
+    assert_eq!(decoded.dimensions(), (1, 1));
+    assert_eq!(decoded.get_pixel(0, 0).0, [0, 0, 0, 255]);
     assert_eq!(
         image["content"],
         json!([
             {"type":"text","text":"Rendered task output"},
-            {"type":"image","source":{"type":"base64","media_type":"image/png","data":PIXEL}}
+            {"type":"image","source":{"type":"base64","media_type":"image/png","data":PIXEL}},
+            {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":encoded_image(image::ImageFormat::Jpeg)}},
+            gif,
+            {"type":"image","source":{"type":"base64","media_type":"image/webp","data":encoded_image(image::ImageFormat::WebP)}},
+            {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjcKZml4dHVyZQolJUVPRg=="}},
+            {"type":"document","source":{"type":"text","media_type":"text/plain","data":"Invoice notes"}}
         ])
     );
+    assert_eq!(
+        result_for(&log[3], "media-image"),
+        image,
+        "media survives later tool rounds byte-for-byte"
+    );
+    let bad_image = result_for(&log[5], "media-bad-image");
+    assert_eq!(bad_image["is_error"], true);
+    assert!(text_content(bad_image).contains("base64"));
+    let video = result_for(&log[4], "media-video");
+    assert_eq!(video["is_error"], true);
+    assert!(text_content(video).contains("unsupported"));
+    assert!(!text_content(video).contains("AAAAAGZ0eXA="));
+    let bad_pdf = result_for(&log[3], "media-bad-pdf");
+    assert_eq!(bad_pdf["is_error"], true);
+    assert!(text_content(bad_pdf).contains("does not match"));
     let unsupported = result_for(&log[2], "media-audio");
     assert_eq!(unsupported["is_error"], true);
     assert!(text_content(unsupported).contains("unsupported"));

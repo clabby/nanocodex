@@ -77,7 +77,7 @@ async fn server(
 }
 
 #[tokio::test]
-async fn ordered_images_survive_changed_then_deleted_local_file_and_sqlite_reopen() {
+async fn ordered_media_survives_changed_then_deleted_local_file_and_sqlite_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("pixel.png");
     let db = dir.path().join("media.sqlite");
@@ -102,6 +102,14 @@ async fn ordered_images_survive_changed_then_deleted_local_file_and_sqlite_reope
                 path: file.clone(),
                 detail: None,
             },
+            UserInput::File {
+                file_data: "data:application/pdf;base64,JVBERi0xLjcKZml4dHVyZQolJUVPRg==".into(),
+                filename: Some("invoice.pdf".into()),
+            },
+            UserInput::File {
+                file_data: "data:text/plain;base64,SW52b2ljZSBub3Rlcw==".into(),
+                filename: None,
+            },
         ]))
         .request_id("image-operation")
     };
@@ -124,6 +132,20 @@ async fn ordered_images_survive_changed_then_deleted_local_file_and_sqlite_reope
             .await
             .unwrap();
         assert_eq!(answer.final_message(), "image received");
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "terminal replay does not resend media"
+        );
+        if pass == 2 {
+            agent
+                .prompt("Recall those attachments")
+                .await
+                .unwrap()
+                .result()
+                .await
+                .unwrap();
+        }
         agent.shutdown().await.unwrap();
         drop((agent, events));
         if pass == 0 {
@@ -136,8 +158,8 @@ async fn ordered_images_survive_changed_then_deleted_local_file_and_sqlite_reope
     let requests = requests.lock().unwrap();
     assert_eq!(
         requests.len(),
-        1,
-        "replay must not send another HTTP request"
+        2,
+        "only the original and the follow-up turn send HTTP requests"
     );
     let blocks = requests[0]["messages"][0]["content"].as_array().unwrap();
     assert_eq!(
@@ -145,15 +167,32 @@ async fn ordered_images_survive_changed_then_deleted_local_file_and_sqlite_reope
             .iter()
             .map(|v| v["type"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["text", "image", "text", "image", "image"]
+        [
+            "text", "image", "text", "image", "image", "document", "document"
+        ]
     );
     assert_eq!(blocks[0]["text"], "first");
     assert_eq!(blocks[2]["text"], "between");
     assert_eq!(blocks[1]["source"]["url"], "https://example.com/image.png");
     assert_eq!(blocks[3]["source"]["data"], PNG);
     assert_eq!(blocks[4]["source"], blocks[3]["source"]);
+    assert_eq!(blocks[5]["source"]["media_type"], "application/pdf");
+    assert_eq!(blocks[5]["title"], "invoice.pdf");
+    assert_eq!(blocks[6]["source"]["data"], "Invoice notes");
+    assert_eq!(
+        requests[1]["messages"][0]["content"], requests[0]["messages"][0]["content"],
+        "reopened history retains media bytes and order"
+    );
+    let artifact = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../output/claude-host-integration");
+    std::fs::create_dir_all(&artifact).unwrap();
+    std::fs::write(
+        artifact.join("durable-media-requests.json"),
+        serde_json::to_vec_pretty(&*requests).unwrap(),
+    )
+    .unwrap();
     eprintln!(
-        "PASS ordered text/url/data/local blocks; changed+deleted file terminal replay; HTTP requests=1"
+        "PASS ordered images+documents; changed+deleted file terminal replay; reopened follow-up history; HTTP requests=2"
     );
     task.abort();
 }

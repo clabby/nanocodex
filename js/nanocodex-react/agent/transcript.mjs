@@ -606,7 +606,7 @@ function hasTypedToolOutput(value, depth = 0) {
   const decoded = decodeJsonString(value);
   if (Array.isArray(decoded)) return decoded.slice(0, 64).some(item => hasTypedToolOutput(item, depth + 1));
   if (!isObject(decoded)) return false;
-  if (["input_text", "text", "output_text", "input_image", "image", "resource", "resource_link"].includes(decoded.type)) return true;
+  if (["input_text", "text", "output_text", "input_image", "image", "output_image", "image_url", "audio", "input_audio", "output_audio", "video", "input_video", "output_video", "document", "file", "input_file", "output_file", "resource", "resource_link"].includes(decoded.type)) return true;
   return ["content", "output", "result", "structuredContent"].some(key => hasTypedToolOutput(decoded[key], depth + 1));
 }
 

@@ -556,13 +556,15 @@ function promptText(input) {
   if (!Array.isArray(input)) return "[prompt]";
   return input.flatMap((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    return item.type === "text" && typeof item.text === "string"
+    return ["text", "input_text"].includes(item.type) && typeof item.text === "string"
       ? [item.text]
-      : item.type === "image"
+      : ["image", "input_image", "image_url"].includes(item.type)
         ? ["[image]"]
-        : item.type === "audio"
+        : ["audio", "input_audio"].includes(item.type)
           ? ["[audio]"]
-          : [];
+          : ["file", "input_file", "document"].includes(item.type)
+            ? [typeof item.filename === "string" && item.filename ? `[file: ${item.filename}]` : "[file]"]
+            : ["[attachment]"];
   }).join("\n");
 }
 

@@ -2263,7 +2263,7 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
     let (agent, _) = Nanocodex::builder(Claude::new(client, "claude-opus-5-5"))
         .build()
         .unwrap();
-    let png = STANDARD.encode(b"\x89PNG\r\n\x1a\nsynthetic");
+    let png = png(1, 1);
     let pdf = STANDARD.encode(b"%PDF-1.7\nsynthetic invoice\n%%EOF");
     let notes = STANDARD.encode("Quarterly notes: revenue up.".as_bytes());
     let prompt = Prompt::content([
@@ -2299,6 +2299,49 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
         );
     }
 
+    // Subsequent turns replay the admitted content rather than flattening media.
+    agent
+        .prompt("Recall the attachments")
+        .await
+        .unwrap()
+        .result()
+        .await
+        .unwrap();
+    {
+        let log = requests.lock().unwrap();
+        assert_eq!(
+            log[1]["messages"][0]["content"],
+            log[0]["messages"][0]["content"]
+        );
+    }
+    for (format, mime) in [
+        (ImageFormat::Jpeg, "image/jpeg"),
+        (ImageFormat::Gif, "image/gif"),
+        (ImageFormat::WebP, "image/webp"),
+    ] {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut bytes, format)
+            .unwrap();
+        let data = STANDARD.encode(bytes.into_inner());
+        agent
+            .prompt(Prompt::content([UserInput::Image {
+                image_url: format!("data:{mime};base64,{data}"),
+                detail: None,
+            }]))
+            .await
+            .unwrap()
+            .result()
+            .await
+            .unwrap();
+        let log = requests.lock().unwrap();
+        let messages = log.last().unwrap()["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.last().unwrap()["content"][0],
+            json!({"type":"image","source":{"type":"base64","media_type":mime,"data":data}})
+        );
+    }
+
     let rejected = |file_data: String, filename: Option<&str>| {
         Prompt::content([UserInput::File {
             file_data,
@@ -2306,6 +2349,14 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
         }])
     };
     for (prompt, expected) in [
+        (
+            rejected("data:video/mp4;base64,AAAAAGZ0eXA=".into(), None),
+            "application/pdf and text/plain",
+        ),
+        (
+            rejected("data:audio/wav;base64,UklGRg==".into(), None),
+            "application/pdf and text/plain",
+        ),
         (
             rejected(format!("data:application/zip;base64,{pdf}"), None),
             "application/pdf and text/plain",
@@ -2348,9 +2399,17 @@ async fn prompt_images_and_documents_become_native_claude_blocks() {
     }
     assert_eq!(
         requests.lock().unwrap().len(),
-        1,
+        5,
         "invalid media never reaches the provider"
     );
+    let artifact = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../output/claude-host-integration");
+    std::fs::create_dir_all(&artifact).unwrap();
+    std::fs::write(
+        artifact.join("prompt-media-requests.json"),
+        serde_json::to_vec_pretty(&*requests.lock().unwrap()).unwrap(),
+    )
+    .unwrap();
     agent.shutdown().await.unwrap();
     server.abort();
 }

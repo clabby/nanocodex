@@ -36,7 +36,7 @@ fn image_type(bytes: &[u8]) -> Result<&'static str> {
     }
 }
 
-fn image_source(value: &str) -> Result<(serde_json::Value, usize)> {
+pub(crate) fn image_source(value: &str) -> Result<(serde_json::Value, usize)> {
     if let Some(data) = value.strip_prefix("data:") {
         if value.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 + 64 {
             return Err(invalid("Claude image exceeds 5 MiB"));
@@ -95,7 +95,10 @@ fn image_source(value: &str) -> Result<(serde_json::Value, usize)> {
 
 /// Maps an inline document data URL to a native Claude document source.
 /// PDFs stay base64; plain text is decoded into a text source.
-fn document_block(file_data: &str, filename: Option<&str>) -> Result<(ContentBlock, usize)> {
+pub(crate) fn document_block(
+    file_data: &str,
+    filename: Option<&str>,
+) -> Result<(ContentBlock, usize)> {
     if file_data.len() > MAX_DOCUMENT_BYTES.div_ceil(3) * 4 + 64 {
         return Err(invalid("Claude document exceeds 10 MiB"));
     }
