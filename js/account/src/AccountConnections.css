@@ -292,3 +292,5 @@
 }
 .account-hub .account-inline .account-connection-groups #claude-connection .connection-card-action { color: var(--text); }
 .account-hub .account-inline .account-connection-groups #claude-connection .connection-card.is-connected .connection-card-action { color: var(--home-muted); }
+.account-hub .account-inline .account-connection-groups :is(.connection-card-copy, .account-service-copy) > span { overflow: visible; text-overflow: clip; -webkit-line-clamp: none; }
+.account-hub .account-inline .account-connection-groups .connection-card.mcp-connector-row { background: var(--row-bg); }
