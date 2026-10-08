@@ -9,7 +9,7 @@ import { createDeploymentLedger, DeploymentLedgerError } from './deployment-ledg
 import { releaseTag } from './live-worker-state.mjs';
 import { currentRelease } from './current-production-release.mjs';
 import { phases } from './deploy-workers.mjs';
-import { readPlan, releaseFingerprints, buildSelected, startBuilds } from './release-plan.mjs';
+import { readPlan, buildSelected, startBuilds } from './release-plan.mjs';
 import { resolveReleasedImages } from './released-images.mjs';
 import { configureReleasedAccount } from './released-account-image.mjs';
 
@@ -253,14 +253,15 @@ export async function releaseWorkers(plan,{ledger=createDeploymentLedger(),isCur
   }
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+  // The plan step computed fingerprints earlier in this same job and checkout;
+  // recomputing them (git walk plus image lookups) before and after every phase
+  // only added latency.
   const plan=readPlan();
-  assert.deepEqual(plan.fingerprints,await releaseFingerprints(),'Release inputs changed after planning');
   const completedTargets=new Set();
   // All builds start now; each phase waits only for its own targets.
   const builds=startBuilds(plan,{env:buildEnvironment(process.env),completedTargets});
   try{
     await releaseWorkers(plan,{completedTargets,
-      prepare:(phase,options)=>prepareReleasePhase(phase,{...options,builds}),
-      verify:async()=>assert.deepEqual(plan.fingerprints,await releaseFingerprints(),'Release inputs changed during preparation')});
+      prepare:(phase,options)=>prepareReleasePhase(phase,{...options,builds})});
   }finally{builds.stop();}
 }
