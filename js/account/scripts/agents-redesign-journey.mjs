@@ -128,6 +128,7 @@ try {
     assert.ok(Math.max(...centers) - Math.min(...centers) <= 1, `Composer controls share one baseline ${JSON.stringify(toolbar)}`);
     const sendIdle = page.getByRole('button', { name: 'Send message' });
     await textarea.fill('x');
+    for (let i = 0; i < 40 && await css(sendIdle, 'backgroundColor') !== palette.text; i++) await page.waitForTimeout(25);
     assert.equal(await css(sendIdle, 'backgroundColor'), palette.text, 'Send is the homepage primary button');
     await textarea.fill('');
 
@@ -213,6 +214,7 @@ try {
     // Expanding: rows are single collapsed lines; a failure carries a red marker; details on demand.
     await details.locator(':scope > summary').click();
     const rows = details.locator('.agent-work-body > .agent-tool-row:not(.is-thinking)');
+    await rows.first().waitFor({ timeout: 5000 }).catch(() => {});
     assert.equal(await rows.count(), 3);
     assert.equal(await details.locator('.agent-tool-row > details[open]').count(), 0, 'Rows start collapsed');
     assert.equal(await page.locator('.agent-tool-error-line').count(), 0, 'No error text outside the row');
