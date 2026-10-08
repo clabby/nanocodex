@@ -72,11 +72,35 @@ function withIngressPlacement(env, colo) {
     }
   } : {} };
 }
+/** Regions with an ingress-local API-key lease replica. Names are routing,
+ * never authority: a replica verifies its own binding before answering. */
+const REGIONAL_API_KEY_AUTHORITY_REGIONS = ["wnam", "enam", "sam", "weur", "eeur", "apac", "oc"];
+const REGIONAL_API_KEY_AUTHORITY_NAME = /^api-key-authority:v1:(wnam|enam|sam|weur|eeur|apac|oc):[0-9a-f]{64}$/;
+function isRegionalApiKeyAuthorityRegion(value) {
+  return typeof value === "string" && REGIONAL_API_KEY_AUTHORITY_REGIONS.includes(value);
+}
+function regionalApiKeyAuthorityName(primaryObjectId, region) {
+  return `api-key-authority:v1:${region}:${primaryObjectId}`;
+}
+function isRegionalApiKeyAuthorityName(value) {
+  return typeof value === "string" && REGIONAL_API_KEY_AUTHORITY_NAME.test(value);
+}
+/** Trusted ingress colo only; any value other than "true" keeps the primary route. */
+function regionalApiKeyAuthorityRegion(colo, enabled) {
+  if (enabled !== "true") return void 0;
+  const region = placementRegion(colo);
+  return isRegionalApiKeyAuthorityRegion(region) ? region : void 0;
+}
 export {
+  REGIONAL_API_KEY_AUTHORITY_REGIONS,
   TRUSTED_INGRESS_HEADER,
   durablePlacementOptions,
   ingressColo,
+  isRegionalApiKeyAuthorityName,
+  isRegionalApiKeyAuthorityRegion,
   placementHeaders,
   placementRegion,
+  regionalApiKeyAuthorityName,
+  regionalApiKeyAuthorityRegion,
   withIngressPlacement
 };

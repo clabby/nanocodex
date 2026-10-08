@@ -34,6 +34,7 @@ import { turnCanUseExecutionNamespace, turnCanProvisionExecutionProvider, execut
 export { turnCanUseExecutionNamespace } from "./execution-policy";
 import { liveAgentSettings, liveAgentFailure, liveAgentRequest } from "nanocodex/cloudflare/managed-live";
 import { durablePlacementOptions, withIngressPlacement } from "nanocodex/cloudflare/durable-placement";
+import { regionalApiKeyAuthorityRegion } from "./regional-api-key-authority";
 import { routerDashboard } from "./router-dashboard";
 import { routeObservation } from "./router-telemetry";
 import { isInferenceCredential, routeInferenceApi, type InferenceApiEnv } from "./inference-api";
@@ -495,6 +496,7 @@ export interface Env extends
   NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;
   NANOCODEX_HAND_RELAYS?: DurableObjectNamespace<RegionalHandRelay>;
   NANOCODEX_REGIONAL_HAND_RELAYS?: string;
+  NANOCODEX_REGIONAL_API_KEY_AUTHORITY?: string;
   NANOCODEX_TURN_KEY_ID?: string;
   NANOCODEX_TURN_API_TOKEN?: string;
   NANOCODEX_PHONE_BRIDGE_URL?: string;
@@ -11193,7 +11195,8 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async #refreshApiKeyAuthorization(authorization: TurnAuthorization): Promise<TurnAuthorization> {
-    const key = await resolvePermissionKey(this.env, this.#permissionIdentity(authorization), authorization.apiKeyObjectId);
+    const key = await resolvePermissionKey(this.env, this.#permissionIdentity(authorization), authorization.apiKeyObjectId,
+      regionalApiKeyAuthorityRegion(this.#routingOrigin().clientIngressColo, this.env.NANOCODEX_REGIONAL_API_KEY_AUTHORITY));
     if (!key) throw new ManagedRequestError(403, "login_unavailable", "This login was revoked or its account permissions changed. Sign in again.");
     return { ...authorization, capabilities: key.capabilities };
   }

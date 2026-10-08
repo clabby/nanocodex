@@ -325,3 +325,26 @@ account's saved identity status before starting another import.
 The executable regression journey is
 `node bin/nanocodex/tests/ssh_import_cli_e2e.mjs /absolute/path/to/nanocodex`.
 It generates synthetic keys and uses only a local HTTP approval fixture.
+
+## Regional API-key authorization
+
+With `NANOCODEX_REGIONAL_API_KEY_AUTHORITY=true`, direct live-session and run
+admission and retained-session key refresh use an authority replica named by
+primary key object and trusted ingress region. Existing primary objects are
+preserved. A cold replica or expired 60-second lease checks the primary, account,
+and organization; warm leases avoid that remote authorization round trip.
+Replica failure falls back to the primary, while an authorization denial remains
+final. This does not relocate credential brokers or change other account APIs.
+
+Each authority registers the replica before reading its state. Key deletion
+invalidates all registered replicas before acknowledging success; unreachable
+replicas cause failure and require retry. Revocation never assumes a replica
+expired based on wall-clock time. Replica restart drops its volatile lease, and
+revocation invalidates grants already in flight.
+
+Any future authority-reducing account, organization, team, or membership mutation
+must commit its change, call that object's `revokeApiKeyAuthorityLeases` RPC, and
+await `true` before acknowledging success. The same contract applies to operator
+storage edits; raw storage changes alone do not invalidate warm leases. Current
+organization HTTP mutations only change display names. Disabling the regional
+flag on ingress and managed Workers restores primary authorization reads.

@@ -2,7 +2,7 @@ import { forwardManagedPreview, previewBridgeEnabled, type PreviewBridgeEnv } fr
 import { consumeRpcData } from "nanocodex/cloudflare/rpc";
 import { apiKeyDigest, apiKeyPrincipal } from "nanocodex/cloudflare/managed-auth";
 import { nativeLiveRequest, liveAgentSettings, liveAgentFailure, liveAgentRequest, newManagedAgentId, nativeRunRequest, nativeRunBody, runAgentRequest } from "nanocodex/cloudflare/managed-live";
-import { durablePlacementOptions, ingressColo } from "nanocodex/cloudflare/durable-placement";
+import { durablePlacementOptions, ingressColo, regionalApiKeyAuthorityName, regionalApiKeyAuthorityRegion } from "nanocodex/cloudflare/durable-placement";
 
 import { MANAGED_ACCESS_HEADER, MANAGED_ACCESS_TTL_MS, isHandViewerUpgrade, readManagedAccess, handRequestFailure, handBrokerRequest } from "nanocodex/cloudflare/managed-access";
 
@@ -10,10 +10,16 @@ export type ManagedProxyEnv = PreviewBridgeEnv & {
   NANOCODEX_BACKEND?: Fetcher;
   NANOCODEX_ACCESS_SECRET?: string;
   NANOCODEX_HAND_BROKER?: DurableObjectNamespace;
-  NANOCODEX_LIVE_API_KEYS?: { getByName(name: string, options?: ReturnType<typeof durablePlacementOptions>): {
-    id?: { toString(): string };
-    resolveAuthorizedKey?: () => Promise<unknown>;
-  } };
+  NANOCODEX_LIVE_API_KEYS?: {
+    getByName(name: string, options?: ReturnType<typeof durablePlacementOptions>): {
+      id?: { toString(): string };
+      resolveAuthorizedKey?: () => Promise<unknown>;
+      resolveRegionalAuthorizedKey?: (primaryObjectId: string, region: string) => Promise<unknown>;
+    };
+    idFromName?(name: string): { toString(): string };
+  };
+  /** "true" lets new ingress-regional lease replicas answer live API-key auth. */
+  NANOCODEX_REGIONAL_API_KEY_AUTHORITY?: string;
   NANOCODEX_LIVE_SESSIONS?: { getByName(name: string, options?: ReturnType<typeof durablePlacementOptions>): {
     fetch(request: Request): Promise<Response>;
   } };
@@ -142,6 +148,39 @@ async function routeMeasuredManaged(
   }
 }
 
+const INELIGIBLE = Symbol("ineligible");
+
+/**
+ * Live key authority. With regional authority enabled, ask the ingress
+ * region's lease replica; it holds a lease only after the key's primary object
+ * checked key, account and grant, and the primary revokes leases before
+ * acknowledging a key deletion. A null answer or replica transport failure
+ * falls back to the authoritative primary; a replica denial is final.
+ */
+async function liveKeyPrincipal(env: ManagedProxyEnv, digest: string, colo: string | null): Promise<ReturnType<typeof apiKeyPrincipal> | typeof INELIGIBLE> {
+  const keys = env.NANOCODEX_LIVE_API_KEYS!;
+  const region = regionalApiKeyAuthorityRegion(colo, env.NANOCODEX_REGIONAL_API_KEY_AUTHORITY);
+  const primaryId = region && typeof keys.idFromName === "function" ? keys.idFromName(digest).toString() : undefined;
+  if (region && primaryId && /^[0-9a-f]{64}$/.test(primaryId)) {
+    const replica = keys.getByName(regionalApiKeyAuthorityName(primaryId, region), { locationHint: region });
+    const resolve = replica.resolveRegionalAuthorizedKey;
+    if (typeof resolve === "function") {
+      let value: { record?: unknown; apiKeyObjectId?: unknown } | undefined | null | typeof INELIGIBLE;
+      // Null means "ask the primary", exactly like a replica transport failure.
+      try { value = consumeRpcData(await Reflect.apply(resolve, replica, [primaryId, region])) as typeof value | null; }
+      catch { value = INELIGIBLE; }
+      if (value === null) value = INELIGIBLE;
+      if (value !== INELIGIBLE) {
+        return value && value.apiKeyObjectId === primaryId ? apiKeyPrincipal(value.record, digest, primaryId) : undefined;
+      }
+    }
+  }
+  const key = keys.getByName(digest, durablePlacementOptions(colo));
+  const resolve = key.resolveAuthorizedKey;
+  if (typeof resolve !== "function") return INELIGIBLE;
+  return apiKeyPrincipal(consumeRpcData(await Reflect.apply(resolve, key, [])), digest, key.id?.toString());
+}
+
 /** API-key-only entrypoint; authority still comes from the existing live key DO. */
 async function directLiveAgent(request: Request, env: ManagedProxyEnv): Promise<Response | undefined> {
   if (!env.NANOCODEX_LIVE_API_KEYS || !env.NANOCODEX_LIVE_SESSIONS || !nativeLiveRequest(request)) return;
@@ -153,11 +192,10 @@ async function directLiveAgent(request: Request, env: ManagedProxyEnv): Promise<
   const digest = await apiKeyDigest(request);
   if (!digest) return;
   const colo = ingressColo(request.cf?.colo);
-  const key = env.NANOCODEX_LIVE_API_KEYS.getByName(digest, durablePlacementOptions(colo));
+  const resolved = await liveKeyPrincipal(env, digest, colo);
   // Older/unconfigured bindings keep the full managed route, before any create.
-  const resolve = key.resolveAuthorizedKey;
-  if (typeof resolve !== "function") return;
-  const principal = apiKeyPrincipal(consumeRpcData(await Reflect.apply(resolve, key, [])), digest, key.id?.toString());
+  if (resolved === INELIGIBLE) return;
+  const principal = resolved;
   const admitted = performance.now();
   const authFinishedAt = Date.now();
   const failure = liveAgentFailure(request, principal);
@@ -200,10 +238,9 @@ async function directAgentRun(request: Request, env: ManagedProxyEnv): Promise<R
   const digest = await apiKeyDigest(request);
   if (!digest) return;
   const colo = ingressColo(request.cf?.colo);
-  const key = env.NANOCODEX_LIVE_API_KEYS.getByName(digest, durablePlacementOptions(colo));
-  const resolve = key.resolveAuthorizedKey;
-  if (typeof resolve !== "function") return;
-  const principal = apiKeyPrincipal(consumeRpcData(await Reflect.apply(resolve, key, [])), digest, key.id?.toString());
+  const resolved = await liveKeyPrincipal(env, digest, colo);
+  if (resolved === INELIGIBLE) return;
+  const principal = resolved;
   const authFinishedAt = Date.now();
   const failure = liveAgentFailure(request, principal);
   if (failure) return failure;

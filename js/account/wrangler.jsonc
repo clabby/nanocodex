@@ -216,7 +216,8 @@
     }
   ],
   "vars": {
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "NANOCODEX_REGIONAL_API_KEY_AUTHORITY": "true"
   },
   "env": {
     "development": {
@@ -282,7 +283,8 @@
         }
       ],
       "vars": {
-        "ENVIRONMENT": "development"
+        "ENVIRONMENT": "development",
+        "NANOCODEX_REGIONAL_API_KEY_AUTHORITY": "true"
       }
     }
   }
