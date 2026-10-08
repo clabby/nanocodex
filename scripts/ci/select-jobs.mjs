@@ -29,7 +29,7 @@ const sharedPackages = new Set([
   "nanocodex-terminal", "nanocodex-connect-ui", "nanocodex-connect-protocol",
 ]);
 // Deployed by the Cloudflare workflow; no ci.yml job builds or consumes them.
-const cloudflarePackages = new Set(["managed2", "egress2", "media"]);
+const cloudflarePackages = new Set(["media"]);
 const bindingExamples = new Set(["node", "react-vite", "browser-cdn", "privy", "better-auth"]);
 const jsSource = /\.(?:[cm]?[jt]sx?|jsonc?|css|html|svg|png|jpe?g|gif|webp|ico|woff2?|sql)$/;
 const binaryAsset = /\.(?:png|jpe?g|gif|webp|ico|mp4|wav|woff2?)$/;

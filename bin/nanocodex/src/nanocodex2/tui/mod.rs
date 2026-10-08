@@ -16,7 +16,6 @@ mod editor;
 mod format;
 mod history;
 mod links;
-mod managed2;
 mod pane;
 mod private_input;
 mod prompt;
@@ -38,7 +37,6 @@ mod transcript;
 mod vault;
 mod voice_clone;
 
-pub(crate) use self::managed2::run_managed2;
 pub(crate) use self::shared::run_shared;
 
 use self::{

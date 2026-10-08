@@ -41,7 +41,6 @@ mod launcher;
 mod linux_hand_install;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod linux_hand_update;
-mod managed2;
 mod native_hand;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod native_secure_input;
@@ -130,9 +129,6 @@ const SYSTEM_HOST_TOKEN_ENV: &str = "NANOCODEX_SYSTEM_HOST_TOKEN";
     about = "Nanocodex terminal client connected to the background machine Hand"
 )]
 struct Cli {
-    /// Opt in to the separate Managed2 API (limited text sessions in the standard TUI).
-    #[arg(long, global = true)]
-    managed2: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -691,20 +687,6 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
             .run()
             .await
             .map_err(|_| ManagedError::Configuration("local recording control failed".into()));
-    }
-    if cli.managed2 {
-        return match cli.command {
-            None => tui::run_managed2(None).await,
-            Some(Command::Attach(Attach { agent: Some(agent) })) if valid_managed_agent_id(&agent) => {
-                tui::run_managed2(Some(agent)).await
-            }
-            Some(Command::Run(command)) if !command.settings.is_explicit() => {
-                managed2::run(command.agent, Some(command.prompt), command.idempotency_key).await
-            }
-            _ => Err(ManagedError::Configuration(
-                "--managed2 supports interactive sessions, attach ID, and run [--agent ID] PROMPT only; legacy commands/settings are unavailable".into(),
-            )),
-        };
     }
     // Shared links carry their own narrowly scoped authority. Never load an
     // account credential or start a local Hand for a guest attachment.
@@ -1506,7 +1488,6 @@ mod tests {
     #[test]
     fn hand_stats_is_a_read_only_standard_managed_command() {
         let cli = Cli::try_parse_from(["nanocodex2", "hand-stats"]).unwrap();
-        assert!(!cli.managed2);
         assert!(matches!(cli.command, Some(Command::HandStats)));
     }
 
