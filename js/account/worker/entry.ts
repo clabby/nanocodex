@@ -2,13 +2,6 @@ import worker from "./index.ts";
 
 export {
   ChatGptEgress,
-  ChatGptEgressWnam,
-  ChatGptEgressEnam,
-  ChatGptEgressWeur,
-  ChatGptEgressEeur,
-  ChatGptEgressApac,
-  ChatGptEgressSam,
-  ChatGptEgressOc,
 } from "./chatGptEgress.ts";
 export {
   ByokSession,
