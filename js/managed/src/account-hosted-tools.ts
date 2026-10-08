@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { CUA_JS_NAME, CUA_RESET_NAME } from "nanocodex-computer/contract";
 import { HandPaths } from "./hand-paths";
+import { HandShareStore } from "./hand-share-store";
 import { HandRemoteBroker, REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { validRecordingCapability, screenTool, type ScreenTarget } from "./hand-remote-agent";
 import { HandHosts, boundedJSON } from "./hand-hosts";
@@ -54,6 +55,11 @@ type AccountHostedMachine = Readonly<{
   }>[];
 }>;
 
+type SharedMachineSnapshot = AccountHostedMachine & {
+  shared_screens: readonly ScreenTarget[];
+  shared_screen_tools: readonly AccountHostedTool[];
+};
+
 type AccountHostedToolsSnapshot = Readonly<{
   tools: readonly AccountHostedTool[];
   machines: readonly AccountHostedMachine[];
@@ -71,6 +77,7 @@ type RoutedHostedTool = HostedToolsCodeTool & Readonly<{
 }>;
 
 type AccountHostedToolsEnv = RemoteICEEnv & RegionalHandEnv & {
+  NANOCODEX_ACCOUNT_TOOLS?: DurableObjectNamespace<AccountHostedTools>;
   NANOCODEX_SESSIONS?: DurableObjectNamespace<import("./index").DurableAgentSession>;
 };
 
@@ -110,6 +117,8 @@ type AuthorizationContext = Pick<InvocationContext, "sessionId" | "subagent">;
 
 /** One account-owned reverse attachment shared by every managed agent in that account. */
 export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
+  readonly #shares: HandShareStore;
+  readonly #sharedScreens = new Map<string, AbortController>();
   readonly #broker: HostedToolsBroker;
   readonly #remote: HandRemoteBroker;
   readonly #handHosts: HandHosts;
@@ -122,6 +131,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
 
   constructor(ctx: DurableObjectState, env: AccountHostedToolsEnv, regional = false) {
     super(ctx, env);
+    this.#shares = new HandShareStore(ctx.storage);
     this.#regional = regional;
     this.#directory = new RegionalHandDirectory(ctx.storage);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS regional_local_publications (
@@ -170,6 +180,134 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       try { console.info(record); } catch { /* Remote diagnostics cannot change a socket outcome. */ }
     });
     this.#handHosts = new HandHosts(ctx.storage, this.#remote);
+  }
+
+  async createHandShare(ownerId: string, machineId: string) {
+    if (this.#regional || !isUserId(ownerId) || !this.#claim(ownerId) || typeof machineId !== "string"
+      || machineId.startsWith("shared:")) return { error: "not_found" } as const;
+    const snapshot = await this.#ownedSnapshot(machineId);
+    if (!snapshot.machines.some(entry => entry.machine.id === machineId)
+      && !snapshot.screens?.some(screen => screen.machine_id === machineId)) return { error: "not_found" } as const;
+    if (this.#shares.list().filter(share => share.revoked_at === null).length >= 100) return { error: "share_limit" } as const;
+    const share = await this.#shares.create(machineId);
+    return share ? { id: share.id, token: share.token, machine_id: share.machine_id } : { error: "share_limit" } as const;
+  }
+
+  async listHandShares(ownerId: string) {
+    return !this.#regional && isUserId(ownerId) && this.#owns(ownerId) ? this.#shares.list() : [];
+  }
+
+  async revokeHandShare(ownerId: string, id: string): Promise<boolean> {
+    return !this.#regional && isUserId(ownerId) && this.#owns(ownerId) && this.#shares.revoke(id);
+  }
+
+  async redeemHandShare(recipientId: string, ownerId: string, token: string) {
+    if (this.#regional || !isUserId(recipientId) || !isUserId(ownerId) || recipientId === ownerId
+      || !this.#claim(recipientId) || !this.env.NANOCODEX_ACCOUNT_TOOLS) return { error: "not_found" } as const;
+    const share = await this.env.NANOCODEX_ACCOUNT_TOOLS.getByName(ownerId).acceptHandShare(ownerId, recipientId, token);
+    if (!share) return { error: "not_found" } as const;
+    if (!this.#shares.received().some(entry => entry.id === share.id) && !this.#shares.canReceive()) {
+      await Promise.all(this.#shares.received().map(async received => {
+        try {
+          const active = await withHardDeadline<boolean>("shared Hand grant check", 5000, async () =>
+            await this.env.NANOCODEX_ACCOUNT_TOOLS!.getByName(received.owner_id).hasHandShare(received.owner_id, recipientId, received.id));
+          if (!active) this.#shares.forgetReceived(received.id);
+        } catch { /* Keep references when the owner cannot confirm revocation. */ }
+      }));
+    }
+    if (!this.#shares.receive(share.id, ownerId)) return { error: "share_limit" } as const;
+    return { machine_id: `shared:${share.id}` };
+  }
+
+  /** Internal account-to-account RPC: membership is authoritative only on the owner. */
+  async acceptHandShare(ownerId: string, recipientId: string, token: string) {
+    if (this.#regional || !isUserId(ownerId) || !this.#owns(ownerId) || !isUserId(recipientId)
+      || recipientId === ownerId) return undefined;
+    return this.#shares.redeem(recipientId, token);
+  }
+
+  async hasHandShare(ownerId: string, recipientId: string, id: string): Promise<boolean> {
+    return !this.#regional && this.#owns(ownerId) && !!this.#shares.grant(id, recipientId);
+  }
+
+  async sharedHandSnapshot(ownerId: string, recipientId: string, id: string): Promise<SharedMachineSnapshot | undefined> {
+    if (this.#regional || !this.#owns(ownerId) || !isUserId(recipientId)) return undefined;
+    const grant = this.#shares.grant(id, recipientId);
+    if (!grant) return undefined;
+    const snapshot = await this.#ownedSnapshot(grant.machine_id);
+    // Recheck after asynchronous regional discovery; revocation may have interleaved.
+    if (!this.#shares.grant(id, recipientId)) return undefined;
+    const alias = `shared:${id}`;
+    const screens = (snapshot.screens ?? []).filter(target => target.machine_id === grant.machine_id).map(target => {
+      const exposed = { ...target, machine_id: alias, machine_name: `${target.machine_name} (shared)` };
+      return { ...exposed, generation: this.#shares.route(id, screenTool(exposed).definition.name, screenTool(target).route_token) };
+    });
+    const selected = snapshot.machines.find(entry => entry.machine.id === grant.machine_id);
+    if (!selected && !screens.length) return undefined;
+    return { online: selected?.online ?? true,
+      machine: selected ? { ...selected.machine, id: alias, name: `${selected.machine.name} (shared)`,
+        capabilities: selected.machine.capabilities.filter(value => !/vm|factory|secure_input/i.test(value)) }
+        : { id: alias, name: screens[0]!.machine_name, workspace: "/", capabilities: ["computer", "screen"] },
+      tools: (selected?.tools ?? []).filter(tool => sharedMachineTool(tool.name)).map(tool => ({ ...tool,
+        route_token: this.#shares.route(id, tool.name, tool.route_token) })),
+      shared_screens: screens, shared_screen_tools: screens.map(screenTool) };
+  }
+
+  async #invokeSharedHand(ownerId: string, recipientId: string, invocation: InvocationRequest, signal: AbortSignal): Promise<Response> {
+    const unavailable = () => Response.json({ error: "tool_unavailable" }, { status: 404 });
+    if (this.#regional || !this.#owns(ownerId) || !isUserId(recipientId)) return unavailable();
+    const sharedSession = await sharedHandSession(recipientId, invocation.session_id);
+    const route = this.#shares.resolve(invocation.route_token);
+    const grant = route && this.#shares.grant(route.share_id, recipientId);
+    if (!route || !grant || invocation.machine_id !== `shared:${grant.id}` || route.name !== invocation.name
+      ) return unavailable();
+    if (route.route_token.startsWith("screen:v1:")) {
+      const screen = this.#remote.list(true).find(target => target.machine_id === grant.machine_id
+        && target.agent_tools && screenTool(target).route_token === route.route_token);
+      if (!screen) return unavailable();
+      const key = JSON.stringify([sharedSession, invocation.call_id]);
+      const controller = new AbortController(); this.#sharedScreens.set(key, controller);
+      try {
+        return await this.#remote.invoke(screenTool(screen).definition.name, route.route_token, invocation.input,
+          sharedSession, AbortSignal.any([signal, controller.signal]),
+          { threadId: invocation.thread_id, callId: invocation.call_id, turnId: invocation.turn_id }) ?? unavailable();
+      } finally { this.#sharedScreens.delete(key); }
+    }
+    if (!sharedMachineTool(route.name)) return unavailable();
+    const relay = parseRelayRouteToken(route.route_token);
+    if (relay && !this.env.NANOCODEX_HAND_RELAYS) return unavailable();
+    // The stored route, never recipient input, selects the machine, relay and tool.
+    const forwarded = new Request("https://account-tools.internal/invoke", { method: "POST",
+      signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ ...invocation,
+        owner_id: ownerId, machine_id: grant.machine_id, route_token: relay?.token ?? route.route_token,
+        session_id: sharedSession }) });
+    if (relay) this.#shares.turnTarget(sharedSession, invocation.turn_id,
+      ownerId, relay.region, sharedSession);
+    const response = relay
+      ? await this.env.NANOCODEX_HAND_RELAYS!.getByName(handRelayName(ownerId, relay.region)).fetch(forwarded)
+      : await this.fetch(forwarded);
+    if (!response.ok) return response;
+    const result = await response.json<InvocationResult>();
+    return Response.json({ ...result, ...(result.process_route_token === undefined ? {} : {
+      process_route_token: this.#shares.route(grant.id, "write_stdin", relay
+        ? relayRouteToken(relay.region, result.process_route_token) : result.process_route_token),
+    }) }, { headers: { "cache-control": "no-store" } });
+  }
+
+  async cancelSharedHand(ownerId: string, recipientId: string, invocation: InvocationRequest): Promise<void> {
+    if (this.#regional || !this.#owns(ownerId) || !isUserId(recipientId)) return;
+    const route = this.#shares.resolve(invocation.route_token);
+    const grant = route && this.#shares.grant(route.share_id, recipientId, true);
+    if (!route || !grant || invocation.machine_id !== `shared:${grant.id}` || invocation.name !== route.name) return;
+    const session = await sharedHandSession(recipientId, invocation.session_id);
+    this.#sharedScreens.get(JSON.stringify([session, invocation.call_id]))?.abort();
+    const relay = parseRelayRouteToken(route.route_token);
+    const request = new Request("https://account-tools.internal/cancel-invocation", {
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({owner_id:ownerId,session_id:session,call_id:invocation.call_id}),
+    });
+    if (relay) await this.env.NANOCODEX_HAND_RELAYS?.getByName(handRelayName(ownerId,relay.region)).fetch(request);
+    else await this.fetch(request);
   }
 
   /** Discovery returns only its public projection in one RPC reply. */
@@ -275,6 +413,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
             JSON.stringify(kept), row.route_id);
         }
       }
+      this.#shares.revokeMachine(machineId);
       this.#directory.forget(machineId);
       return removed;
     });
@@ -287,7 +426,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   async #fetchRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/regional/")) return this.#regionalRequest(request, url);
-    if (this.#regional && !["/tool-host", "/snapshot", "/invoke", "/turn-ended", "/diagnostics"].includes(url.pathname)) {
+    if (this.#regional && !["/tool-host", "/snapshot", "/invoke", "/cancel-invocation", "/turn-ended", "/diagnostics"].includes(url.pathname)) {
       return Response.json({ error: "not_found" }, { status: 404 });
     }
     if (url.pathname === "/diagnostics") {
@@ -489,9 +628,41 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
       if (frame.type !== "turn_ended") return Response.json({ error: "invalid_request" }, { status: 400 });
       await this.#broker.endTurn(frame.session_id, frame.turn_id, frame.hook_event_name);
+      await Promise.all(this.#shares.turnTargets(frame.session_id, frame.turn_id).map(async target => {
+        const stub = target.region === "account"
+          ? this.env.NANOCODEX_ACCOUNT_TOOLS?.getByName(target.owner_id)
+          : this.env.NANOCODEX_HAND_RELAYS?.getByName(handRelayName(target.owner_id, target.region as HandRelayRegion));
+        if (!stub) throw new Error("Shared Hand cleanup target unavailable");
+        const response = await stub.fetch("https://account-tools.internal/turn-ended", {
+          method: "POST", headers: {"content-type":"application/json"},
+          body: JSON.stringify({owner_id:target.owner_id,frame:{...frame,session_id:target.remote_session_id}}),
+        });
+        if (!response.ok) throw new Error("Shared Hand cleanup failed");
+      }));
+      this.#shares.clearTurn(frame.session_id, frame.turn_id);
       return new Response(null, { status: 204 });
     }
 
+    if (request.method === "POST" && url.pathname === "/cancel-invocation") {
+      let body = await request.json<InvocationRequest>();
+      if (!isUserId(body.owner_id) || !this.#owns(body.owner_id) || typeof body.session_id !== "string" || typeof body.call_id !== "string") {
+        return Response.json({error:"not_found"},{status:404});
+      }
+      const screen = typeof body.route_token === "string" ? parseSharedScreenRoute(body.route_token) : undefined;
+      if (screen) body = { ...body, machine_id: screen.machineId, route_token: screen.routeToken };
+      if (body.machine_id?.startsWith("shared:")) {
+        const share = this.#shares.received().find(entry => body.machine_id === `shared:${entry.id}`);
+        if (share) await this.env.NANOCODEX_ACCOUNT_TOOLS?.getByName(share.owner_id).cancelSharedHand(share.owner_id, body.owner_id, body);
+      } else {
+        const row = this.ctx.storage.sql.exec<{call_id:string}>("SELECT call_id FROM hosted_tool_calls WHERE session_id=? AND source_call_id=?", body.session_id, body.call_id).toArray()[0];
+        if (row) this.#broker.cancel(row.call_id);
+      }
+      return new Response(null,{status:204});
+    }
+    if (request.method === "POST" && url.pathname === "/shared-invoke") {
+      const body = await request.json<{owner_id:string;recipient_id:string;invocation:InvocationRequest}>();
+      return this.#invokeSharedHand(body.owner_id, body.recipient_id, body.invocation, request.signal);
+    }
     if (request.method === "POST" && url.pathname === "/invoke") {
       const startedAt = performance.now();
       let invocation: InvocationRequest;
@@ -500,12 +671,27 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       const decodedAt = performance.now();
       if (!isUserId(invocation.owner_id) || !this.#owns(invocation.owner_id)
         || typeof invocation.name !== "string" || typeof invocation.session_id !== "string"
-        || typeof invocation.call_id !== "string" || typeof invocation.route_token !== "string") {
+        || typeof invocation.call_id !== "string" || typeof invocation.route_token !== "string"
+        || (invocation.machine_id !== undefined && typeof invocation.machine_id !== "string")) {
         return Response.json({ error: "not_found" }, { status: 404 });
       }
       if (invocation.thread_id !== undefined && (typeof invocation.thread_id !== "string"
         || !/^[A-Za-z0-9_./:-]{1,128}$/.test(invocation.thread_id))) {
         return Response.json({ error: "invalid_request" }, { status: 400 });
+      }
+      const sharedScreen = parseSharedScreenRoute(invocation.route_token);
+      if (sharedScreen) invocation = { ...invocation, machine_id: sharedScreen.machineId, route_token: sharedScreen.routeToken };
+      if (invocation.route_token.startsWith("shared:") || invocation.machine_id?.startsWith("shared:")) {
+        const share = this.#shares.received().find(entry => invocation.machine_id === `shared:${entry.id}`);
+        if (this.#regional || !share || !this.env.NANOCODEX_ACCOUNT_TOOLS) {
+          return Response.json({ error: "tool_unavailable" }, { status: 404 });
+        }
+        this.#shares.turnTarget(invocation.session_id, invocation.turn_id, share.owner_id, "account",
+          await sharedHandSession(invocation.owner_id, invocation.session_id));
+        return this.env.NANOCODEX_ACCOUNT_TOOLS.getByName(share.owner_id).fetch("https://account-tools.internal/shared-invoke", {
+          method:"POST", signal:request.signal, headers:{"content-type":"application/json"},
+          body:JSON.stringify({owner_id:share.owner_id,recipient_id:invocation.owner_id,invocation}),
+        });
       }
       const correlation = { session_id: invocation.session_id, thread_id: invocation.thread_id,
         source_call_id: invocation.call_id, turn_id: invocation.turn_id };
@@ -620,6 +806,23 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
   }
 
   async #snapshot(machineId?: string): Promise<AccountHostedToolsSnapshot> {
+    const owned = await this.#ownedSnapshot(machineId);
+    if (this.#regional || !this.env.NANOCODEX_ACCOUNT_TOOLS || !this.#ownerId) return owned;
+    const received = this.#shares.received().filter(share => machineId === undefined || machineId === `shared:${share.id}`);
+    const shared = await Promise.all(received.map(async share => {
+      try {
+        return await withHardDeadline<SharedMachineSnapshot | undefined>("shared Hand discovery", 5_000, async () =>
+          this.env.NANOCODEX_ACCOUNT_TOOLS!.getByName(share.owner_id).sharedHandSnapshot(share.owner_id, this.#ownerId!, share.id));
+      } catch { return undefined; }
+    }));
+    const available = shared.filter((entry): entry is SharedMachineSnapshot => entry !== undefined);
+    return this.#withRoots({ ...owned,
+      tools: [...owned.tools, ...available.flatMap(entry => entry.shared_screen_tools)],
+      screens: [...owned.screens ?? [], ...available.flatMap(entry => entry.shared_screens)],
+      machines: [...owned.machines, ...available.map(({ shared_screens, shared_screen_tools, ...entry }) => entry)] });
+  }
+
+  async #ownedSnapshot(machineId?: string): Promise<AccountHostedToolsSnapshot> {
     const full = this.#localSnapshot();
     // A selected route needs only its current publication and capabilities.
     // Inventory remains explicit; this request never probes unrelated regions.
@@ -1427,6 +1630,15 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
         signal: context.signal,
       });
     } catch {
+      if (context.signal?.aborted && (routeToken.startsWith("shared:") || parseSharedScreenRoute(routeToken))) {
+        try {
+          await target.fetch("https://account-tools.internal/cancel-invocation", {
+            method:"POST",headers:{"content-type":"application/json"},
+            body:JSON.stringify({owner_id:this.#ownerId,session_id:context.sessionId,call_id:context.callId,
+              machine_id:machineId,name,route_token:routeToken}),
+          });
+        } catch { /* Cancellation delivery is best effort; execution remains uncertain. */ }
+      }
       timing.fetch_ms = performance.now() - startedAt;
       return failed("Hand connection failed after possible dispatch; execution outcome is unknown. The command was not resent.", "ambiguous");
     }
@@ -1591,4 +1803,28 @@ function failedToolResult(
     value: outcome,
     ...(preAdmissionUnavailable ? { [HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE]: true as const } : {}),
   });
+}
+
+/** Account credentials, enrollment and VM creation never cross a Hand grant. */
+function sharedMachineTool(name: string): boolean {
+  return name === "exec_command" || name === "write_stdin" || name === "preview"
+    || name === CUA_JS_NAME || name === CUA_RESET_NAME;
+}
+
+function parseSharedScreenRoute(token: string): { machineId: string; routeToken: string } | undefined {
+  if (!token.startsWith("screen:v1:")) return undefined;
+  try {
+    const value: unknown = JSON.parse(token.slice("screen:v1:".length));
+    if (Array.isArray(value) && value.length === 3 && typeof value[0] === "string"
+      && value[0].startsWith("shared:") && typeof value[2] === "string" && value[2].startsWith("shared:v1:")) {
+      return { machineId: value[0], routeToken: value[2] };
+    }
+  } catch { /* Malformed routes cannot obtain a grant. */ }
+  return undefined;
+}
+
+/** Keep recipient sessions disjoint within the publisher's bounded wire identifier. */
+async function sharedHandSession(recipientId: string, sessionId: string): Promise<string> {
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([recipientId, sessionId])));
+  return "shared:" + Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
 }

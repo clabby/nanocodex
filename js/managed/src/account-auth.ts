@@ -1165,6 +1165,16 @@ export async function resolveChiefOfStaffPrincipal(
   } : undefined;
 }
 
+/** Shared computers require a durable signed-in identity, including native API keys. */
+export async function authenticateHandSharingAccount(
+  request: Request, env: AccountAuthEnv, url = new URL(request.url),
+): Promise<Principal | undefined> {
+  const principal = await authenticate(request, env, url);
+  if (!principal || !["account_session", "api_key"].includes(principal.kind) || principal.connectGrant) return undefined;
+  const account = resolvedPrincipalAccounts.get(principal) ?? await readAccount(env, principal.userId);
+  return account?.persistent === true ? principal : undefined;
+}
+
 export async function authenticatePersistentAccount(
   request: Request,
   env: AccountAuthEnv,

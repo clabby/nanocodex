@@ -26,6 +26,7 @@ mod hand_recording;
 mod hand_recording_control;
 #[path = "../hand_registry.rs"]
 mod hand_registry;
+mod hand_share;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
@@ -154,6 +155,8 @@ enum Command {
     Vault(vault::Vault),
     /// Manage connected accounts directly.
     Connectors(connectors::Connectors),
+    /// Create, list, revoke, or redeem account Hand sharing links.
+    HandShare(hand_share::HandShare),
     /// Attach a terminal session to an existing managed agent.
     Attach(Attach),
     /// Connect this computer as a Hand; optionally run a VM or Docker Hand.
@@ -821,6 +824,7 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         }
         Some(Command::Vault(command)) => command.run(&client).await,
         Some(Command::Connectors(command)) => command.run(&client).await,
+        Some(Command::HandShare(command)) => command.run(&client).await,
         Some(Command::Voice(command)) => voice::run(&client, command).await,
         Some(Command::Attach(command)) => {
             attach_tui(&client, command.agent.map(|agent| agent.agent_id)).await

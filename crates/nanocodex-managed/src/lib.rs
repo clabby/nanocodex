@@ -13,6 +13,7 @@ mod client;
 mod connectors;
 mod driver;
 mod error;
+mod hand_shares;
 mod model;
 mod native_secure_input;
 mod phone_services;
@@ -42,6 +43,7 @@ pub use client::{ManagedClient, ManagedClientBuilder};
 pub use connectors::*;
 pub use driver::ManagedAgent;
 pub use error::ManagedError;
+pub use hand_shares::{CreatedHandShare, HandShare, HandShares, RedeemedHandShare};
 pub use model::{
     AvailableModel, CatalogAvailabilityError, CatalogProviderAvailability, ManagedModel,
     ModelCatalog,

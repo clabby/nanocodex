@@ -1,3 +1,4 @@
+import { routeHandSharing, handShareAPIPath, handShareDocumentPath, handShareDocument } from "./hand-sharing-http";
 import { idempotentAgentId } from "nanocodex/cloudflare/managed-live";
 export { PhoneProvider } from "./phone-provider";
 import { routeAccountNavigation } from "./account-navigation";
@@ -350,6 +351,7 @@ import {
   publishAgentRegistration,
   authenticate,
   authenticateVaultAccount,
+  authenticateHandSharingAccount,
   detachAgent,
   forwardPrincipalAssertions,
   isOrganizationCapabilities,
@@ -1865,6 +1867,11 @@ async function managedFetchRoute(
         locator,
         publicOrigin: url.origin,
       });
+    }
+    if (handShareDocumentPath.test(url.pathname)) return handShareDocument(request);
+    if (handShareAPIPath.test(url.pathname)) {
+      const principal = trustedAgentPrincipal ?? await authenticateHandSharingAccount(request, env, url);
+      return routeHandSharing(request, principal, env.NANOCODEX_ACCOUNT_TOOLS);
     }
     if (url.pathname === "/v1/account/hands/inventory") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
