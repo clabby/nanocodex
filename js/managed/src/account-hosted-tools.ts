@@ -1483,6 +1483,7 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
   #screenMachines: readonly HostedMachine[] = [];
   #validator: HostedToolsCatalogValidator | undefined;
   #refreshing?: Promise<void>;
+  #recoveryRefreshing?: Promise<void>;
   #optionalRetryAt = 0;
   #loadedAt = 0;
   #generation = 0;
@@ -1836,9 +1837,17 @@ export class AccountHostedToolsProvider implements HostedToolsDynamicProvider {
       // Concurrent stale callers share one inventory load: only the first
       // caller that still sees the rejected route invalidates the snapshot.
       if (routeFor(this, name, machineId)?.routeToken === routeToken) {
-        this.invalidate();
-        await this.refresh();
-      } else await this.#refreshing;
+        // A second invalidation would discard the first caller's in-flight
+        // load. All recovery callers must await the same published generation.
+        if (!this.#recoveryRefreshing) {
+          this.invalidate();
+          const refreshing = this.refresh().finally(() => {
+            if (this.#recoveryRefreshing === refreshing) this.#recoveryRefreshing = undefined;
+          });
+          this.#recoveryRefreshing = refreshing;
+        }
+        await this.#recoveryRefreshing;
+      } else await (this.#recoveryRefreshing ?? this.#refreshing);
     } catch {
       return optional ? undefined
         : failed("Hand route refresh failed before this call was admitted; nothing was sent.", "unavailable", true, "route_refresh_failed");
