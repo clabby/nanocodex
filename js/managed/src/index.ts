@@ -5181,7 +5181,9 @@ export class DurableAgentSession extends DurableComputerObject {
       return new Response(null, { status: 204 });
     }
     if (request.method === "POST" && url.pathname === "/create") {
-      return this.#createHttp(request);
+      // Fresh creates commit identity locally and publish the registry entry in
+      // the background (retried), like /create-run; no blocking registry RPC.
+      return this.#createHttp(request, undefined, true);
     }
     if (request.method === "PUT" && url.pathname === "/credential-binding") {
       return this.#prepareCredentialBinding(request);
