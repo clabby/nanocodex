@@ -35,8 +35,6 @@ import { OutputCheckpoints } from "./output-checkpoints";
 import { turnCanUseExecutionNamespace, turnCanProvisionExecutionProvider, executionMountAllowed, executionMountPeers, executionMountOwner } from "./execution-policy";
 export { turnCanUseExecutionNamespace } from "./execution-policy";
 import { liveAgentSettings, liveAgentFailure, liveAgentRequest } from "nanocodex/cloudflare/managed-live";
-import { durablePlacementOptions, withIngressPlacement } from "nanocodex/cloudflare/durable-placement";
-import { regionalApiKeyAuthorityRegion } from "./regional-api-key-authority";
 import { routerDashboard } from "./router-dashboard";
 import { routeObservation } from "./router-telemetry";
 import { isInferenceCredential, routeInferenceApi, type InferenceApiEnv } from "./inference-api";
@@ -77,8 +75,7 @@ import { threadSharingTools, redactSharedLinkTokens, sharedTextStream } from "./
 import { initializeTurnInputs, inputChunks, lazyTurnInput, readTurnInput, storeTurnInput } from "./managed-turn-input";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ArchiveMaintenance } from "./archive-maintenance";
-import { PreparedModelUpgrade } from "./prepared-model-upgrade";
-import { sessionModelRelayRegion, managedCredentialSubject, scopedManagedModelEgress, scopedSessionToolEgress, sessionCredentialOwner } from "./session-credential-ownership";
+import { managedCredentialSubject, scopedManagedModelEgress, scopedSessionToolEgress, sessionCredentialOwner } from "./session-credential-ownership";
 import { remoteICE } from "./hand-remote-ice";
 import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
@@ -188,9 +185,6 @@ import {
   AccountHostedToolsCallRoutes,
   AccountHostedToolsProvider,
 } from "./account-hosted-tools";
-import { RegionalHandRelay, routeRegionalToolHost } from "./regional-hand-relay";
-import { handRelayRegion } from "./regional-hand-routing";
-import { SCREEN_DIRECTORY_HEADER, routeRegionalScreens } from "./regional-screen-routing";
 import { ScreenPlayback, accountToolsPlaybackHost, routeScreenPlayback } from "./screen-playback";
 import { VmHostPool } from "./vm-host-pool";
 import { initializeEmptyVmHostScope, initializeVmHostScopeSchema, markVmHostScopeRegistration, shouldProbeAgentVmHostScope } from "./vm-host-scope";
@@ -507,12 +501,9 @@ export interface Env extends
   NANOCODEX_PERFORMANCE_TRACE?: string;
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;
-  NANOCODEX_HAND_RELAYS?: DurableObjectNamespace<RegionalHandRelay>;
   /** "true" places new native screen publishers in their ingress region's relay. */
-  NANOCODEX_REGIONAL_SCREEN_RELAYS?: string;
   /** Portable HLS playback links and their in-memory media buffers. */
   NANOCODEX_SCREEN_PLAYBACK?: DurableObjectNamespace<ScreenPlayback>;
-  NANOCODEX_REGIONAL_API_KEY_AUTHORITY?: string;
   NANOCODEX_TURN_KEY_ID?: string;
   NANOCODEX_TURN_API_TOKEN?: string;
   NANOCODEX_PHONE_BRIDGE_URL?: string;
@@ -1807,7 +1798,6 @@ async function managedFetchRoute(
   clientIngressColo: string | null = null,
   firstTurn?: Readonly<{ id: string; key: string; input: unknown }>,
 ): Promise<Response> {
-    env = withIngressPlacement(env, clientIngressColo);
     const url = new URL(request.url);
     const nativeInputDiscovery = await routeNativeInputDiscovery(request, env, url);
     if (nativeInputDiscovery) return nativeInputDiscovery;
@@ -2028,18 +2018,7 @@ async function managedFetchRoute(
         return remoteICE(env, principal.userId);
       }
       return timeHandStage(request, "route", async () => {
-        const brokered = (_path: string, init?: { body?: string; directory?: boolean }) => {
-          const source = init?.body === undefined ? request
-            : new Request(request.url, { method: request.method, headers: request.headers, body: init.body });
-          const base = handBrokerRequest(source, principal);
-          const headers = new Headers(base.headers);
-          headers.delete(SCREEN_DIRECTORY_HEADER);
-          if (init?.directory) headers.set(SCREEN_DIRECTORY_HEADER, "1");
-          return new Request(base, { headers });
-        };
-        // Regional screen signaling; legacy IDs and unflagged publishers stay on the owner.
-        return await routeRegionalScreens(request, env, principal.userId, handRelayRegion(request), brokered)
-          ?? env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(brokered(url.pathname));
+        return env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(handBrokerRequest(request, principal));
       });
     }
     if (url.pathname === "/v1/account/hand-relays") {
@@ -2092,7 +2071,9 @@ async function managedFetchRoute(
       }
       const headers = new Headers(request.headers);
       forwardPrincipalAssertions(headers, principal);
-      return routeRegionalToolHost(new Request(request, { headers }), principal.userId, env);
+      headers.set("x-nanocodex-owner-id", principal.userId);
+      return env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId)
+        .fetch(new Request("https://account-tools.internal/tool-host", new Request(request, { headers })));
     }
     if (url.pathname === "/v1/vault/store" || url.pathname === "/v1/vault/card") {
       const principal = await authenticateVaultAccount(request, env, url);
@@ -2111,7 +2092,7 @@ async function managedFetchRoute(
       const validator = principal ? nativeAppValidator(env.NANOCODEX_ACCOUNT_TOOLS, principal.userId,
         { sessionId: "apps:" + crypto.randomUUID(), callId: crypto.randomUUID(), signal: request.signal },
         () => principal.kind !== "connect_grant" && principal.connectGrant === undefined
-          && principal.capabilities.includes("tools:use") && principal.capabilities.includes("agents:write"), env.NANOCODEX_HAND_RELAYS) : undefined;
+          && principal.capabilities.includes("tools:use") && principal.capabilities.includes("agents:write")) : undefined;
       return (await import("./prompt-apps-http")).routeAppsRequest(request, env.NANOCODEX_CRM, principal, validator);
     }
     if (url.pathname === "/v1/crm" || url.pathname.startsWith("/v1/crm/")) {
@@ -2195,7 +2176,7 @@ async function managedFetchRoute(
         const failure = requireSameOriginMutation(request, url, principal);
         if (failure) return failure;
       }
-      return env.NANOCODEX_USERS.getByName(principal.userId, durablePlacementOptions(env.trustedClientIngressColo)).fetch(`https://account.internal${url.pathname.slice(3)}${url.search}`, {
+      return env.NANOCODEX_USERS.getByName(principal.userId).fetch(`https://account.internal${url.pathname.slice(3)}${url.search}`, {
         method: request.method, body: request.body, headers: { "content-type": "application/json" },
       });
     }
@@ -2230,7 +2211,7 @@ async function managedFetchRoute(
       if (failure) return failure;
       if (settings.model.startsWith("claude-")) return json({ error: "claude_ephemeral_unsupported" }, { status: 409 });
       const agentId = uuidV7();
-      const stub = env.NANOCODEX_SESSIONS.getByName(agentId, durablePlacementOptions(clientIngressColo));
+      const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const internal = liveAgentRequest(request, principal!, settings, agentId, clientIngressColo);
       const response = await stub.fetch(internal.url, internal);
       observeManagedPrincipal(env, "managed.agent.live_created", principal!, {
@@ -2343,7 +2324,7 @@ async function managedFetchRoute(
       const startedAt = Date.now();
       const started = performance.now();
       try {
-        const phases = await env.NANOCODEX_SESSIONS.get(id, durablePlacementOptions(clientIngressColo)).activationProbe();
+        const phases = await env.NANOCODEX_SESSIONS.get(id).activationProbe();
         return json({ kind, dispatch_ms: roundMilliseconds(performance.now() - started),
           before_constructor_ms: phases.constructor_entered_at_ms - startedAt,
           constructor_ms: phases.constructor_ms,
@@ -2478,7 +2459,7 @@ async function managedFetchRoute(
         creationConfiguration = body.configuration ?? {};
         if (body.definition_id || body.environment_template_id || Object.keys(creationConfiguration).length) {
           if (principal.connectGrant) return json({ error: "forbidden" }, { status: 403 });
-          const catalog = env.NANOCODEX_USERS.getByName(principal.userId, durablePlacementOptions(env.trustedClientIngressColo));
+          const catalog = env.NANOCODEX_USERS.getByName(principal.userId);
           const readTemplate = async (kind: string, id: string) => {
             const response = await catalog.fetch(`https://account.internal/${kind}/${id}`);
             if (!response.ok) throw new TypeError("template not found");
@@ -2577,7 +2558,7 @@ async function managedFetchRoute(
         ? uuidV7()
         : await idempotentAgentId(principal.userId, requestKey);
       const subject = env.NANOCODEX_SESSIONS.idFromName(agentId).toString();
-      const stub = env.NANOCODEX_SESSIONS.getByName(agentId, durablePlacementOptions(clientIngressColo));
+      const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
       if (durabilityArchive === undefined) {
         // Fused creation needs no speculative registry hint: publication below
@@ -2931,7 +2912,7 @@ async function managedFetchRoute(
         headers.set("origin", request.headers.get("origin")!);
         headers.set("x-nanocodex-verified-share-origin", url.origin);
       }
-      return env.NANOCODEX_SESSIONS.getByName(shared[1]!, durablePlacementOptions(clientIngressColo)).fetch(
+      return env.NANOCODEX_SESSIONS.getByName(shared[1]!).fetch(
         `https://session.internal${path}${url.search}`, {
           method: request.method, headers, body: request.body, signal: request.signal,
         });
@@ -2952,7 +2933,7 @@ async function managedFetchRoute(
       resource: resource === "" ? "state" : resource.split("/")[0],
       ...(routedTurnId === undefined ? {} : { turn_id: routedTurnId }),
     });
-    const stub = env.NANOCODEX_SESSIONS.getByName(agentId, durablePlacementOptions(clientIngressColo));
+    const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
     if (resource === "share-links" || /^share-links\/[^/]+$/.test(resource)) {
       if (url.search)
         return json({ error: "invalid_request" }, { status: 400 });
@@ -3139,7 +3120,7 @@ async function managedFetchRoute(
       // typed checkpoint through a client-visible response.
       const creationKey = `fork:${await hashText(JSON.stringify([agentId, key]))}`;
       const childId = await idempotentAgentId(principal.userId, creationKey);
-      const child = env.NANOCODEX_SESSIONS.getByName(childId, durablePlacementOptions(clientIngressColo));
+      const child = env.NANOCODEX_SESSIONS.getByName(childId);
       const done = await child.fetch("https://session.internal/fork/status", { headers: sessionHeaders });
       if (done.ok) {
         const retained = await done.json<{ parent_agent_id: string; request_key: string; settings: ManagedAgentSettings }>();
@@ -4229,7 +4210,6 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#constructorMs = roundMilliseconds(performance.now() - constructorStartedAt);
   }
 
-  #preparedModelUpgrade?: PreparedModelUpgrade;
   #liveAdmissionReserved = false;
   #storageInitialized = false;
   #initializeStorage(): void {
@@ -5274,7 +5254,6 @@ export class DurableAgentSession extends DurableComputerObject {
         ).one().count > 0) {
         return json({ error: "agent_busy" }, { status: 409 });
       }
-      this.#preparedModelUpgrade?.dispose("exported");
       this.#durabilityExported = true;
       // Fence socket-owned mutation synchronously with the admission flag.
       // No request may cross an await between observing active admission and
@@ -5476,7 +5455,7 @@ export class DurableAgentSession extends DurableComputerObject {
           const context = {sessionId:`native-input-${crypto.randomUUID()}`,callId:crypto.randomUUID(),signal:request.signal};
           this.#fileReadAuthorizations.set(context.sessionId, turnAuthorization);
           try {
-            const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage));
+            const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, new AccountHostedToolsCallRoutes(this.ctx.storage));
             await provider.refresh();
             return json(await this.#nativeSecureInput(session.session_id).submit(payload, context,
               (machine, ctx) => this.#leasedSessionMachineTool(machine, "native_secure_input", ctx)
@@ -5506,7 +5485,7 @@ export class DurableAgentSession extends DurableComputerObject {
         if (path.startsWith("/brain/")) return await downloadBrainFile(this.#brainBucket(), session.session_id, path);
         // This provider is scoped to the authenticated HTTP read, independent of
         // whichever model turn may currently be running (or absent).
-        const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage));
+        const provider = new AccountHostedToolsProvider(this.env.NANOCODEX_ACCOUNT_TOOLS, session.owner_id, () => true, session.session_id, new AccountHostedToolsCallRoutes(this.ctx.storage));
         await provider.refresh();
         const mounts = this.#managedMounts().filter(mount => executionMountOwner(mount) === undefined);
         // Physical computers are account Hands; leased VMs resolve by mount below.
@@ -6184,7 +6163,6 @@ export class DurableAgentSession extends DurableComputerObject {
         await transaction.setAlarm(prepared.cleanup_at);
       });
       this.#credentialBinding = prepared;
-      this.#preparedModelUpgrade?.dispose("imported");
       this.#durabilityImportState = requestedImport ? "pending" : undefined;
     } else if (current.state === "preparing") {
       const refreshed = {
@@ -6652,54 +6630,9 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#accountCatalog.vault(this.env.NANOCODEX, asserted.ownerId, authorityKey),
       ]).then(() => {}));
     }
-    // Header contract: nanocodex/cloudflare/egress.mjs openBrokeredWebSocket;
-    // covered against the real SDK by prepared-model-upgrade-journey.test.mjs.
-    // Reserve the exact SDK transport identity before storage opens its output
-    // gate. This handshake has no prompt and never accepts/sends socket frames.
-    const earlyRuntimeId = prepare && !this.#storageInitialized
-      && !asserted.authorization.connectGrant && !asserted.authorization.guestShareLinkId
-      && this.env.MANAGED_AGENT_DIRECT_CREDENTIALS === "true"
-      && this.env.NANOCODEX_SESSION_MODEL_EGRESS && !settings.model.startsWith("claude-")
-      ? uuidV7() : undefined;
-    if (earlyRuntimeId) {
-      const headers = new Headers({
-        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL", upgrade: "websocket",
-        "openai-beta": "responses_websockets=2026-02-06",
-        "session-id": earlyRuntimeId, "thread-id": earlyRuntimeId, "x-client-request-id": earlyRuntimeId,
-        "x-openai-internal-codex-responses-lite": "true", "x-responsesapi-include-timing-metrics": "true",
-        "user-agent": "nanocodex-js/cloudflare",
-        "x-nanocodex-subject": managedCredentialSubject(this.ctx.id.toString()),
-        "x-nanocodex-session-model-owner": asserted.ownerId,
-      });
-      const region = sessionModelRelayRegion(normalizeProviderColo(request.headers.get(MANAGED_INGRESS_COLO)));
-      if (region) headers.set("x-nanocodex-model-region", region);
-      this.#preparedModelUpgrade = new PreparedModelUpgrade(
-        new Request("https://nanocodex.internal/v1/responses", { headers }), this.env.NANOCODEX_SESSION_MODEL_EGRESS!);
-    }
     this.#liveAdmissionReserved = true;
     try {
-      if (earlyRuntimeId) {
-        // A remote holder acknowledges ownership of the auth-only handshake
-        // before these writes close our output gate. WebSocket transfer and
-        // every inference frame still wait for durable admission.
-        await this.#preparedModelUpgrade?.acknowledged();
-        // Trusted RPCs may run during the yield. Never overwrite ownership or
-        // resurrect a session retired/imported by another handler.
-        if (this.#deleting || this.#deleted || this.#durabilityExported
-          || this.#durabilityImportState || this.#credentialBinding
-          || (this.#storageInitialized && (this.#sessionId() || this.#initializationOwnership()))) {
-          this.#preparedModelUpgrade?.dispose("admission_failed");
-          return json({ error: "agent_initialized" }, { status: 409 });
-        }
-      }
       this.#initializeStorage();
-      if (earlyRuntimeId) {
-        // Same schema/identity consumed by Cloudflare Agent durableIdentity.
-        // Persist in the initial ownership batch; never replace an existing ID.
-        this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_agent (
-          singleton INTEGER PRIMARY KEY CHECK (singleton = 1), session_id TEXT NOT NULL UNIQUE)`);
-        this.ctx.storage.sql.exec("INSERT INTO nanocodex_cloudflare_agent(singleton,session_id) VALUES(1,?)", earlyRuntimeId);
-      }
       const credentialBinding: CredentialBindingOwnership = {
         cleanup_at: Date.now(),
         owner_id: asserted.ownerId,
@@ -6723,15 +6656,12 @@ export class DurableAgentSession extends DurableComputerObject {
         public_origin: publicOrigin,
         settings,
       }, normalizeProviderColo(request.headers.get(MANAGED_INGRESS_COLO)));
-      if (!initialized.ok) { this.#preparedModelUpgrade?.dispose("admission_failed"); return initialized; }
+      if (!initialized.ok) return initialized;
 
       this.#publishLiveRegistration(asserted.ownerId, sessionId);
       const response = this.#upgrade(asserted.authorization, null, callerContext(request.headers), prepare);
       performanceCommit(this.ctx, "session.create.commit");
       return response;
-    } catch (error) {
-      this.#preparedModelUpgrade?.dispose("admission_failed");
-      throw error;
     } finally {
       this.#liveAdmissionReserved = false;
     }
@@ -9528,7 +9458,6 @@ export class DurableAgentSession extends DurableComputerObject {
     // Fence reconstruction first. A crash after this transaction is recovered
     // by the retained marker/alarm even if the local SQL tombstone has not yet
     // been written. The reverse order can strand external ownership forever.
-    this.#preparedModelUpgrade?.dispose("deleted");
     this.#deleting = true;
     this.#eventLog?.discardStaged();
     this.#hostedTools.shutdown("managed agent is being deleted");
@@ -9572,7 +9501,6 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async #performOwnedSessionDeletion(generation: number): Promise<void> {
-    this.#preparedModelUpgrade?.dispose("deleted");
     this.#deleting = true;
     this.#eventLog?.discardStaged();
     // Reconstruction can enter here from a marker committed just before a
@@ -9598,7 +9526,7 @@ export class DurableAgentSession extends DurableComputerObject {
     if (session?.runtime_profile === "managed") {
       await performanceStage("delete.attachments", () => this.#attachmentStore().cleanup());
       const scope = this.#contextScope(session);
-      const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id, durablePlacementOptions(this.#routingOrigin().clientIngressColo));
+      const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id);
       const tombstoned = await performanceStage("delete.memory", () => memory.fetch(
         `https://memory.internal/threads/${session.session_id}`,
         {
@@ -10186,7 +10114,6 @@ export class DurableAgentSession extends DurableComputerObject {
           : this.#authorizationForToolContext(context),
       ),
       session.session_id,
-      this.env.NANOCODEX_HAND_RELAYS,
       new AccountHostedToolsCallRoutes(this.ctx.storage),
     );
     this.ctx.waitUntil(performanceStage("account.hosted_tools", () => this.#accountHostedTools!.refreshOptional(MANAGED_ACCESS_TTL_MS))
@@ -11062,7 +10989,7 @@ export class DurableAgentSession extends DurableComputerObject {
           const auth = this.#authorizationForToolContext(context);
           return this.#hasFullAccountAuthority(auth) && auth!.capabilities.includes("tools:use")
             && auth!.capabilities.includes("agents:write");
-        }, this.env.NANOCODEX_HAND_RELAYS, new AccountHostedToolsCallRoutes(this.ctx.storage)),
+        }, new AccountHostedToolsCallRoutes(this.ctx.storage)),
       })),
       ...(multiplayer ? [] : crmTools({
         db: this.env.NANOCODEX_CRM, ownerId: session.owner_id,
@@ -11523,8 +11450,7 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async #refreshApiKeyAuthorization(authorization: TurnAuthorization): Promise<TurnAuthorization> {
-    const key = await resolvePermissionKey(this.env, this.#permissionIdentity(authorization), authorization.apiKeyObjectId,
-      regionalApiKeyAuthorityRegion(this.#routingOrigin().clientIngressColo, this.env.NANOCODEX_REGIONAL_API_KEY_AUTHORITY));
+    const key = await resolvePermissionKey(this.env, this.#permissionIdentity(authorization), authorization.apiKeyObjectId);
     if (!key) throw new ManagedRequestError(403, "login_unavailable", "This login was revoked or its account permissions changed. Sign in again.");
     return { ...authorization, capabilities: key.capabilities };
   }
@@ -11637,7 +11563,6 @@ export class DurableAgentSession extends DurableComputerObject {
       organizationId: teamId ?? this.#contextScope(session).organization_id, teamId: teamId ?? this.#contextScope(session).team_id, ownerId: session.owner_id,
       automaticTeamContribution: !!this.#contextTeamId(),
       sessionId: session.session_id, memories: this.env.NANOCODEX_MEMORY,
-      clientIngressColo: this.#routingOrigin().clientIngressColo,
       personal: context => !teamId && !this.#contextTeamId() && !this.#authorizationForToolContext(context)?.connectGrant,
       authorize: async (name, context) => {
         if (teamId) await this.#requireReadableCompanyContext(teamId);
@@ -11713,7 +11638,7 @@ export class DurableAgentSession extends DurableComputerObject {
       const load = async (visibility: MemoryVisibility) => {
         if (this.#contextTeamId() && visibility === "personal") return undefined;
         const target = memoryTarget(coordinates.organization_id, coordinates.team_id, session.owner_id, visibility);
-        const memory = this.env.NANOCODEX_MEMORY.getByName(target.name, durablePlacementOptions(this.#routingOrigin().clientIngressColo));
+        const memory = this.env.NANOCODEX_MEMORY.getByName(target.name);
         const response = await memory.fetch("https://memory.internal/personalization", {
           method: "POST", signal: AbortSignal.timeout(5_000),
           headers: { [MEMORY_ORGANIZATION_ASSERTION]: coordinates.organization_id,
@@ -11765,7 +11690,7 @@ export class DurableAgentSession extends DurableComputerObject {
     await this.#requireContextMembership();
     if (teamId) await this.#requireReadableCompanyContext(teamId);
     const scope = teamId ? { organization_id: teamId, team_id: teamId } : this.#contextScope(session);
-    const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id, durablePlacementOptions(this.#routingOrigin().clientIngressColo));
+    const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id);
     const response = await memory.fetch("https://memory.internal/search", {
       method: "POST",
       headers: {
@@ -11798,7 +11723,7 @@ export class DurableAgentSession extends DurableComputerObject {
     await this.#requireContextMembership();
     if (teamId) await this.#requireReadableCompanyContext(teamId);
     const scope = teamId ? { organization_id: teamId, team_id: teamId } : this.#contextScope(session);
-    const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id, durablePlacementOptions(this.#routingOrigin().clientIngressColo));
+    const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id);
     const response = await memory.fetch("https://memory.internal/read", {
       method: "POST",
       headers: {
@@ -13034,7 +12959,7 @@ export class DurableAgentSession extends DurableComputerObject {
     if (rows.length === 0) return;
     await this.#requireContextMembership(true);
     const scope = this.#contextScope(session);
-    const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id, durablePlacementOptions(this.#routingOrigin().clientIngressColo));
+    const memory = this.env.NANOCODEX_MEMORY.getByName(scope.organization_id);
     for (const row of rows) {
       if (this.#deleting) return;
       try {
@@ -13244,19 +13169,12 @@ export class DurableAgentSession extends DurableComputerObject {
         binding: {
           fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
             const request = new Request(input, init);
-            const prepared = this.#preparedModelUpgrade;
-            const generation = this.#runtimeOwnershipGeneration;
-            const valid = () => this.#runtimeOwnershipGeneration === generation
-              && owner() === request.headers.get("x-nanocodex-session-model-owner")
-              && (!prepared || this.#preparedModelUpgrade === prepared);
-            const response = await prepared?.take(request, () => this.ctx.storage.sync(), valid);
-            // Retirement can run while awaiting preparation or durability. An
-            // obsolete request must not escape through the ordinary fallback.
-            if (!valid()) throw new Error("Managed model ownership is no longer available");
-            return response ?? this.env.NANOCODEX_SESSION_MODEL_EGRESS!.fetch(request);
+            if (owner() !== request.headers.get("x-nanocodex-session-model-owner")) {
+              throw new Error("Managed model ownership is no longer available");
+            }
+            return this.env.NANOCODEX_SESSION_MODEL_EGRESS!.fetch(request);
           },
         } as Fetcher,
-        clientIngressColo: () => this.#routingOrigin().clientIngressColo,
         owner,
       },
       this.#configuration().chatgpt_account_id,
@@ -13631,8 +13549,6 @@ export class DurableAgentSession extends DurableComputerObject {
     strict = false,
     options: { preserveAccountDiscovery?: boolean } = {},
   ): Promise<void> {
-    this.#preparedModelUpgrade?.dispose("retired");
-    this.#preparedModelUpgrade = undefined;
     // Idle retirement leaves account authority and the original discovery TTL
     // intact. Other lifecycle transitions still invalidate discovery, including
     // settings changes, deletion, and credential recovery.
@@ -15082,7 +14998,6 @@ async function routeHistoryRequest(
       const memoryOptions: Parameters<typeof markdownMemoryTools>[0] = {
         organizationId: contextOrganization, teamId: contextTeam, ownerId: principal.userId,
         sessionId: principal.subjectId, memories: env.NANOCODEX_MEMORY,
-        clientIngressColo: env.trustedClientIngressColo,
         personal: () => !contextTeamId && !principal.connectGrant,
         automaticTeamContribution: !!contextTeamId,
         authorize: async (name) => {
@@ -15109,8 +15024,7 @@ async function routeHistoryRequest(
         throw new HistorySearchError(400, "invalid_request", "supported field is turn_ids");
       input = parseHistoryReadSessionInput({ ...value, session_id: read![1] });
     }
-    const memoryScope = env.NANOCODEX_MEMORY.getByName(contextOrganization,
-      durablePlacementOptions(env.trustedClientIngressColo));
+    const memoryScope = env.NANOCODEX_MEMORY.getByName(contextOrganization);
     const response = await memoryScope.fetch(`https://memory.internal${find ? "/search" : "/read"}`, {
       method: "POST",
       headers: {
