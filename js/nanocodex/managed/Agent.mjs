@@ -136,11 +136,17 @@ function managedCreateOptions(options) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError("managed agent options must be an object");
   }
-  const { settings, configuration, definitionId, environmentTemplateId, idempotencyKey: creationKey, ...clientOptions } = options;
+  const { scope, settings, configuration, definitionId, environmentTemplateId, idempotencyKey: creationKey, ...clientOptions } = options;
   if (creationKey !== undefined && (typeof creationKey !== "string" || !IDEMPOTENCY_KEY.test(creationKey))) {
     throw new TypeError("invalid managed creation idempotency key");
   }
+  if (scope !== undefined && (!scope || typeof scope !== "object" || Array.isArray(scope)
+    || (scope.type === "personal" ? Object.keys(scope).join() !== "type"
+      : scope.type !== "team" || Object.keys(scope).sort().join() !== "team_id,type"
+        || typeof scope.team_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(scope.team_id))))
+    throw new TypeError("scope must be personal or an explicit team ID");
   const extensions = {
+    ...(scope === undefined ? {} : { scope }),
     ...(configuration === undefined ? {} : { configuration }),
     ...(definitionId === undefined ? {} : { definition_id: templateId(definitionId) }),
     ...(environmentTemplateId === undefined ? {} : { environment_template_id: templateId(environmentTemplateId) }),

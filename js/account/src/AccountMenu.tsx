@@ -1,4 +1,5 @@
 import "./AccountConnections.css";
+import { TeamsPanel } from "./TeamsPanel";
 import { AdminPanel } from "./AdminPanel";
 import { AccountCommunication } from "./AccountCommunication";
 import { ClaudeConnection } from "./ClaudeConnection";
@@ -380,6 +381,7 @@ function AccountMenuContent({ inline, section }: { inline: boolean; section: Acc
         </> : null}
 
         {section === "access" ? <>
+          <TeamsPanel />
           <AccountConnectionSection
             eyebrow="Access"
             meta="CLI, CI, and other clients"
@@ -535,6 +537,7 @@ function AccountMenuContent({ inline, section }: { inline: boolean; section: Acc
               ) : null}
 
               <div className={inline ? "account-profile-content wizard-sections" : "api-key-panel account-profile-content"}>
+                {accountPersistent ? <TeamsPanel /> : null}
                 <AccountCommunication inline={inline} />
                 <AdminPanel inline={inline} />
                 <section className={inline ? "wizard-section" : undefined} aria-labelledby="connections-heading">

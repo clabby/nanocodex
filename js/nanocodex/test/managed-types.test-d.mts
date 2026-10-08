@@ -28,6 +28,19 @@ async function checkManaged() {
   Agent.readThread;
   const created: ManagedAgent = await Agent.create();
   await Agent.create({ idempotencyKey: "create:job-42" });
+  await Agent.create({ scope: { type: "personal" } });
+  await Agent.create({ scope: { type: "team", team_id: "018f0000-0000-4000-8000-000000000001" } });
+  // @ts-expect-error team scope requires an explicit team ID.
+  await Agent.create({ scope: { type: "team" } });
+  // @ts-expect-error personal scope cannot carry a team ID.
+  await Agent.create({ scope: { type: "personal", team_id: "team" } });
+  // @ts-expect-error unsupported scope kind.
+  await Agent.create({ scope: { type: "company", team_id: "team" } });
+  const scope = (await created.state()).scope;
+  if (scope?.type === "team") {
+    const teamId: string = scope.team_id;
+    void teamId;
+  }
   // @ts-expect-error creation keys must be strings.
   await Agent.create({ idempotencyKey: 42 });
   await created.events.page({ after: "0", limit: 128 });
@@ -46,6 +59,7 @@ async function checkManaged() {
   });
   const combined = await Agent.createAndPrompt({
     idempotencyKey: "run:job-42",
+    scope: { type: "team", team_id: "018f0000-0000-4000-8000-000000000001" },
     input: "Start the durable job",
     configuration: { tools: [], multi_agent: { enabled: false } },
   });

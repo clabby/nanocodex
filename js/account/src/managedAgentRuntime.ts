@@ -147,7 +147,7 @@ export async function loadManagedConversationSelection(options: Readonly<{
 
 /** A local-only id gives the new tab an identity before the server acknowledges it.
  * Never pass this id to Agent.open or put it in the URL. */
-export function beginManagedConversationCreation(accountId: string): Readonly<{
+export function beginManagedConversationCreation(accountId: string, teamId?: string): Readonly<{
   provisional: ManagedConversation;
   receipt: Promise<ManagedConversation>;
 }> {
@@ -157,7 +157,7 @@ export function beginManagedConversationCreation(accountId: string): Readonly<{
     updatedAt: Date.now(),
     turnCount: 0,
   });
-  return { provisional, receipt: createManagedConversation(accountId) };
+  return { provisional, receipt: createManagedConversation(accountId, undefined, teamId) };
 }
 
 /** A late create receipt must not take focus back from a tab chosen since creation. */
@@ -172,8 +172,9 @@ export function reconcileManagedCreateSelection(
 export function createManagedConversation(
   accountId = "default",
   settings?: ManagedCreateSettings,
+  teamId?: string,
 ): Promise<ManagedConversation> {
-  const creationKey = `${accountId}:${JSON.stringify(settings)}`;
+  const creationKey = `${accountId}:${JSON.stringify(settings)}:${teamId ?? "personal"}`;
   const retained = managedCreates.get(creationKey);
   if (retained) return retained;
   const creating = (async () => {
@@ -191,7 +192,7 @@ export function createManagedConversation(
     if (currentSession && currentSession.account?.id !== accountId) {
       throw new Error("The account changed before creation. Start a new chat from the current account.");
     }
-    return Agent.create({ settings: selected });
+    return Agent.create({ settings: selected, ...(teamId ? { scope: { type: "team", team_id: teamId } as const } : {}) });
   })().then((agent) => {
     const conversation = Object.freeze({
       id: agent.id,

@@ -10,6 +10,11 @@ const hook = registerHooks({
       shortCircuit: true,
       url: `data:text/javascript,${encodeURIComponent("export class Container { constructor(ctx) { this.ctx = ctx; } fetch(request) { return this.ctx.dispatch(request); } }")}`,
     };
+    // Native tracing is supplied by workerd, like the Container base above.
+    if (specifier === "cloudflare:workers") return {
+      shortCircuit: true,
+      url: `data:text/javascript,${encodeURIComponent("export const tracing = { enterSpan(name, callback) { return callback({ setAttribute() {}, recordException() {} }); } };")}`,
+    };
     return nextResolve(specifier, context);
   },
 });

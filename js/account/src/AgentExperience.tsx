@@ -1,3 +1,4 @@
+import { TeamSessionChooser } from "./TeamSessionChooser";
 import { ManagedAgentInspector } from "./ManagedAgentInspector";
 import { sessionQueryKey } from "./queryClient";
 import type { BrowserSession } from "./sessionQueries";
@@ -67,6 +68,7 @@ export const AgentExperience = memo(function AgentExperience({
   const navigate = useNavigate();
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [teamChooserOpen, setTeamChooserOpen] = useState(false);
   const [ephemeralThreadId, setEphemeralThreadId] = useState(() => crypto.randomUUID());
   const account = useAccountSession();
   const capabilityError = useMemo(() => browserAgentCapabilityError(), []);
@@ -100,6 +102,10 @@ export const AgentExperience = memo(function AgentExperience({
     && hasDurableCredential && authStatus?.state === "ready";
   const queryClient = useQueryClient();
   const accountId = account.account?.id;
+  const scopeQuery = useQuery({
+    ...managedConversationQueryOptions(accountId ?? "", managedConversationId ?? ""),
+    enabled: !landing && !!accountId && !!managedConversationId && !managedConversationId.startsWith("pending:"),
+  });
   const conversationsQuery = useQuery({
     ...managedConversationsQueryOptions(accountId ?? ""),
     refetchInterval: 10_000,
@@ -142,6 +148,7 @@ export const AgentExperience = memo(function AgentExperience({
     selectionRef.current = undefined;
     creatingRef.current = undefined;
     setCreatePending(false);
+    setTeamChooserOpen(false);
     setOptimisticConversation(undefined);
     setPendingDraft("");
     setManagedConversationId(undefined);
@@ -238,13 +245,14 @@ export const AgentExperience = memo(function AgentExperience({
     setRuntimeState(undefined);
     onAgentChange?.(id);
   }, [account.account, onAgentChange, visibleManagedConversationId]);
-  const createConversation = useCallback(() => {
+  const createConversation = useCallback((teamId?: string) => {
+    setTeamChooserOpen(false);
     setShareOpen(false);
     if (creatingRef.current || !canCreateManaged || !account.account) return;
     const accountId = account.account.id;
     const previousId = selectionRef.current;
     const routeAtCreation = routeAgentIdRef.current;
-    const { provisional, receipt } = beginManagedConversationCreation(accountId);
+    const { provisional, receipt } = beginManagedConversationCreation(accountId, teamId);
     ++selectionIntent.current;
     selectionRef.current = provisional.id;
     creatingRef.current = { id: provisional.id, accountId, routeAgentId: routeAtCreation };
@@ -306,6 +314,7 @@ export const AgentExperience = memo(function AgentExperience({
   }, [refreshModelSession]);
 
   const newChat = () => {
+    setTeamChooserOpen(false);
     closeSidebar();
     if (landing) {
       setRuntimeState(undefined);
@@ -329,8 +338,9 @@ export const AgentExperience = memo(function AgentExperience({
       <div className="conversation-main">
         <header className="agent-chat-header">
           <button ref={sidebarTriggerRef} className="agent-sidebar-toggle chat-icon-button" type="button" onClick={() => { if (window.matchMedia("(min-width: 761px)").matches) toggleDesktopSidebar(); else setRailOpen(true); }} aria-label="Open sidebar" aria-expanded={railOpen} aria-controls="agent-navigation"><PanelLeft aria-hidden="true" /></button>
-          <div className="agent-chat-heading"><strong>{landing ? "Nanocodex" : title}</strong></div>
+          <div className="agent-chat-heading"><strong>{landing ? "Nanocodex" : title}</strong>{!landing && <span className="agent-scope">{scopeQuery.data?.scope?.type === "team" ? `Team session · ${scopeQuery.data.scope.team_id}` : scopeQuery.isError ? "Scope unavailable" : scopeQuery.data ? "Private session" : "Loading scope…"}</span>}</div>
           <div className="agent-chat-header-actions">
+            {!landing && canCreateManaged && <button type="button" disabled={createPending} onClick={() => setTeamChooserOpen(true)}>New team session</button>}
             {!landing ? <button className="chat-running-agents" type="button" aria-label="Running agents" title="Show running agents" onClick={() => { setRunningOnly(true); setRailOpen(true); if (window.matchMedia("(min-width: 761px)").matches) setSidebarCollapsed(false); }}><span className="chat-running-dot" aria-hidden="true" />{runningCount}<span className="agent-terminal-sr-only"> running agents</span></button> : null}
             {!landing && visibleManagedConversationId && !visibleManagedConversationId.startsWith("pending:") ? <button className="chat-icon-button" type="button" aria-label="Share thread" title="Share thread" onClick={() => setShareOpen(true)}><Share2 aria-hidden="true" /></button> : null}
             {managedConversationId && <button type="button" onClick={() => setInspectorOpen(open => !open)} aria-expanded={inspectorOpen}>Inspect</button>}
@@ -339,6 +349,7 @@ export const AgentExperience = memo(function AgentExperience({
             <button className="chat-icon-button" type="button" disabled={createPending || (!landing && sessionChecking)} onClick={newChat} aria-label={landing ? "New chat" : "New agent"} title={landing ? "New chat" : "New agent"}><SquarePen aria-hidden="true" /></button>
           </div>
         </header>
+        {teamChooserOpen && <TeamSessionChooser key={accountId} onCreate={createConversation} onClose={() => setTeamChooserOpen(false)} />}
         {shareOpen && visibleManagedConversationId && !visibleManagedConversationId.startsWith("pending:") ? <ThreadShareDialog key={visibleManagedConversationId} agentId={visibleManagedConversationId} onClose={() => setShareOpen(false)} /> : null}
         {inspectorOpen && managedConversationId && <ManagedAgentInspector key={`${account.account?.id}:${managedConversationId}`} agentId={managedConversationId} onClose={() => setInspectorOpen(false)} />}
         {LOCAL_SPONSORED_TRIAL_RESET && showHomepageTrialReset ? (
