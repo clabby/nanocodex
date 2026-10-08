@@ -4,7 +4,7 @@ import {
 } from "@cloudflare/sandbox";
 
 import { handleManagedEgress } from "./managed-egress";
-import { SandboxDesktop, type SandboxDesktopScope, type SandboxHandHosts } from "./sandbox-desktop";
+import { SandboxDesktop, type SandboxHandHosts } from "./sandbox-desktop";
 import { BRAIN_INLINE_BYTES } from "./brain-bucket";
 
 export type SandboxRuntimeEnv = Readonly<{
@@ -31,11 +31,7 @@ export class Sandbox extends CloudflareSandbox<SandboxRuntimeEnv> {
     });
   }
 
-  /** Called after the retained workspace is mounted, through trusted Worker RPC. */
-  async configureRemoteDesktop(scope: SandboxDesktopScope): Promise<void> {
-    await this.remoteDesktop().configure(scope);
-  }
-
+  /** Revokes a desktop Hand enrolled before sandboxes stopped being Hands. */
   async clearRemoteDesktop(): Promise<void> {
     if (await this.ctx.storage.get("nanocodex-desktop")) await this.remoteDesktop().clear();
   }

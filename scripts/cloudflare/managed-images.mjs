@@ -23,14 +23,17 @@ export const images = {
       'js/managed/scripts/prepare-hand-image.mjs', 'js/managed/scripts/bundle-hand-desktop.sh',
       'js/managed/scripts/check-dev-stack.sh', 'hands/remote/image/labwc',
       'crates/nanocodex-vm/image/toolkit'],
-    package: 'nanocodex2-bin',
+    // No Rust package: Cloudflare sandboxes are execution environments, not Hands.
   },
 };
 const commonInputs = ['scripts/cloudflare/managed-images.mjs', 'scripts/cloudflare/wrangler-docker.mjs',
   'scripts/cloudflare/managed-image-inputs.py'];
+export function rustInputs(pkg, cwd = process.cwd()) {
+  return JSON.parse(execFileSync('python3', [fileURLToPath(new URL('./managed-image-inputs.py', import.meta.url)), pkg], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+}
 export function imageInputs(image, cwd = process.cwd()) {
   assert.ok(images[image], 'unknown managed image');
-  const rust = JSON.parse(execFileSync('python3', [fileURLToPath(new URL('./managed-image-inputs.py', import.meta.url)), images[image].package], { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+  const rust = images[image].package ? rustInputs(images[image].package, cwd) : [];
   return [...images[image].inputs, ...rust, ...commonInputs];
 }
 export function fingerprint(image, account, epoch = '1', cwd = process.cwd()) {

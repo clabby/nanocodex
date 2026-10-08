@@ -337,36 +337,9 @@ the retained desktop republish during that independent handshake. Cancellation,
 allocation identity, and server-side lease checks remain in force. Transport
 diagnostics report reset categories without peer text or credentials.
 
-## Cloudflare sandbox desktops
+## Cloudflare sandboxes
 
-The managed sandbox image and lifecycle now include the Linux desktop publisher.
-`NANOCODEX_SANDBOX_DESKTOPS=true` enables it after the retained workspace and peer
-mounts are prepared. The mount receives a separate revocable publisher identity,
-reuses its credential after sleep, and restarts the process on the next trusted
-workspace preparation. Removing the sandbox revokes its publication before
-stopping the container. Idle sleep remains governed by the Sandbox SDK.
-
-The SDK image currently uses Ubuntu 22.04, which has no labwc package. Its custom
-image bundles the Debian desktop executables and their own loader/libraries,
-leaving the SDK's system libraries intact. Waymote is cross-compiled natively so
-Apple Silicon builds do not depend on Rosetta compiling Zig-generated helpers.
-
-Cloudflare's [outbound policy](https://developers.cloudflare.com/sandbox/guides/outbound-traffic/)
-blocks raw WebRTC networking with `enableInternet=false`. Sandboxes therefore
-publish explicit `frames-v1` surfaces through an intercepted HTTPS destination.
-The trusted mount determines the exact account/publisher route, and the broker
-still verifies its scoped bearer credential. The network policy stays enabled.
-
-Frames are requested on demand, at most once per 100 ms, with one request in
-flight per viewer. JPEG payloads are bounded to 700,000 base64 characters and
-1280 pixels per dimension. Web/native clients validate dimensions before
-allocation and clear stale images and control on disconnect. Input uses the same
-exclusive host lease, generation and sequence checks as WebRTC. These are paced
-screen updates, not the VM's 60 fps video transport.
-
-Device inventory is available at `GET /v1/account/hands`; screen viewers use
-`GET /v1/account/hands/screens`. These remain separate inventories.
-
-References: [Cloudflare Realtime](https://developers.cloudflare.com/realtime/),
-[Waymote](https://github.com/rockorager/waymote),
-[Appium WebDriverAgent](https://github.com/appium/WebDriverAgent).
+Cloudflare sandboxes are execution environments, not Hands. The managed sandbox
+image never compiles or runs Nanocodex, and sandbox mounts no longer enroll a
+desktop publisher. Removing a sandbox still revokes any publisher enrolled
+before this change. Use a user Hand or the SSH Hand image for remote desktops.

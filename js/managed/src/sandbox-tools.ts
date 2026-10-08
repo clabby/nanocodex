@@ -10,7 +10,6 @@ import {
   WRITE_STDIN_PARAMETERS,
 } from "nanocodex-tools/execution-contract";
 
-import { serverHandID } from "./hand-hosts";
 import { isPrivateEgressHeader } from "./managed-egress";
 import type { Sandbox } from "./sandbox-runtime";
 
@@ -152,7 +151,6 @@ export function cloudflareSandboxTools(
   namespaceMounts?: () => readonly CloudflareSandboxNamespaceMount[],
   brainWorkspace?: CloudflareBrainWorkspace,
   accountSubject?: string,
-  desktop?: { owner: string; name: string },
   connectGrantId?: string,
 ): ToolMap {
   return createCloudflareSandboxTools(
@@ -169,7 +167,6 @@ export function cloudflareSandboxTools(
           namespaceMounts(),
           brainWorkspace,
         ));
-      if (desktop) await configureDesktop(namespace, sessionId, desktop);
       return sandbox;
     },
     publicOrigin === undefined || previewSecret === undefined
@@ -215,7 +212,6 @@ async function prepareMeasuredCloudflareSandboxHand(
   localBucket = false,
   brainWorkspace?: CloudflareBrainWorkspace,
   accountSubject?: string,
-  desktop?: { owner: string; name: string },
   connectGrantId?: string,
 ): Promise<void> {
   if (accountSubject !== undefined) await performanceStage("sandbox.bind_egress", () => sandboxHandle(namespace, resourceId).bindAccountEgress(accountSubject, connectGrantId));
@@ -231,14 +227,6 @@ async function prepareMeasuredCloudflareSandboxHand(
     normalized,
     brain,
   );
-  if (desktop) await performanceStage("sandbox.desktop", () => configureDesktop(namespace, resourceId, desktop));
-}
-
-async function configureDesktop(namespace: DurableObjectNamespace<Sandbox>, resourceId: string, desktop: { owner: string; name: string }) {
-  await sandboxHandle(namespace, resourceId).configureRemoteDesktop({
-    owner: desktop.owner, id: await serverHandID(desktop.owner, `cloudflare:${resourceId}`),
-    machineId: `cf:${resourceId}`, name: desktop.name,
-  });
 }
 
 export async function destroyCloudflareSandbox(

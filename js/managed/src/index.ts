@@ -563,7 +563,6 @@ export interface Env extends
   MANAGED_REALTIME_ARCHIVE_RECENT_OPERATIONS?: string;
   DEPLOYMENT_SHA?: string;
   NANOCODEX_SANDBOX_LOCAL?: string;
-  NANOCODEX_SANDBOX_DESKTOPS?: string;
 }
 
 type SessionRow = {
@@ -10622,7 +10621,6 @@ export class DurableAgentSession extends DurableComputerObject {
             () => this.#cloudflareNamespaceMounts(mount, "mounted"),
             { resourceId: session.session_id },
             this.#credentialSubject(),
-            this.env.NANOCODEX_SANDBOX_DESKTOPS === "true" && executionMountOwner(mount) === undefined ? { owner: session.owner_id, name: managedMountDisplayName(mount) } : undefined,
             executionMountOwner(mount) ?? undefined,
           );
           sandboxToolsByMount.set(mount.provider_resource_id, tools);
@@ -11983,7 +11981,6 @@ export class DurableAgentSession extends DurableComputerObject {
           this.env.NANOCODEX_SANDBOX_LOCAL === "true",
           { resourceId: session.session_id },
           this.#credentialSubject(),
-          this.env.NANOCODEX_SANDBOX_DESKTOPS === "true" && executionMountOwner(mount) === undefined ? { owner: session.owner_id, name: managedMountDisplayName(mount) } : undefined,
           executionMountOwner(mount) ?? undefined,
         );
         return;

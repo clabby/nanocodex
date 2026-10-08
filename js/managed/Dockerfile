@@ -1,50 +1,6 @@
 # syntax=docker/dockerfile:1
-# Build against the same libc family as the Sandbox runtime. The publisher is
-# the shared Rust Hand implementation; Go remains only a developer toolchain.
-FROM ubuntu:22.04 AS screen-helpers
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates curl git xz-utils python3 build-essential pkg-config binutils \
-    meson ninja-build libwayland-dev libwayland-bin libxkbcommon-dev libpixman-1-dev libpng-dev \
-    && rm -rf /var/lib/apt/lists/*
-WORKDIR /source
-COPY .generated/remote-rust/scripts/build-linux-screen-helpers.sh .generated/remote-rust/scripts/build-linux-screen-helpers.py ./scripts/
-COPY .generated/remote-rust/scripts/tests/linux-screen-helpers-bundle.py ./scripts/tests/
-RUN scripts/build-linux-screen-helpers.sh --auto /out/linux-screen-helpers.tar.gz /tmp/screen-build
-
-FROM --platform=$TARGETPLATFORM ubuntu:22.04 AS hand-chef
-# Explicit upstream refresh without disabling normal source-layer reuse.
-ARG NANOCODEX_IMAGE_CACHE_EPOCH=1
-RUN test -n "$NANOCODEX_IMAGE_CACHE_EPOCH"
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl git cmake pkg-config libssl-dev clang libpulse-dev libxkbcommon-dev \
-    libasound2-dev libudev-dev libwayland-dev libpipewire-0.3-dev libspa-0.2-dev uuid-dev \
-    && rm -rf /var/lib/apt/lists/*
-ENV CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:${PATH}
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --profile minimal --default-toolchain 1.97.0
-# Install once in the toolchain layer, independently of application sources.
-RUN cargo install cargo-chef --version 0.1.78 --locked --jobs 2
-WORKDIR /source
-
-FROM hand-chef AS hand-planner
-COPY .generated/remote-rust/ ./
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM hand-chef AS hand
-COPY --from=hand-planner /source/recipe.json recipe.json
-# Cook only the recipe in this otherwise empty directory. Keep target AND Cargo
-# sources in image layers so a fresh builder can reuse the exported dependencies.
-RUN cargo chef cook --release --locked -p nanocodex2-bin --bin nanocodex2 --recipe-path recipe.json
-RUN apt-get update && apt-get install -y --no-install-recommends python3 \
-    && rm -rf /var/lib/apt/lists/*
-COPY .generated/remote-rust/ ./
-COPY --from=screen-helpers /out/linux-screen-helpers.tar.gz /opt/linux-screen-helpers.tar.gz
-RUN NANOCODEX_LINUX_SCREEN_BUNDLE=/opt/linux-screen-helpers.tar.gz \
-    cargo build --release --locked -p nanocodex2-bin --bin nanocodex2 \
-    && mkdir -p /out && cp target/release/nanocodex2 /out/nanocodex-remote \
-    && python3 scripts/tests/linux-screen-helpers-bundle.py \
-       --binary /out/nanocodex-remote /opt/linux-screen-helpers.tar.gz
-
+# Cloudflare sandboxes are execution environments, not Hands: this image never
+# compiles or ships Nanocodex.
 # The SDK's Ubuntu 22.04 base has no labwc package. Bundle the VM's Debian
 # desktop stack with its own loader, preserving the SDK and shell libraries.
 FROM debian:trixie-slim AS desktop-libs
@@ -208,7 +164,6 @@ COPY --chmod=0755 scripts/check-dev-stack.sh /usr/local/bin/nanocodex-check-dev-
 ARG CI_TESTS_ENABLED=true
 RUN if [ "$CI_TESTS_ENABLED" != "false" ]; then sh /usr/local/bin/nanocodex-check-dev-stack; fi
 
-COPY --from=hand /out/nanocodex-remote /usr/local/bin/nanocodex-remote
 COPY --from=desktop /opt/nanocodex-desktop /opt/nanocodex-desktop
 COPY --from=desktop /out/desktop-bin/ /usr/local/bin/
 # wlroots uses this compiled-in path when starting Xwayland.

@@ -19,10 +19,6 @@ test('real Docker contexts have stable recipes and reconstruct their external ta
   mkdirSync(join(root, '.cache'), { recursive: true });
   const temporary = mkdtempSync(join(root, '.cache/docker-rust-recipe-'));
   try {
-    // Exercise the actual sandbox context generator, including tracked assets.
-    run(process.execPath, ['js/managed/scripts/prepare-hand-image.mjs'], root);
-    const managed = join(temporary, 'managed');
-    cpSync(join(root, 'js/managed/.generated/remote-rust'), managed, { recursive: true });
     const phone = join(temporary, 'phone');
     const roots = ['Cargo.toml', 'Cargo.lock', 'bin', 'crates', 'examples', 'js/nanocodex', 'py/bindings', 'third_party'];
     for (const path of run('git', ['ls-files', '-z', '--', ...roots], root).split('\0').filter(Boolean)) {
@@ -33,19 +29,17 @@ test('real Docker contexts have stable recipes and reconstruct their external ta
       run(binary, ['chef', 'prepare', '--recipe-path', 'recipe.json'], cwd);
       return readFileSync(join(cwd, 'recipe.json'), 'utf8');
     };
-    const baseline = prepare(managed);
-    assert.equal(prepare(phone), baseline, 'phone and sandbox plan the same tracked Rust workspace');
+    const baseline = prepare(phone);
     const remote = join(temporary, 'remote');
     cpSync(phone, remote, { recursive: true });
     assert.equal(prepare(remote), baseline, 'remote image plans the same tracked Rust workspace');
     const recipe = JSON.parse(baseline);
     assert.equal(recipe.skeleton.config_file, null, 'preserve the existing Docker contexts, which omit .cargo');
     for (const [directory, entrypoint] of [
-      [managed, 'bin/nanocodex/src/nanocodex2/main.rs'],
       [phone, 'examples/phone_voice.rs'],
       [remote, 'bin/nanocodex/src/nanocodex2/main.rs'],
     ]) {
-      await t.test(`${directory === managed ? 'sandbox' : directory === phone ? 'phone' : 'remote'} invalidation boundaries`, () => {
+      await t.test(`${directory === phone ? 'phone' : 'remote'} invalidation boundaries`, () => {
         const source = join(directory, entrypoint);
         const original = readFileSync(source, 'utf8');
         writeFileSync(source, `${original}\n// Recipe cache source-edit probe.\n`);
@@ -95,9 +89,9 @@ test('real Docker contexts have stable recipes and reconstruct their external ta
     // Overlay real sources exactly as Docker COPY does; entrypoints and embedded
     // assets must replace/augment the dummies before application compilation.
     for (const path of ['bin/nanocodex/src/nanocodex2/main.rs', 'examples/phone_voice.rs', 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js', 'third_party/codex-voice/webrtc-host/build.rs']) {
-      assert.ok(existsSync(join(managed, path)));
+      assert.ok(existsSync(join(phone, path)));
     }
-    cpSync(managed, skeleton, { recursive: true });
+    cpSync(phone, skeleton, { recursive: true });
     assert.equal(readFileSync(join(skeleton, 'examples/phone_voice.rs'), 'utf8'), readFileSync(join(root, 'examples/phone_voice.rs'), 'utf8'));
     assert.equal(readFileSync(join(skeleton, 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js'), 'utf8'), readFileSync(join(root, 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js'), 'utf8'));
   } finally {

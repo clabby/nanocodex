@@ -59,7 +59,8 @@ test('input receipts survive unrelated commits and invalidate every relevant sou
     assert.notEqual(fingerprint('sandbox', account, '1', dir), firstSandbox);
     const beforeRust = fingerprint('sandbox', account, '1', dir);
     put('crates/nanocodex-remote/src/runtime.rs', 'new shared publisher'); commit();
-    assert.notEqual(fingerprint('sandbox', account, '1', dir), beforeRust);
+    // Sandboxes are not Hands: Rust changes never rebuild the sandbox image.
+    assert.equal(fingerprint('sandbox', account, '1', dir), beforeRust);
     put('crates/new-local/Cargo.toml', '[package]\nname = "new-local"');
     put('crates/nanocodex-phone/Cargo.toml', '[package]\nname = "nanocodex-phone"\n[dependencies]\nnew-local = { path = "../new-local" }'); commit();
     const beforeDependency = fingerprint('phone', account, '1', dir);
@@ -75,13 +76,15 @@ test('Rust inputs follow local Cargo packages and external binary sources', () =
   const phone = imageInputs('phone');
   const sandbox = imageInputs('sandbox');
   const covers = (inputs, path) => inputs.some(p => p === path || path.startsWith(p + '/'));
+  for (const path of ['Cargo.lock', 'crates/nanocodex-managed/src/lib.rs', 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js']) assert.ok(covers(phone, path), path);
   for (const inputs of [phone, sandbox]) {
-    for (const path of ['Cargo.lock', 'crates/nanocodex-managed/src/lib.rs', 'crates/nanocodex-oai-tools/src/code_mode/bootstrap.js']) assert.ok(covers(inputs, path), path);
     for (const path of ['js/managed/src/index.ts', 'js/nanocodex/package.json', 'examples/unrelated.rs', 'bin/nanousd/src/lib.rs']) assert.ok(!covers(inputs, path), path);
   }
   for (const path of ['examples/phone_voice.rs', 'examples/phone_audio.rs', 'examples/phone_capture.rs']) assert.ok(covers(phone, path), path);
   assert.ok(!covers(phone, 'crates/nanocodex-remote/src/lib.rs'));
-  for (const path of ['bin/nanocodex/src/nanocodex2/main.rs', 'bin/nanocodex/src/computer.rs', 'bin/nanocodex/src/clipboard.rs', 'hands/remote/image/labwc/rc.xml', 'crates/nanocodex-vm/image/toolkit/python.txt']) assert.ok(covers(sandbox, path), path);
+  // Sandboxes are not Hands: no Rust source enters the sandbox image.
+  for (const path of ['Cargo.lock', 'bin/nanocodex/src/nanocodex2/main.rs', 'crates/nanocodex-managed/src/lib.rs']) assert.ok(!covers(sandbox, path), path);
+  for (const path of ['hands/remote/image/labwc/rc.xml', 'crates/nanocodex-vm/image/toolkit/python.txt']) assert.ok(covers(sandbox, path), path);
   assert.ok(!covers(sandbox, 'hands/remote/README.md'));
 });
 

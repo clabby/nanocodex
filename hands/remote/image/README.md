@@ -126,11 +126,8 @@ production workflow. Reverting this variable to a previously verified digest
 selects that image for subsequent server setup; existing running hosts retain
 their current image until explicitly reconnected.
 
-Cloudflare Sandbox desktops use the separate AMD64 `js/managed/Dockerfile`,
-which bundles the desktop with the Sandbox SDK. `NANOCODEX_SANDBOX_DESKTOPS=true`
-enables publication from those containers. It is independent of the SSH image
-variable. The Cloudflare workflow includes Hand source and image preparation
-scripts when deciding whether a container rollout is necessary.
+Cloudflare sandboxes are not Hands: `js/managed/Dockerfile` contains no Hand
+binary and never compiles Nanocodex. This image is the remote desktop Hand.
 
 For a local native build, use the host architecture (`arm64` on Apple Silicon):
 
