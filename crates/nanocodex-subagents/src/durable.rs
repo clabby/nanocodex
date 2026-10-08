@@ -124,6 +124,74 @@ pub(super) struct PersistedAgent {
     /// portable checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) checkpoint: Option<ChildRuntimeSnapshot>,
+    /// Latest committed boundary of a native (for example Claude) backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) native_checkpoint: Option<PersistedNative>,
+}
+
+/// Portable form of [`ChildSnapshot::Native`], decoded only by its family.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct PersistedNative {
+    model: String,
+    session_id: String,
+    thinking: nanocodex_agent::Thinking,
+    payload: String,
+    has_conversation: bool,
+}
+
+impl PersistedNative {
+    fn from_snapshot(snapshot: &ChildSnapshot) -> Option<Self> {
+        match snapshot {
+            ChildSnapshot::Native {
+                model,
+                session_id,
+                thinking,
+                payload,
+                has_conversation,
+            } => Some(Self {
+                model: model.as_str().to_owned(),
+                session_id: session_id.clone(),
+                thinking: *thinking,
+                payload: payload.clone(),
+                has_conversation: *has_conversation,
+            }),
+            ChildSnapshot::Codex(_) => None,
+        }
+    }
+
+    fn into_snapshot(self) -> std::io::Result<ChildSnapshot> {
+        let model = self
+            .model
+            .parse::<nanocodex_agent::HarnessModel>()
+            .map_err(|error| std::io::Error::other(format!("invalid journaled model: {error}")))?;
+        Ok(ChildSnapshot::Native {
+            model,
+            session_id: self.session_id,
+            thinking: self.thinking,
+            payload: self.payload,
+            has_conversation: self.has_conversation,
+        })
+    }
+}
+
+/// Adapts a durable root handle's journal to the registry's store contract.
+pub(super) struct JournalStore(pub(super) Arc<dyn nanocodex_agent::backend::ChildJournalStore>);
+
+impl SubagentStore for JournalStore {
+    fn load<'a>(
+        &'a self,
+        _root_session_id: &'a str,
+    ) -> SubagentStoreFuture<'a, std::io::Result<Option<String>>> {
+        self.0.load()
+    }
+
+    fn save<'a>(
+        &'a self,
+        _root_session_id: &'a str,
+        payload: String,
+    ) -> SubagentStoreFuture<'a, std::io::Result<()>> {
+        self.0.save(payload)
+    }
 }
 
 /// Outcome of restoring one root's subagent tree.
@@ -146,12 +214,12 @@ pub(super) fn persist_agent(
     session: &ChildSession,
     checkpoint: Option<&ChildSnapshot>,
 ) -> PersistedAgent {
-    let checkpoint = checkpoint
-        .or(session.stored_runtime.as_ref())
-        .and_then(|snapshot| match snapshot {
-            ChildSnapshot::Codex(snapshot) => Some(snapshot.clone()),
-            ChildSnapshot::Native { .. } => None,
-        });
+    let latest = checkpoint.or(session.stored_runtime.as_ref());
+    let native_checkpoint = latest.and_then(PersistedNative::from_snapshot);
+    let checkpoint = latest.and_then(|snapshot| match snapshot {
+        ChildSnapshot::Codex(snapshot) => Some(snapshot.clone()),
+        ChildSnapshot::Native { .. } => None,
+    });
     PersistedAgent {
         descriptor: session.descriptor.clone(),
         status: session.status.clone(),
@@ -161,6 +229,20 @@ pub(super) fn persist_agent(
         next_instruction_revision: session.next_instruction_revision,
         turn_in_flight: session.active || matches!(session.status, AgentStatus::Running),
         checkpoint,
+        native_checkpoint,
+    }
+}
+
+impl PersistedAgent {
+    /// The journaled checkpoint for any backend family.
+    pub(super) fn snapshot(&self) -> std::io::Result<Option<ChildSnapshot>> {
+        if let Some(snapshot) = &self.checkpoint {
+            return Ok(Some(ChildSnapshot::Codex(snapshot.clone())));
+        }
+        self.native_checkpoint
+            .clone()
+            .map(PersistedNative::into_snapshot)
+            .transpose()
     }
 }
 
@@ -168,7 +250,8 @@ pub(super) fn restored_session(
     agent: PersistedAgent,
 ) -> std::io::Result<(ChildSession, bool, bool)> {
     let contract = OutputContract::compile(&agent.output_schema)?;
-    let recoverable = agent.checkpoint.is_some();
+    let snapshot = agent.snapshot()?;
+    let recoverable = snapshot.is_some();
     let terminal = matches!(agent.status, AgentStatus::Closing | AgentStatus::Closed);
     let in_flight = !terminal
         && (agent.turn_in_flight
@@ -192,7 +275,7 @@ pub(super) fn restored_session(
         status,
         contract,
         agent.output_schema,
-        agent.checkpoint.map(ChildSnapshot::Codex),
+        snapshot,
         agent.next_instruction_revision,
         agent.last_output,
     );

@@ -102,6 +102,11 @@ pub struct Registry {
     residency_lock: tokio::sync::Mutex<()>,
     message_lock: tokio::sync::Mutex<()>,
     store: std::sync::RwLock<Option<Arc<dyn SubagentStore>>>,
+    /// Per-root journals adopted from durable root handles.
+    journals: std::sync::RwLock<HashMap<String, Arc<dyn SubagentStore>>>,
+    /// Restoration gates of adopted roots; true once the tree is restored.
+    restored: std::sync::Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
+    journal_writer: std::sync::atomic::AtomicBool,
     checkpoints: std::sync::Mutex<HashMap<(String, AgentId), ChildSnapshot>>,
     pending_resume: std::sync::Mutex<HashMap<String, Vec<AgentId>>>,
 }
@@ -977,16 +982,96 @@ impl Registry {
             residency_lock: tokio::sync::Mutex::new(()),
             message_lock: tokio::sync::Mutex::new(()),
             store: std::sync::RwLock::new(None),
+            journals: std::sync::RwLock::new(HashMap::new()),
+            restored: std::sync::Mutex::new(HashMap::new()),
+            journal_writer: std::sync::atomic::AtomicBool::new(false),
             checkpoints: std::sync::Mutex::new(HashMap::new()),
             pending_resume: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
-    fn store(&self) -> Option<Arc<dyn SubagentStore>> {
-        self.store
+    fn store_for(&self, root_session_id: &str) -> Option<Arc<dyn SubagentStore>> {
+        self.journals
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .get(root_session_id)
+            .cloned()
+            .or_else(|| {
+                self.store
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+    }
+
+    /// Adopts the durable journal exposed by a root handle: installs it,
+    /// restores the root's task tree and resumes interrupted children.
+    /// Any harness whose builder attaches durability exposes one.
+    fn adopt_journal(self: &Arc<Self>, handle: &AgentHandle) {
+        let Some(journal) = handle.child_journal() else {
+            return;
+        };
+        let root = handle.session_id().to_owned();
+        let (ready, gate) = tokio::sync::watch::channel(false);
+        {
+            let mut restored = self
+                .restored
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if restored.contains_key(&root) {
+                return;
+            }
+            restored.insert(root.clone(), gate);
+        }
+        self.journals
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                root.clone(),
+                Arc::new(durable::JournalStore(journal.store())),
+            );
+        self.ensure_journal_writer();
+        let registry = Arc::clone(self);
+        drop(platform::spawn(async move {
+            match registry.restore(&root).await {
+                Ok(report) if report.restored > 0 => tracing::info!(
+                    restored = report.restored,
+                    interrupted = report.interrupted.len(),
+                    unrecoverable = report.unrecoverable.len(),
+                    %root,
+                    "restored durable subagent task tree"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, %root, "could not restore durable subagent task tree");
+                }
+            }
+            let _ = ready.send(true);
+            for (id, result) in registry.resume_interrupted(&root).await {
+                if let Err(error) = result {
+                    tracing::warn!(%id, %error, "could not resume restored subagent");
+                }
+            }
+        }));
+    }
+
+    /// Waits until an adopted root's journaled tree is restored.
+    pub(crate) async fn await_restored(&self, session_id: &str) {
+        let root = self
+            .state
+            .lock()
+            .await
+            .root_session_id(session_id)
+            .to_owned();
+        let gate = self
+            .restored
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&root)
+            .cloned();
+        if let Some(mut gate) = gate {
+            drop(gate.wait_for(|ready| *ready).await);
+        }
     }
 
     /// Makes every root task tree in this registry durable.
@@ -997,7 +1082,19 @@ impl Registry {
         *self
             .store
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&store));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(store);
+        self.ensure_journal_writer();
+    }
+
+    /// Starts the single background writer that journals every durable root.
+    fn ensure_journal_writer(self: &Arc<Self>) {
+        if self
+            .journal_writer
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.changed();
+            return;
+        }
         let registry = Arc::downgrade(self);
         let mut revision = self.revision.subscribe();
         drop(platform::spawn(async move {
@@ -1007,8 +1104,13 @@ impl Registry {
                     return;
                 };
                 let payloads = live.journal_payloads().await;
+                let stores = payloads
+                    .iter()
+                    .map(|(root, _)| live.store_for(root))
+                    .collect::<Vec<_>>();
                 drop(live);
-                for (root_session_id, payload) in payloads {
+                for ((root_session_id, payload), store) in payloads.into_iter().zip(stores) {
+                    let Some(store) = store else { continue };
                     if saved.get(&root_session_id) == Some(&payload) {
                         continue;
                     }
@@ -1051,7 +1153,7 @@ impl Registry {
         id: AgentId,
         harness: HarnessHandle,
     ) {
-        if self.store().is_none() {
+        if self.store_for(&root_session_id).is_none() {
             return;
         }
         let registry = Arc::clone(self);
@@ -1073,7 +1175,7 @@ impl Registry {
         root_session_id: &str,
     ) -> std::io::Result<RestoreReport> {
         let store = self
-            .store()
+            .store_for(root_session_id)
             .ok_or_else(|| std::io::Error::other("no subagent store is installed"))?;
         let Some(payload) = store.load(root_session_id).await? else {
             return Ok(RestoreReport::default());
@@ -1101,7 +1203,7 @@ impl Registry {
         }
         for agent in agents {
             let id = agent.descriptor.id;
-            let checkpoint = agent.checkpoint.clone().map(ChildSnapshot::Codex);
+            let checkpoint = agent.snapshot()?;
             let (session, resume, lost) = durable::restored_session(agent)?;
             state.insert_restored(root_session_id, session)?;
             if let Some(checkpoint) = checkpoint {
@@ -1480,7 +1582,7 @@ impl Registry {
             };
             match harness.snapshot().await {
                 Ok(snapshot) => {
-                    if self.store().is_some() {
+                    if self.store_for(root_session_id).is_some() {
                         self.record_checkpoint(root_session_id, id, snapshot.clone());
                     }
                     if let Some(session) = self
@@ -1596,6 +1698,7 @@ impl Registry {
         include_completed: bool,
         include_self: bool,
     ) -> Vec<AgentDirectoryEntry> {
+        self.await_restored(session_id).await;
         self.state
             .lock()
             .await
@@ -1603,7 +1706,8 @@ impl Registry {
     }
 
     /// Keep weak factory capabilities, never a second owner of a child driver.
-    pub(crate) fn register_handle(&self, handle: AgentHandle) {
+    pub(crate) fn register_handle(self: &Arc<Self>, handle: AgentHandle) {
+        self.adopt_journal(&handle);
         self.session_handles
             .write()
             .expect("session handles poisoned")
@@ -1732,6 +1836,7 @@ impl Registry {
         in_reply_to: Option<MessageId>,
         body: String,
     ) -> std::io::Result<MessageReceipt> {
+        self.await_restored(session_id).await;
         let _residency_guard = self.residency_lock.lock().await;
         let _message_guard = self.message_lock.lock().await;
         self.rehydrate(session_id, to, purpose).await?;
@@ -1887,6 +1992,7 @@ impl Registry {
         ids: &[AgentId],
         duration: Duration,
     ) -> std::io::Result<(Vec<AgentSummary>, bool)> {
+        self.await_restored(session_id).await;
         if ids.is_empty() {
             return Err(std::io::Error::other("agent_ids must not be empty"));
         }
@@ -1912,6 +2018,7 @@ impl Registry {
         session_id: &str,
         id: AgentId,
     ) -> std::io::Result<Vec<AgentSummary>> {
+        self.await_restored(session_id).await;
         let _message_guard = self.message_lock.lock().await;
         let (root_session_id, ids, harnesses) = {
             let mut state = self.state.lock().await;
@@ -1928,6 +2035,7 @@ impl Registry {
     }
 
     pub async fn close(&self, session_id: &str, id: AgentId) -> std::io::Result<Vec<AgentSummary>> {
+        self.await_restored(session_id).await;
         let _message_guard = self.message_lock.lock().await;
         let CloseRequest {
             root_session_id,

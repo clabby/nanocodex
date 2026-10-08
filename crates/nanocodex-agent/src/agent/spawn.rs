@@ -112,6 +112,7 @@ where
             config,
             tools,
             spawn_factory: codex.spawn_factory,
+            child_journal: codex.child_journal,
             lineage_id,
             provider_session_id,
             prompt_cache_key,
@@ -165,6 +166,7 @@ where
     if let Some(factory) = &spawner.spawn_factory {
         child_handle = child_handle.with_spawn_factory(factory.clone());
     }
+    child_handle = child_handle.with_child_journal(spawner.child_journal.clone());
     let tools = spawner
         .tools
         .materialize(child_handle.clone())?

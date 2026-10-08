@@ -1350,16 +1350,52 @@ function descriptorDigest(value: string): string {
 }
 
 /** Child authority and routes belong only to the current live runtime. */
-export class ManagedSubagentBindings {
-  readonly authorizations = new Map<string, ManagedSubagentAuthorizationRow>();
-  readonly routes = new Map<string, RetainedChildRoute>();
+/** Write-through map: durable subagent trees keep their authority and pinned route across restarts. */
+class PersistedMap<V> extends Map<string, V> {
+  readonly #storage: DurableObjectStorage | undefined;
+  readonly #kind: string;
+  constructor(storage: DurableObjectStorage | undefined, kind: string) {
+    super();
+    this.#storage = storage;
+    this.#kind = kind;
+    if (!storage) return;
+    for (const row of storage.sql.exec<{ session_id: string; value_json: string }>(
+      "SELECT session_id, value_json FROM managed_subagent_bindings WHERE kind = ?", kind).toArray()) {
+      super.set(row.session_id, JSON.parse(row.value_json) as V);
+    }
+  }
+  override set(key: string, value: V): this {
+    this.#storage?.sql.exec("INSERT OR REPLACE INTO managed_subagent_bindings (kind, session_id, value_json) VALUES (?, ?, ?)",
+      this.#kind, key, JSON.stringify(value));
+    return super.set(key, value);
+  }
+  override delete(key: string): boolean {
+    this.#storage?.sql.exec("DELETE FROM managed_subagent_bindings WHERE kind = ? AND session_id = ?", this.#kind, key);
+    return super.delete(key);
+  }
+  override clear(): void {
+    this.#storage?.sql.exec("DELETE FROM managed_subagent_bindings WHERE kind = ?", this.#kind);
+    super.clear();
+  }
 }
 
-/** Old child metadata cannot authorize or resurrect a child after deployment. */
-export function discardObsoleteManagedSubagents(storage: DurableObjectStorage): void {
+export class ManagedSubagentBindings {
+  readonly authorizations: Map<string, ManagedSubagentAuthorizationRow>;
+  readonly routes: Map<string, RetainedChildRoute>;
+  constructor(storage?: DurableObjectStorage) {
+    this.authorizations = new PersistedMap(storage, "authorization");
+    this.routes = new PersistedMap(storage, "route");
+  }
+}
+
+/** Durable child authority and routes live beside the root's durable task-tree journal. */
+export function initializeManagedSubagentBindings(storage: DurableObjectStorage): void {
   storage.transactionSync(() => {
     storage.sql.exec("DROP TABLE IF EXISTS managed_subagent_authorizations");
     storage.sql.exec("DROP TABLE IF EXISTS managed_subagent_routes");
+    storage.sql.exec(`CREATE TABLE IF NOT EXISTS managed_subagent_bindings (
+      kind TEXT NOT NULL, session_id TEXT NOT NULL, value_json TEXT NOT NULL,
+      PRIMARY KEY (kind, session_id))`);
   });
 }
 
@@ -4383,7 +4419,8 @@ export class DurableAgentSession extends DurableComputerObject {
     initializeManagedAgentSettingsSchema(this.ctx.storage);
     initializeVmHostScopeSchema(this.ctx.storage);
     this.#operations = new SessionOperations(this.ctx.storage);
-    discardObsoleteManagedSubagents(this.ctx.storage);
+    initializeManagedSubagentBindings(this.ctx.storage);
+    this.#subagentBindings = new ManagedSubagentBindings(this.ctx.storage);
     // A pending realtime mutation belonged to the previous in-memory owner.
     // Its external outcome is unknown, so cold construction must not replay it.
     this.ctx.storage.sql.exec(
@@ -9674,7 +9711,8 @@ export class DurableAgentSession extends DurableComputerObject {
       this.ctx.storage.sql.exec("DELETE FROM managed_personalization_invalidation");
       this.ctx.storage.sql.exec("DELETE FROM managed_request_context_state");
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_request_context");
-      this.#subagentBindings = new ManagedSubagentBindings();
+      this.ctx.storage.sql.exec("DELETE FROM managed_subagent_bindings");
+      this.#subagentBindings = new ManagedSubagentBindings(this.ctx.storage);
       this.#goalRuntime.clear();
       this.ctx.storage.sql.exec("DELETE FROM managed_cron_triggers");
       this.ctx.storage.sql.exec("DELETE FROM managed_cron_deliveries");
@@ -9966,8 +10004,8 @@ export class DurableAgentSession extends DurableComputerObject {
       }
       return this.#ensureAgent();
     }
-    // Shutdown has drained the previous runtime; no child bindings cross this boundary.
-    this.#subagentBindings = new ManagedSubagentBindings();
+    // Durable child bindings cross runtime rebuilds with their restored task tree.
+    this.#subagentBindings = new ManagedSubagentBindings(this.ctx.storage);
     const construction: AgentConstructionOwnership = {
       abort: new AbortController(),
       deletionGeneration: this.#deletionGeneration,

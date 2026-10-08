@@ -44,6 +44,7 @@ pub struct AgentHandle {
     native_model_id: Arc<str>,
     pub(super) native: Arc<dyn super::backend::AgentFactory>,
     pub(super) factory: Option<Arc<dyn super::backend::AgentFactory>>,
+    child_journal: Option<super::backend::ChildJournal>,
 }
 
 impl AgentHandle {
@@ -60,7 +61,22 @@ impl AgentHandle {
             native_model_id: Arc::from(model.as_str()),
             native,
             factory: None,
+            child_journal: None,
         }
+    }
+
+    /// Exposes a durable root's subagent journal on this capability.
+    #[must_use]
+    pub fn with_child_journal(mut self, journal: Option<super::backend::ChildJournal>) -> Self {
+        self.child_journal = journal;
+        self
+    }
+
+    /// The durable subagent journal of this session, when it is a durable root.
+    pub fn child_journal(&self) -> Option<&super::backend::ChildJournal> {
+        self.child_journal
+            .as_ref()
+            .filter(|journal| journal.claim(&self.session_id))
     }
 
     /// Installs embedding-owned mixed-family construction for this capability.

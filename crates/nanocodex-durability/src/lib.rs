@@ -4,6 +4,7 @@
 
 mod agent;
 mod branch;
+mod child_journal;
 pub use branch::{BranchTurn, CheckpointBranch};
 #[cfg(feature = "claude")]
 mod claude;

@@ -5,6 +5,7 @@ pub(in crate::agent) struct BranchSpawner<S> {
     pub(in crate::agent) config: Arc<ModelConfig>,
     pub(in crate::agent) tools: ToolsConfiguration,
     pub(in crate::agent) spawn_factory: Option<Arc<dyn backend::AgentFactory>>,
+    pub(in crate::agent) child_journal: Option<backend::ChildJournal>,
     pub(in crate::agent) lineage_id: Arc<str>,
     pub(in crate::agent) provider_session_id: Arc<str>,
     pub(in crate::agent) prompt_cache_key: Option<Arc<str>>,
@@ -37,6 +38,8 @@ impl<S> BranchSpawner<S> {
             config: Arc::clone(&self.config),
             tools: self.tools.clone(),
             spawn_factory: self.spawn_factory.clone(),
+            // A durable task-tree journal belongs only to its configured root.
+            child_journal: None,
             lineage_id: Arc::clone(&self.lineage_id),
             provider_session_id: Arc::clone(&self.provider_session_id),
             prompt_cache_key: self.prompt_cache_key.as_ref().map(Arc::clone),
@@ -134,6 +137,8 @@ where
             instant_tool_steering: self.instant_tool_steering,
             tools: self.tools.clone(),
             spawn_factory: self.spawn_factory.clone(),
+            // A durable task-tree journal belongs only to its configured root.
+            child_journal: None,
             lineage_id: Arc::from(session_id_text.as_str()),
             provider_session_id: Arc::clone(&self.provider_session_id),
             prompt_cache_key: Some(prompt_cache_key),

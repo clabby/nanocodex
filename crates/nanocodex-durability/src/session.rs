@@ -1527,6 +1527,11 @@ impl DurableSession {
         })
     }
 
+    /// Durable subagent task-tree journal stored beside this state.
+    pub(crate) fn child_journal(&self) -> nanocodex_agent::backend::ChildJournal {
+        crate::child_journal::child_journal(self.store.clone(), &self.state_id)
+    }
+
     /// Stable host-store state identity.
     #[must_use]
     pub fn state_id(&self) -> &str {

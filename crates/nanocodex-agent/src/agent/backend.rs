@@ -60,6 +60,54 @@ pub enum BackendPromptRoute {
     Steered,
 }
 
+/// Host persistence for one durable root's subagent task-tree journal.
+///
+/// Durability adapters supply this beside the root's execution state. Values
+/// are opaque, Rust-owned JSON; `save` atomically replaces the previous value.
+pub trait ChildJournalStore: Send + Sync + 'static {
+    /// Loads the latest journal value.
+    fn load(&self) -> BackendFuture<std::io::Result<Option<String>>>;
+    /// Atomically replaces the journal value.
+    fn save(&self, payload: String) -> BackendFuture<std::io::Result<()>>;
+}
+
+/// A durable root's task-tree journal, exposed on its [`AgentHandle`].
+///
+/// Any harness whose builder attaches durability exposes this on its root
+/// handle, so a subagent registry makes that root's children durable without
+/// host wiring. The first session to claim it owns it.
+#[derive(Clone)]
+pub struct ChildJournal {
+    store: Arc<dyn ChildJournalStore>,
+    owner: Arc<std::sync::OnceLock<Arc<str>>>,
+}
+
+impl ChildJournal {
+    /// Wraps a host journal store.
+    pub fn new(store: Arc<dyn ChildJournalStore>) -> Self {
+        Self {
+            store,
+            owner: Arc::new(std::sync::OnceLock::new()),
+        }
+    }
+
+    /// Binds the journal to its root session; false for any other session.
+    pub fn claim(&self, session_id: &str) -> bool {
+        &**self.owner.get_or_init(|| Arc::from(session_id)) == session_id
+    }
+
+    /// The underlying host store.
+    pub fn store(&self) -> Arc<dyn ChildJournalStore> {
+        Arc::clone(&self.store)
+    }
+}
+
+impl std::fmt::Debug for ChildJournal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChildJournal").finish_non_exhaustive()
+    }
+}
+
 /// Embedding-owned construction of clean native children.
 ///
 /// Implementations retain provider recipes and approved host capabilities. The

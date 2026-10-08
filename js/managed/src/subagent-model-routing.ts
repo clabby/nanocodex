@@ -39,6 +39,17 @@ export interface ChildRouteStore {
   commit(sessionId: string, value: RetainedChildRoute): void;
 }
 
+/** Efforts each native Claude model accepts, mirroring `ClaudeModel::supports_thinking`. */
+function claudeEfforts(model: string): readonly string[] {
+  if (model === "claude-haiku-4-5") return ["none"];
+  if (model === "claude-opus-4-6" || model === "claude-sonnet-4-6") return ["low", "medium", "high", "max"];
+  return ["low", "medium", "high", "xhigh", "max"];
+}
+/** Default child effort: the cheapest supported level. */
+function defaultClaudeEffort(model: string): "none" | "low" {
+  return model === "claude-haiku-4-5" ? "none" : "low";
+}
+
 // Expiry bounds abandoned tickets while allowing normal batch admission and binding.
 export const CHILD_ROUTE_TICKET_TTL_MS = 15 * 60_000;
 
@@ -104,7 +115,6 @@ export function createSubagentRouteController(options: {
       if (family === "claude") {
         if (options.policy.candidates !== undefined) throw new Error("Claude child model is outside the explicit routing policy");
         if (!options.claude) throw new Error("Claude harness is unavailable for this managed session");
-        if (request.thinking !== undefined && !["low", "medium", "high"].includes(request.thinking)) throw new Error("Unsupported Claude child effort");
         options.claude!.authorize(request.parentSessionId, request.hostContextRef);
         expirePending();
         if (pending.size + resolving >= 64) throw new Error("Too many pending child routes");
@@ -113,6 +123,7 @@ export function createSubagentRouteController(options: {
           const available = await options.claude!.availableModels();
           const selected = model ?? claudeParent ?? available[0];
           if (!selected || !available.includes(selected)) throw new Error("Selected Claude child model is unavailable");
+          if (request.thinking !== undefined && !claudeEfforts(selected).includes(request.thinking)) throw new Error("Unsupported Claude child effort");
           options.claude!.authorize(request.parentSessionId, request.hostContextRef);
           const routeId = options.id ? options.id() : crypto.randomUUID();
           if (!routeId || pending.has(routeId)) throw new Error("Child route reference is not unique");
@@ -121,7 +132,7 @@ export function createSubagentRouteController(options: {
             route: null, claudeModel: selected,
           } });
           return claudeParent === undefined
-            ? { harness: "claude" as const, model: selected, thinking: request.thinking ?? "low", routeId }
+            ? { harness: "claude" as const, model: selected, thinking: request.thinking ?? defaultClaudeEffort(selected), routeId }
             : { native: true as const, routeId };
         } finally { resolving--; }
       }

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyManagedSubagentLifecycle,
   ManagedSubagentBindings,
-  discardObsoleteManagedSubagents,
+  initializeManagedSubagentBindings,
   managedAuthorizationForToolContext,
   managedAuthorizationForRouting,
   type DurableAgentSession,
@@ -33,8 +33,8 @@ describe("managed subagent authorization ownership", () => {
         state.storage.sql.exec(`CREATE TABLE ${table} (legacy TEXT)`);
         state.storage.sql.exec(`INSERT INTO ${table} VALUES ('obsolete child')`);
       }
-      discardObsoleteManagedSubagents(state.storage);
-      discardObsoleteManagedSubagents(state.storage);
+      initializeManagedSubagentBindings(state.storage);
+      initializeManagedSubagentBindings(state.storage);
       expect(state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name IN ('managed_subagent_authorizations', 'managed_subagent_routes')").toArray()).toEqual([]);
       expect(state.storage.sql.exec("SELECT id FROM managed_turns").toArray()).toEqual([{ id: "account-turn" }]);
       expect(state.storage.sql.exec("SELECT route_json FROM managed_thread_route").one()).toEqual({ route_json: "{}" });
@@ -228,3 +228,17 @@ function context(sessionId: string) {
     signal: new AbortController().signal,
   };
 }
+
+describe("durable managed subagent bindings", () => {
+  it("survive a runtime rebuild and clear on release", async () => {
+    await withSession(async (state) => {
+      initializeManagedSubagentBindings(state.storage);
+      const first = new ManagedSubagentBindings(state.storage);
+      first.routes.set("child-1", { routeId: "r", parentSessionId: "p", hostContextRef: "h", route: null, claudeModel: "claude-haiku-4-5" });
+      const rebuilt = new ManagedSubagentBindings(state.storage);
+      expect(rebuilt.routes.get("child-1")?.claudeModel).toBe("claude-haiku-4-5");
+      rebuilt.routes.delete("child-1");
+      expect(new ManagedSubagentBindings(state.storage).routes.size).toBe(0);
+    });
+  });
+});

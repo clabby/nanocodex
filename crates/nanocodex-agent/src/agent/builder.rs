@@ -52,6 +52,7 @@ pub(super) struct CodexCompatibility {
     pub(super) before_compaction: Option<Arc<dyn execution::BeforeCompaction>>,
     pub(super) spawn_factory: Option<Arc<dyn backend::AgentFactory>>,
     pub(super) host_context: Option<Arc<str>>,
+    pub(super) child_journal: Option<backend::ChildJournal>,
 }
 
 impl<F> NanocodexBuilder<F> {
@@ -103,6 +104,14 @@ impl<F> NanocodexBuilder<F> {
     #[must_use]
     pub fn host_context(mut self, context: Option<Arc<str>>) -> Self {
         self.codex.host_context = context;
+        self
+    }
+
+    /// Makes this root's subagent task tree durable beside its own state.
+    /// Durability adapters call this; it is never inherited by children.
+    #[must_use]
+    pub fn child_journal(mut self, journal: backend::ChildJournal) -> Self {
+        self.codex.child_journal = Some(journal);
         self
     }
 

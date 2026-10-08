@@ -264,6 +264,7 @@ pub async fn start_agents_observed(
     observe_session: impl Fn(&str) + Send + Sync + 'static,
 ) -> AgentToolResult<Vec<AgentStartReport>> {
     registry.register_handle(parent.clone());
+    registry.await_restored(session_id).await;
     let prepared = prepare_batch(tasks)?;
     let mut startup = registry.batch_startup();
     let capacities = registry.reserve_turns(prepared.len())?;
@@ -485,6 +486,7 @@ async fn start_child(
         return Err("child caller identity must match its native parent handle".into());
     }
     registry.register_handle(parent.clone());
+    registry.await_restored(session_id).await;
     let AgentTask {
         role,
         task,

@@ -263,12 +263,16 @@ impl BuilderBackend for Claude {
 // https://platform.claude.com/docs/en/models/haiku-4-5/overview
 fn model_max_tokens(model: &str) -> Option<u32> {
     match model {
-        "claude-opus-5-5" | "claude-fable-5-1" | "claude-sonnet-5-5"
-        | "claude-haiku-5-5" | "claude-opus-5" | "claude-sonnet-5"
-        | "claude-opus-4-6" | "claude-sonnet-4-6" => Some(128_000),
-        "claude-haiku-4-5" | "claude-haiku-4-5-20251001"
-        | "claude-sonnet-4-5" | "claude-sonnet-4-5-20250929"
-        | "claude-opus-4-5" | "claude-opus-4-5-20251101" => Some(64_000),
+        "claude-opus-5-5" | "claude-fable-5-1" | "claude-sonnet-5-5" | "claude-haiku-5-5"
+        | "claude-opus-5" | "claude-sonnet-5" | "claude-opus-4-6" | "claude-sonnet-4-6" => {
+            Some(128_000)
+        }
+        "claude-haiku-4-5"
+        | "claude-haiku-4-5-20251001"
+        | "claude-sonnet-4-5"
+        | "claude-sonnet-4-5-20250929"
+        | "claude-opus-4-5"
+        | "claude-opus-4-5-20251101" => Some(64_000),
         _ => None,
     }
 }
@@ -305,6 +309,7 @@ pub struct ClaudeBuilder {
     dynamic_tools: Vec<DynamicToolsFactory>,
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
+    child_journal: Option<nanocodex_agent::backend::ChildJournal>,
     host_context: Option<Arc<str>>,
     server_tools: Vec<ServerToolDefinition>,
     parallel_tools: bool,
@@ -350,6 +355,7 @@ impl ClaudeBuilder {
             dynamic_tools: Vec::new(),
             tool_hooks: Vec::new(),
             spawn_factory: None,
+            child_journal: None,
             host_context: None,
             server_tools: Vec::new(),
             parallel_tools: false,
@@ -386,6 +392,12 @@ impl ClaudeBuilder {
         F: Fn(AgentHandle) -> Result<ClaudeTools> + Send + Sync + 'static,
     {
         self.tools_factory = Some(Arc::new(factory));
+        self
+    }
+    /// Makes this root's subagent task tree durable beside its own state.
+    /// Durability adapters call this; it is never inherited by children.
+    pub fn child_journal(mut self, journal: nanocodex_agent::backend::ChildJournal) -> Self {
+        self.child_journal = Some(journal);
         self
     }
     /// Installs embedding-owned mixed-family child construction.
@@ -891,6 +903,7 @@ impl ClaudeBuilder {
         recipe.session_id = None;
         recipe.restored = None;
         recipe.policy = None;
+        recipe.child_journal = None;
         recipe.subagent_type = Some("general-purpose".into());
         let native_factory = Arc::new(ClaudeNativeFactory {
             recipe,
@@ -906,7 +919,8 @@ impl ClaudeBuilder {
             selected_model,
             native_factory.clone(),
         )
-        .with_native_model_id(self.claude.model.as_str());
+        .with_native_model_id(self.claude.model.as_str())
+        .with_child_journal(self.child_journal.clone());
         if let Some(factory) = &self.spawn_factory {
             handle = handle.with_spawn_factory(factory.clone());
         }
@@ -927,7 +941,9 @@ impl ClaudeBuilder {
             return Err(unsupported("Claude model and max_tokens must be nonempty"));
         }
         if self.max_tokens.is_none() && model_max_tokens(&self.claude.model).is_none() {
-            return Err(unsupported("Unknown Claude model: configure max_tokens explicitly"));
+            return Err(unsupported(
+                "Unknown Claude model: configure max_tokens explicitly",
+            ));
         }
         if self.system_blocks.as_ref().is_some_and(|blocks| {
             blocks.is_empty()
