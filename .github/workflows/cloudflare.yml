@@ -176,28 +176,6 @@ jobs:
         run: node scripts/cloudflare/enroll-cloudflare.mjs
 
   # Preview builds stay unprivileged. Production builds selected Workers once on its deployment runner.
-  # One-off: the removed Managed2/Egress2 Workers were deployed manually and
-  # still bind retired account classes. Deleting them unblocks the classes'
-  # deleted_classes migration. Idempotent (404 is success). Remove afterwards.
-  retire-parallel-workers:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Delete nanocodex-managed2 then nanocodex-egress2
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          for script in nanocodex-managed2 nanocodex-egress2; do
-            code=$(curl -sS -o /tmp/out.json -w "%{http_code}" -X DELETE \
-              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$script?force=true")
-            echo "$script: $code"; cat /tmp/out.json; echo
-            [ "$code" = 200 ] || [ "$code" = 404 ] || exit 1
-          done
-
   worker-build:
     name: build Cloudflare Worker artifacts
     if: >-
