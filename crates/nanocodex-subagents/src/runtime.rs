@@ -1337,6 +1337,20 @@ impl Registry {
             .unwrap_or_default();
         let mut results = Vec::with_capacity(ids.len());
         for id in ids {
+            // Restate the binding task: a resumed child must finish it, not
+            // summarize partial progress as its result.
+            let task = self
+                .state
+                .lock()
+                .await
+                .scopes
+                .get(root_session_id)
+                .and_then(|scope| scope.sessions.get(&id))
+                .map(|session| session.binding_task.clone());
+            let message = match task {
+                Some(task) => format!("{}\n\nDelegated task:\n{task}", durable::RESUME_MESSAGE),
+                None => durable::RESUME_MESSAGE.to_owned(),
+            };
             let result = self
                 .send_message(
                     root_session_id,
@@ -1344,7 +1358,7 @@ impl Registry {
                     MessagePriority::Deferred,
                     MessagePurpose::Coordinate,
                     None,
-                    durable::RESUME_MESSAGE.to_owned(),
+                    message,
                 )
                 .await;
             results.push((id, result));
