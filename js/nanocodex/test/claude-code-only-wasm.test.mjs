@@ -71,8 +71,8 @@ test('Claude code-only nests native tools and canonical children, resumes cells,
         return { type: 'tool_use', id: 'wait-cell', name: 'wait', input: { cell_id: cell } };
       }
       case 3:
-        assert.match(history, /CHILD_OK/); assert.match(history, /Claude tool execution failed/);
-        assert.doesNotMatch(history, /PRIVATE_HOST_DETAIL/); return final('STRICT_CLAUDE_OK');
+        assert.match(history, /CHILD_OK/); assert.match(history, /PRIVATE_HOST_DETAIL/);
+        return final('STRICT_CLAUDE_OK');
       default: throw new Error('unexpected request');
     }
   });

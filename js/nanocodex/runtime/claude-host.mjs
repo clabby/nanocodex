@@ -117,7 +117,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
         return value;
       } catch (error) {
         if (error?.code === 'host_interrupted') throw error;
-        return toolResult('Claude tool execution failed', null, { success: false });
+        return toolResult(errorText(error), null, { success: false });
       }
     },
   }])), { evaluate: codeEvaluator, effectJournal: codeEffectJournal,
@@ -263,9 +263,8 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
           signal: controller(sessionId, turnId).signal,
         }));
         return value;
-      } catch {
-        // Arbitrary thrown host errors may contain credentials; no stack/body crosses this boundary.
-        return failed('Claude tool execution failed');
+      } catch (error) {
+        return failed(errorText(error));
       }
     },
     dispose() {
@@ -284,6 +283,10 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
     },
   };
   return host;
+}
+
+function errorText(error) {
+  return error instanceof Error ? (error.message || error.name) : String(error);
 }
 
 function failed(text) {

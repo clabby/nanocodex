@@ -65,7 +65,7 @@ test('Claude-only catalog maps native inputs, errors, media and stable host iden
   assert.equal(context.sessionId, SESSION); assert.equal(context.turnId, 'turn-1'); assert.equal(context.callId, 'call-1');
   assert.equal(context.model, MODEL); assert.ok(context.signal instanceof AbortSignal);
   const error = JSON.parse(await host.executeClaudeTool('Bash', '{}', SESSION, 'call-2', MODEL, 'turn-1'));
-  assert.equal(error.isError, true); assert.equal(JSON.stringify(error).includes('secret'), false);
+  assert.equal(error.isError, true); assert.match(JSON.stringify(error), /secret/);
   await assert.rejects(host.executeTool('Read', '{}', SESSION, 'call', MODEL, undefined), /identities/);
   host.cancelCodeTurn(SESSION); assert.equal(context.signal.aborted, true);
   host.dispose();
