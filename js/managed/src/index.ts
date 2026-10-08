@@ -412,7 +412,6 @@ import { MemoryScope, MEMORY_INITIALIZE_ASSERTION } from "./memory-scope";
 export { MemoryScope } from "./memory-scope";
 export { UserDataScope } from "./user-data-scope";
 export { AccountHostedTools } from "./account-hosted-tools";
-export { RegionalHandRelay } from "./regional-hand-relay";
 export { ScreenPlayback } from "./screen-playback";
 export { VmHostPool } from "./vm-host-pool";
 export { ApiKeyRecord, NonceStorage, Organization, UserAccount } from "./account-auth";

@@ -67,7 +67,6 @@
     ]
   },
   "migrations": [
-    { "tag": "regional-hand-test-v1", "new_sqlite_classes": ["RegionalHandRelay"] },
     { "tag":"calendar-push-test-v1", "new_sqlite_classes":["CalendarPushDelivery"] },
     { "tag": "inference-v1", "new_sqlite_classes": ["InferenceKey", "InferenceAccount", "InferenceSession"] },
     { "tag": "meeting-preview-test-v1", "new_sqlite_classes": ["MeetingPreview"] },

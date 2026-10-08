@@ -125,7 +125,6 @@
         "name": "NANOCODEX_ACCOUNT_TOOLS",
         "class_name": "AccountHostedTools"
       },
-      { "name": "NANOCODEX_HAND_RELAYS", "class_name": "RegionalHandRelay" },
       {
         "name": "NANOCODEX_SCREEN_PLAYBACK",
         "class_name": "ScreenPlayback"
@@ -214,7 +213,8 @@
     { "tag": "v13", "new_sqlite_classes": ["CalendarPushDelivery"] },
     { "tag": "v14", "new_sqlite_classes": ["UserDataScope"] },
     { "tag": "v15", "new_sqlite_classes": ["RegionalHandRelay"] },
-    { "tag": "v16", "new_sqlite_classes": ["ScreenPlayback"] }
+    { "tag": "v16", "new_sqlite_classes": ["ScreenPlayback"] },
+    { "tag": "v17", "deleted_classes": ["RegionalHandRelay"] }
   ],
   "vars": {
     "NANOCODEX_THREAD_ROUTING": "true",
