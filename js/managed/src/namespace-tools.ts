@@ -265,8 +265,6 @@ export function createNamespaceExecutionRuntime(
     if (hand?.cua?.definition?.description?.startsWith("NANOCODEX_DYNAMIC_CUA_V1.")) {
       let pending = dynamicComputers.get(hand);
       if (!pending) {
-        if (!discovering && !discoveredContracts.has(contractKey))
-          throw new Error("Discover this Hand with only workdir before sending dynamic CUA input");
         context.signal.throwIfAborted();
         // The read-only probe and the requested action are distinct durable
         // calls; sharing an ID would conflict with the action's input receipt.
@@ -277,8 +275,6 @@ export function createNamespaceExecutionRuntime(
       hand = await pending;
       // Recheck the captured cell's authority after the remote discovery await.
       cell(context);
-      if (!discovering && discoveredContracts.get(contractKey) !== computerContract(hand))
-        throw new Error("This Hand's CUA contract changed; discover with only workdir before sending input");
     }
     if (!hand?.cua || !hand.cuaReset) {
       observeHandCall("namespace.invoke", name, routeStarted, "unavailable", context.callId, correlation(context));
@@ -329,14 +325,14 @@ export function createNamespaceExecutionRuntime(
 
   const tools: ToolMap = {
     [CUA_JS_NAME]: {
-      description: "Use a Hand's CUA provider. Set workdir on every call, just like exec_command. First call with only {workdir} to read that Hand's exact descriptions and schemas without executing an action; then add those provider arguments alongside workdir. OpenAI Sky/CUA is preferred when attached. For browser work use its browser API and agent-owned background tabs/tab groups; preserve the user’s foreground focus. Use native browser-window input only when the browser API cannot handle the task. VM, Cloudflare, and native Hands can fall back to their controllable screen action contract. Nanocodex strips only workdir before forwarding. Calls dispatch immediately; follow the provider’s contract for concurrent calls. /brain has no desktop.",
+      description: "Use a Hand's CUA provider. Set workdir on every call, just like exec_command. Pass provider arguments (e.g. {code}) alongside workdir; actions work immediately. Optionally call with only {workdir} to read that Hand's exact provider descriptions and schemas without executing anything. OpenAI Sky/CUA is preferred when attached. For browser work use its browser API and agent-owned background tabs/tab groups; preserve the user’s foreground focus. Use native browser-window input only when the browser API cannot handle the task. VM, Cloudflare, and native Hands can fall back to their controllable screen action contract. Nanocodex strips only workdir before forwarding. Calls dispatch immediately; follow the provider’s contract for concurrent calls. /brain has no desktop.",
       parameters: computerParameters,
       supportsParallelToolCalls: true,
       handler: (input, context) => computerCall(CUA_JS_NAME, input, context),
       releaseSession, dispose,
     },
     [CUA_RESET_NAME]: {
-      description: "Reset the CUA provider on the Hand selected by this call's workdir. Read its reset contract using mcp__cua_repl__js({workdir}) first. Pass provider reset arguments alongside workdir; only workdir is consumed by Nanocodex. A workdir-only reset forwards {}. Calls dispatch immediately; follow the provider’s contract for concurrent JS and reset calls.",
+      description: "Reset the CUA provider on the Hand selected by this call's workdir. Pass provider reset arguments alongside workdir; only workdir is consumed by Nanocodex. A workdir-only reset forwards {}. Calls dispatch immediately; follow the provider’s contract for concurrent JS and reset calls.",
       parameters: computerParameters,
       supportsParallelToolCalls: true,
       handler: (input, context) => computerCall(CUA_RESET_NAME, input, context),
