@@ -186,6 +186,9 @@ import {
   AccountHostedToolsProvider,
 } from "./account-hosted-tools";
 import { RegionalHandRelay, routeRegionalToolHost } from "./regional-hand-relay";
+import { handRelayRegion } from "./regional-hand-routing";
+import { SCREEN_DIRECTORY_HEADER, routeRegionalScreens } from "./regional-screen-routing";
+import { ScreenPlayback, accountToolsPlaybackHost, routeScreenPlayback } from "./screen-playback";
 import { VmHostPool } from "./vm-host-pool";
 import { initializeEmptyVmHostScope, initializeVmHostScopeSchema, markVmHostScopeRegistration, shouldProbeAgentVmHostScope } from "./vm-host-scope";
 import { isVmFactoryName } from "./vm-factory-name";
@@ -412,6 +415,7 @@ export { MemoryScope } from "./memory-scope";
 export { UserDataScope } from "./user-data-scope";
 export { AccountHostedTools } from "./account-hosted-tools";
 export { RegionalHandRelay } from "./regional-hand-relay";
+export { ScreenPlayback } from "./screen-playback";
 export { VmHostPool } from "./vm-host-pool";
 export { ApiKeyRecord, NonceStorage, Organization, UserAccount } from "./account-auth";
 
@@ -496,6 +500,10 @@ export interface Env extends
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ACCOUNT_TOOLS: DurableObjectNamespace<AccountHostedTools>;
   NANOCODEX_HAND_RELAYS?: DurableObjectNamespace<RegionalHandRelay>;
+  /** "true" places new native screen publishers in their ingress region's relay. */
+  NANOCODEX_REGIONAL_SCREEN_RELAYS?: string;
+  /** Portable HLS playback links and their in-memory media buffers. */
+  NANOCODEX_SCREEN_PLAYBACK?: DurableObjectNamespace<ScreenPlayback>;
   NANOCODEX_REGIONAL_HAND_RELAYS?: string;
   NANOCODEX_REGIONAL_API_KEY_AUTHORITY?: string;
   NANOCODEX_TURN_KEY_ID?: string;
@@ -1876,6 +1884,13 @@ async function managedFetchRoute(
         publicOrigin: url.origin,
       });
     }
+    if (env.NANOCODEX_SCREEN_PLAYBACK) {
+      // Public playback is token-authorized in its own DO; owner links need an account principal.
+      const playback = await routeScreenPlayback(request, { NANOCODEX_SCREEN_PLAYBACK: env.NANOCODEX_SCREEN_PLAYBACK }, url, {
+        authenticate: async () => trustedAgentPrincipal ?? await authenticate(request, env, url),
+        host: accountToolsPlaybackHost(env) });
+      if (playback) return playback;
+    }
     if (url.pathname === "/v1/account/hands/inventory") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
       if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
@@ -1935,9 +1950,20 @@ async function managedFetchRoute(
         if (request.method !== "POST" || url.search) return json({ error: "invalid_request" }, { status: 400 });
         return remoteICE(env, principal.userId);
       }
-      return timeHandStage(request, "route", () => env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(
-        handBrokerRequest(request, principal),
-      ));
+      return timeHandStage(request, "route", async () => {
+        const brokered = (_path: string, init?: { body?: string; directory?: boolean }) => {
+          const source = init?.body === undefined ? request
+            : new Request(request.url, { method: request.method, headers: request.headers, body: init.body });
+          const base = handBrokerRequest(source, principal);
+          const headers = new Headers(base.headers);
+          headers.delete(SCREEN_DIRECTORY_HEADER);
+          if (init?.directory) headers.set(SCREEN_DIRECTORY_HEADER, "1");
+          return new Request(base, { headers });
+        };
+        // Regional screen signaling; legacy IDs and unflagged publishers stay on the owner.
+        return await routeRegionalScreens(request, env, principal.userId, handRelayRegion(request), brokered)
+          ?? env.NANOCODEX_ACCOUNT_TOOLS.getByName(principal.userId).fetch(brokered(url.pathname));
+      });
     }
     if (url.pathname === "/v1/account/hand-relays") {
       if (request.method !== "GET" || url.search !== "") return json({ error: "invalid_request" }, { status: 400 });

@@ -48,6 +48,7 @@ mod observation_providers;
 mod reload;
 mod screen_audio;
 mod screen_broadcast;
+mod screen_hls;
 #[cfg(target_os = "linux")]
 mod screen_gamepad;
 #[cfg(target_os = "linux")]
