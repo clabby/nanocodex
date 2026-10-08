@@ -87,6 +87,8 @@ type RoutedHostedTool = HostedToolsCodeTool & Readonly<{
 type AccountHostedToolsEnv = RemoteICEEnv & HandEnv & Partial<ScreenPlaybackEnv> & {
   NANOCODEX_ACCOUNT_TOOLS?: DurableObjectNamespace<AccountHostedTools>;
   NANOCODEX_SESSIONS?: DurableObjectNamespace<import("./index").DurableAgentSession>;
+  /** TEMPORARY: only to retire hibernated relay sockets once. */
+  NANOCODEX_HAND_RELAYS?: DurableObjectNamespace;
 };
 
 type InvocationRequest = Readonly<{
@@ -155,6 +157,15 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     ctx.storage.kv.delete("workspace_hand_inventory_overflow");
     // Ownership is immutable; a new instance reloads it after eviction/restart.
     this.#ownerId = ctx.storage.kv.get<string>("owner_id");
+    // TEMPORARY: wake each retired regional relay once so it closes its
+    // hibernated Hand sockets (auto-answered heartbeats never wake it) and the
+    // Hands republish here. Delete with the RegionalHandRelay class.
+    const relays = env.NANOCODEX_HAND_RELAYS, owner = this.#ownerId;
+    if (relays && owner && !ctx.storage.kv.get("relay_sockets_retired_v1")) {
+      ctx.waitUntil(Promise.allSettled(["wnam", "enam", "weur", "eeur", "apac", "oc", "sam", "afr", "me"].map(region =>
+        relays.getByName(`${owner}:hand-relay:v1:${region}`).fetch("https://relay.internal/retire")))
+        .then(() => ctx.storage.kv.put("relay_sockets_retired_v1", true)));
+    }
     this.#diagnostics = new DiagnosticJournal(ctx.storage, "hand.broker");
     this.#broker = new HostedToolsBroker(ctx, { resumeRetainedSockets: true,
       // Observed living-Hand reconnects take 2-7s (one 5s connect timeout plus
