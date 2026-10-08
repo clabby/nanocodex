@@ -28,7 +28,8 @@
     "test:account-workspace": "node scripts/account-workspace-journey.mjs",
     "test:figma": "node scripts/figma-ui-journey.mjs",
     "test:services": "node scripts/services-ui-journey.mjs",
-    "test:chat-performance": "node scripts/chat-performance-journey.mjs"
+    "test:chat-performance": "node scripts/chat-performance-journey.mjs",
+    "measure:initial": "node scripts/route-loading-measure.mjs"
   },
   "portless": {
     "name": "nanocodex",
