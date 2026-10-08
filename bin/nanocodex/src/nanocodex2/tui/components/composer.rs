@@ -1084,12 +1084,6 @@ impl Composer {
     }
 
     fn submit(&mut self) -> ComposerUpdate {
-        if self.model().oai().is_none() && !self.images.is_empty() {
-            return ComposerUpdate::effect(ComposerEffect::Settings(SettingsCommand::Invalid(
-                "Claude currently supports text only; remove image attachments before submitting".into()
-            )), false);
-        }
-
         if self.draft.trim().is_empty() {
             return ComposerUpdate::unchanged();
         }
@@ -1116,12 +1110,6 @@ impl Composer {
     }
 
     fn queue(&mut self) -> ComposerUpdate {
-        if self.model().oai().is_none() && !self.images.is_empty() {
-            return ComposerUpdate::effect(ComposerEffect::Settings(SettingsCommand::Invalid(
-                "Claude currently supports text only; remove image attachments before submitting".into()
-            )), false);
-        }
-
         // An editor owns its save/cancel boundary. Tab must not consume its
         // draft as a separate message or interpret it as a settings command.
         if self.input_mode.is_some() {
