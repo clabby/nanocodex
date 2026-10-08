@@ -68,6 +68,7 @@ import {
 import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
 import { visualViewportKeyboardInset } from "./mobileInteraction";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
+import "./legacySurfaces.css";
 import type {
   PublishedCommitHistory,
   PublishedCommitPage,
