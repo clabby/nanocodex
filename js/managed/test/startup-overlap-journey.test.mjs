@@ -30,6 +30,21 @@ export { DurableAgentSession, AccountHostedTools, Organization, ApiKeyRecord, No
 export class OriginAgentSession extends DurableAgentSession {
   async fetch(request) {
     const url=new URL(request.url);
+    if(url.pathname==='/create-live') {
+      // Exercise the actual handler while its dispatch yield is pending, using
+      // the authenticated public request. No production delay/test hook.
+      const first=super.fetch(request.clone());
+      const competitors=await Promise.all([
+        super.fetch(request.clone()),
+        super.fetch(new Request('https://session.internal/create-run',{method:'POST',headers:request.headers,body:'{}'})),
+        super.fetch(new Request('https://session.internal/initialize',{method:'PUT',body:'{}'})),
+      ]);
+      const statuses=competitors.map(response=>response.status);
+      const response=await first;
+      console.info({type:'fixture.admission_race',statuses,winner:response.status});
+      if(statuses.some(status=>status!==409)) throw Error('competing admission was not fenced');
+      return response;
+    }
     if(url.pathname==='/fixture-origin-state') {
       const turn=url.searchParams.get('turn');
       return Response.json({
@@ -386,6 +401,13 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     };
     const ready=await waitMessage(message=>message.type==='ready'),liveTurn=crypto.randomUUID();
     assert.equal(upgradeStatus,101,'prepared live request upgrades while fresh discovery is held');
+    const admissionRace=records.find(row=>row.type==='fixture.admission_race');
+    assert.deepEqual(admissionRace?.statuses,[409,409,409],'live, fused and standalone admissions lose to the reserved create');
+    assert.equal(admissionRace.winner,101);
+    evidence.admission_race=admissionRace;
+    const admitted=await call(`/v1/agents/${ready.session_id}`,"GET",undefined,200,liveToken);
+    assert.equal(admitted.session_id,ready.session_id,'winner retains the public session identity');
+    await call(`/v1/agents/${ready.session_id}`,"GET",undefined,404,other);
     const warming=await (await backend.fetch('https://fixture.internal/__trace')).json();
     assert.ok(warming.some(row=>row.event==='credential.prewarm' && row.region==='wnam'),'live admission starts prewarm while its reply is withheld');
     assert.equal(warming.filter(row=>row.event==='provider.request').length,3,'auth-only live preparation sends no provider frames');

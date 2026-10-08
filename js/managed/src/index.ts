@@ -4107,6 +4107,7 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   #preparedModelUpgrade?: PreparedModelUpgrade;
+  #liveAdmissionReserved = false;
   #storageInitialized = false;
   #initializeStorage(): void {
     if (this.#storageInitialized) return;
@@ -4691,6 +4692,9 @@ export class DurableAgentSession extends DurableComputerObject {
 
   async #measuredFetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    // A fresh live admission yields before its first writes. Competing HTTP
+    // handlers must not initialize or claim that same object in the gap.
+    if (this.#liveAdmissionReserved) return json({ error: "agent_initialized" }, { status: 409 });
     if (request.method === "GET" && url.pathname === "/create-live") {
       return this.#createLive(request, url);
     }
@@ -6537,7 +6541,22 @@ export class DurableAgentSession extends DurableComputerObject {
       this.#preparedModelUpgrade = new PreparedModelUpgrade(
         new Request("https://nanocodex.internal/v1/responses", { headers }), this.env.NANOCODEX_SESSION_MODEL_EGRESS!);
     }
+    this.#liveAdmissionReserved = true;
     try {
+      if (earlyRuntimeId) {
+        // Service binding fetch may defer dispatch through stub initialization.
+        // Let it reach the transport before writes close the output gate; do
+        // not wait for the handshake or bypass durability for inference frames.
+        await scheduler.wait(0);
+        // Trusted RPCs may run during the yield. Never overwrite ownership or
+        // resurrect a session retired/imported by another handler.
+        if (this.#deleting || this.#deleted || this.#durabilityExported
+          || this.#durabilityImportState || this.#credentialBinding
+          || (this.#storageInitialized && (this.#sessionId() || this.#initializationOwnership()))) {
+          this.#preparedModelUpgrade?.dispose("admission_failed");
+          return json({ error: "agent_initialized" }, { status: 409 });
+        }
+      }
       this.#initializeStorage();
       if (earlyRuntimeId) {
         // Same schema/identity consumed by Cloudflare Agent durableIdentity.
@@ -6578,6 +6597,8 @@ export class DurableAgentSession extends DurableComputerObject {
     } catch (error) {
       this.#preparedModelUpgrade?.dispose("admission_failed");
       throw error;
+    } finally {
+      this.#liveAdmissionReserved = false;
     }
   }
 

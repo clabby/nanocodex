@@ -12,7 +12,8 @@ export class PreparedModelUpgrade {
   constructor(request: Request, binding: Pick<Fetcher, "fetch">) {
     this.#request = request;
     this.#timer = setTimeout(() => this.dispose("expired"), 10_000);
-    // Invoke now: a microtask after Session initialization would be too late.
+    // Start now; the caller must also yield before initialization writes so
+    // deferred service-binding dispatch can reach the transport.
     let pending: Promise<Response>;
     try { pending = binding.fetch(new Request(request, { signal: this.#abort.signal })); }
     catch { pending = Promise.reject(new Error("Preparation unavailable")); }
