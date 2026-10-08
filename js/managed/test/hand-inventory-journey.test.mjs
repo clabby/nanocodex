@@ -30,6 +30,7 @@ export class InventoryAccount extends AccountHostedTools {
 }
 export class InventorySession extends DurableAgentSession {
   async seed() {
+    await (await super.fetch(new Request("https://fixture.internal/__initialize"))).body?.cancel();
     this.ctx.storage.sql.exec("INSERT INTO session_state(singleton,session_id,owner_id,organization_id,team_id,authorization_epoch,public_origin,runtime_profile,last_active) VALUES(1,?,?,?,?,1,'https://synthetic.example','managed',?)",
       '${thread}','${owner}','${principal.organizationId}','${principal.teamId}',Date.now());
   }
