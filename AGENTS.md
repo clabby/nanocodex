@@ -95,3 +95,15 @@
   status. Distinguish already-published duplicates, actual unpublished work,
   and generated/local-only files. Never claim every dirty file is on master
   without checking; report blockers instead of making the user repeat cleanup.
+
+## Delivery pace
+
+- Push completed, appropriately validated task work to `master` promptly by
+  default. Finish the commit and nonforced push without another permission
+  question. Preserve unrelated work and respect actual branch protections.
+- Never sleep unless a concrete dependency, required backoff, or necessary
+  bounded wait makes it unavoidable. Do useful independent work while waiting.
+- Do not use `gh run list` or routine CI polling. Inspect a specific run only
+  to resolve a concrete failure, verify a changed workflow, or satisfy an
+  explicit task requirement. Do not delay delivery for unrelated CI or repeat
+  checks that already passed without a new change or unresolved concern.
