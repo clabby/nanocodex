@@ -56,8 +56,12 @@ export async function availableClaudeChildModels(broker: Fetcher, userId: string
   return NATIVE_CLAUDE_CHILD_MODELS.filter(id => allowed.models.some(model => model.id === id || model.id.startsWith(`${id}-`)));
 }
 
-export async function availableManagedModels(broker: Fetcher, userId: string, runtime: ModelRuntime = {}) {
-  return modelsFromStatus(broker, userId, runtime, await credentialStatus(broker, userId));
+export async function availableManagedModels(broker: Fetcher, userId: string, runtime: ModelRuntime = {},
+  timing?: { status_ms?: number }) {
+  const startedAt = performance.now();
+  const status = await credentialStatus(broker, userId);
+  if (timing) timing.status_ms = Math.round(performance.now() - startedAt);
+  return modelsFromStatus(broker, userId, runtime, status);
 }
 
 async function modelsFromStatus(broker: Fetcher, userId: string, runtime: ModelRuntime, status: Record<string, unknown>) {
