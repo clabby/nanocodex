@@ -53,7 +53,7 @@ const batches = <T>(values: readonly T[]) => Array.from({ length: Math.ceil(valu
  * Revoke every registered replica under scope (all scopes by default),
  * regardless of age. Returns true only when each one acknowledged; the caller
  * must not acknowledge its mutation otherwise. The replica is named by the
- * storage key this module wrote, never by the stored value; an unparseable key
+ * storage key this module wrote, never by the stored value; an unparsable key
  * fails closed. Acknowledged entries are pruned only if no newer registration
  * replaced them; a retry resumes from the rest.
  */
