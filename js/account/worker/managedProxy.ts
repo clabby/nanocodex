@@ -191,9 +191,21 @@ function prewarmCredentials(env: ManagedProxyEnv, context: Pick<ExecutionContext
   owner: string, colo: string | null): void {
   const region = placementRegion(colo), binding = env.NANOCODEX_SESSION_CREDENTIAL_PREWARM;
   if (!region || !binding || !context) return;
+  const started = performance.now();
+  const observe = (value: unknown): void => {
+    // Fixed outcome vocabulary only: no credential, owner or error contents.
+    const outcome = value && typeof value === "object" && "outcome" in value
+      && typeof value.outcome === "string"
+      && ["warm", "filled", "unavailable", "invalid", "unsupported"].includes(value.outcome)
+      ? value.outcome : "unavailable";
+    try {
+      console.info({ type: "managed.credential.prewarm", region, outcome,
+        duration_ms: Math.round((performance.now() - started) * 100) / 100 });
+    } catch { /* Observability must not change admission. */ }
+  };
   try {
-    context.waitUntil(binding.prewarm({ owner, region }).then(() => undefined, () => undefined));
-  } catch { /* Optional preparation must not reject a valid request. */ }
+    context.waitUntil(binding.prewarm({ owner, region }).then(observe, () => observe(null)));
+  } catch { observe(null); }
 }
 
 /** API-key-only entrypoint; authority still comes from the existing live key DO. */
