@@ -104,6 +104,7 @@ pub(crate) struct Transcript {
 }
 
 struct CachedEntry {
+    activity: bool,
     revision: u64,
     width: u16,
     expanded: bool,
@@ -119,7 +120,14 @@ struct CachedEntry {
     image_state: markdown::ImageState,
 }
 
+#[derive(Default)]
+struct ToolGroups {
+    entry_count: usize,
+    ranges: HashMap<EntryId, (usize, usize)>,
+}
+
 struct LayoutCache {
+    tool_groups: std::cell::RefCell<ToolGroups>,
     entries: HashMap<EntryId, CachedEntry>,
     live_tool_durations: HashMap<EntryId, u64>,
     expansion_overrides: HashMap<EntryId, bool>,
@@ -131,6 +139,7 @@ struct LayoutCache {
 impl Default for LayoutCache {
     fn default() -> Self {
         Self {
+            tool_groups: Default::default(),
             entries: HashMap::new(),
             live_tool_durations: HashMap::new(),
             expansion_overrides: HashMap::new(),
@@ -464,6 +473,7 @@ impl Transcript {
     ) -> ComponentUpdate<TranscriptEffect> {
         let previous_activity = self.activity();
         let change = self.model.apply(&record);
+        self.cache.tool_groups.get_mut().ranges.clear();
         let now = Instant::now();
         self.sync_retry_timer(now, unix_milliseconds());
         let activity = self.activity();
@@ -515,6 +525,7 @@ impl Transcript {
         update: AgentMessageUpdate,
     ) -> ComponentUpdate<TranscriptEffect> {
         let change = self.model.apply_message(perspective, update);
+        self.cache.tool_groups.get_mut().ranges.clear();
         if let Some(id) = change.removed {
             self.forget_entry(id);
         }
@@ -552,6 +563,7 @@ impl Transcript {
     }
 
     fn agent_stream_closed(&mut self) -> ComponentUpdate<TranscriptEffect> {
+        self.cache.tool_groups.get_mut().ranges.clear();
         let previous_activity = self.activity();
         if !self.model.agent_stream_closed() {
             return ComponentUpdate::none();
@@ -1390,9 +1402,51 @@ impl LayoutCache {
             .unwrap_or_else(|| Self::expanded_by_default(entry))
     }
 
+    // Consecutive calls share one disclosure row. Message boundaries remain visible.
+    fn tool_group<'a>(
+        &self,
+        entry: &TranscriptEntry,
+        model: &'a TranscriptModel,
+    ) -> &'a [TranscriptEntry] {
+        if !matches!(entry.kind, EntryKind::Tool(_)) {
+            return &[];
+        }
+        let entries = model.entries();
+        let mut groups = self.tool_groups.borrow_mut();
+        if groups.entry_count != entries.len() {
+            groups.entry_count = entries.len();
+            groups.ranges.clear();
+        }
+        if let Some(&(start, end)) = groups.ranges.get(&entry.id) {
+            return &entries[start..end];
+        }
+        let index = model.index_of(entry.id).expect("retained transcript entry");
+        let start = entries[..index]
+            .iter()
+            .rposition(|entry| !matches!(entry.kind, EntryKind::Tool(_)))
+            .map_or(0, |index| index + 1);
+        let end = entries[index..]
+            .iter()
+            .position(|entry| !matches!(entry.kind, EntryKind::Tool(_)))
+            .map_or(entries.len(), |offset| index + offset);
+        for member in &entries[start..end] {
+            groups.ranges.insert(member.id, (start, end));
+        }
+        &entries[start..end]
+    }
+
     // Hidden wrappers are transparent, but every visible ancestor must be open.
     fn visible_depth(&self, entry: &TranscriptEntry, model: &TranscriptModel) -> Option<u16> {
         if entry.hidden {
+            return None;
+        }
+        if let Some(head) = self
+            .tool_group(entry, model)
+            .iter()
+            .find(|entry| !entry.hidden)
+            && head.id != entry.id
+            && !self.expanded(head)
+        {
             return None;
         }
         let mut parent = entry.parent;
@@ -1454,13 +1508,141 @@ impl LayoutCache {
             return &[];
         };
         let expanded = self.expanded(entry);
+        let group = self.tool_group(entry, model);
+        if !expanded
+            && group
+                .iter()
+                .find(|entry| !entry.hidden)
+                .is_some_and(|head| head.id == entry.id)
+        {
+            let EntryKind::Tool(first) = &entry.kind else {
+                unreachable!()
+            };
+            // Never clone retained arguments/output to render the compact row.
+            let mut summary = TranscriptEntry {
+                id: entry.id,
+                revision: 0,
+                tool_agent_id: entry.tool_agent_id,
+                hidden: false,
+                parent: entry.parent,
+                trailing_spacer: true,
+                kind: EntryKind::Tool(crate::tui::transcript::ToolEntry {
+                    name: "__tool_activity".to_owned(),
+                    arguments: serde_json::Value::Null,
+                    started_at_unix_ms: first.started_at_unix_ms,
+                    state: first.state,
+                    duration_ns: None,
+                    result: None,
+                    metadata: None,
+                    execution: first.execution.clone(),
+                    substeps: Vec::new(),
+                    child_count: 0,
+                    code_display_result: None,
+                }),
+            };
+            let mut counts = [0_usize; 4];
+            let mut wrapper_duration = 0_u64;
+            let mut wrapper_running = false;
+            let mut wrapper_failed = false;
+            let mut wrapper_waiting = false;
+            let mut duration = 0_u64;
+            summary.revision = 0;
+            for member in group {
+                summary.revision = summary.revision.wrapping_add(member.revision);
+                let EntryKind::Tool(call) = &member.kind else {
+                    continue;
+                };
+                // Code wrappers are orchestration, not additional semantic calls.
+                use crate::tui::transcript::ToolState;
+                if call.child_count > 0 {
+                    wrapper_duration = wrapper_duration.max(
+                        self.live_tool_durations
+                            .get(&member.id)
+                            .copied()
+                            .or(call.duration_ns)
+                            .unwrap_or(0),
+                    );
+                    wrapper_running |= call.state == ToolState::Running;
+                    wrapper_failed |= call.state == ToolState::Failed;
+                    wrapper_waiting |= call.state == ToolState::Yielded;
+                    continue;
+                }
+                if member.hidden {
+                    continue;
+                }
+                counts[match call.state {
+                    ToolState::Running => 0,
+                    ToolState::Succeeded => 1,
+                    ToolState::Failed => 2,
+                    ToolState::Yielded => 3,
+                }] += 1;
+                duration = duration.saturating_add(
+                    self.live_tool_durations
+                        .get(&member.id)
+                        .copied()
+                        .or(call.duration_ns)
+                        .unwrap_or(0),
+                );
+            }
+            duration = duration.max(wrapper_duration);
+            // A wrapper's children may follow an intervening message in another block.
+            if counts.iter().all(|count| *count == 0) {
+                use crate::tui::transcript::ToolState;
+                counts[match first.state {
+                    ToolState::Running => 0,
+                    ToolState::Succeeded => 1,
+                    ToolState::Failed => 2,
+                    ToolState::Yielded => 3,
+                }] = 1;
+            }
+            let EntryKind::Tool(call) = &mut summary.kind else {
+                unreachable!()
+            };
+            call.name = "__tool_activity".to_owned();
+            call.arguments = serde_json::json!({"counts": counts, "running": wrapper_running, "failed": wrapper_failed, "waiting": wrapper_waiting});
+            call.result = None;
+            call.duration_ns = Some(duration);
+            call.state = if counts[0] > 0 || wrapper_running {
+                crate::tui::transcript::ToolState::Running
+            } else if counts[2] > 0 || wrapper_failed {
+                crate::tui::transcript::ToolState::Failed
+            } else if counts[3] > 0 || wrapper_waiting {
+                crate::tui::transcript::ToolState::Yielded
+            } else {
+                crate::tui::transcript::ToolState::Succeeded
+            };
+            if self.entries.get(&entry.id).is_some_and(|cached| {
+                cached.activity
+                    && cached.revision == summary.revision
+                    && cached.width == width
+                    && cached.depth == depth
+                    && cached.live_duration_ns == Some(duration)
+            }) {
+                return &self.entries[&entry.id].lines;
+            }
+            let mut cached = CachedEntry::new(
+                &summary,
+                depth,
+                None,
+                width,
+                theme,
+                false,
+                &self.workspace,
+                &mut self.images,
+            );
+            cached.activity = true;
+            cached.live_duration_ns = Some(duration);
+            self.entries.insert(entry.id, cached);
+            return &self.entries[&entry.id].lines;
+        }
         let workspace = &self.workspace;
         let images = &mut self.images;
         let live_duration_ns = self.live_tool_durations.get(&entry.id).copied();
         let cached = match self.entries.entry(entry.id) {
             Entry::Occupied(mut occupied) => {
                 let cached = occupied.get();
-                if cached.revision != entry.revision
+                if cached.activity
+                    || cached.revision != entry.revision
                     || cached.width != width
                     || cached.expanded != expanded
                     || cached.depth != depth
@@ -1522,8 +1704,8 @@ impl LayoutCache {
         self.entries.clear();
     }
 
-    fn expanded_by_default(entry: &TranscriptEntry) -> bool {
-        matches!(&entry.kind, EntryKind::Tool(tool) if tool.name == "update_plan")
+    fn expanded_by_default(_entry: &TranscriptEntry) -> bool {
+        false
     }
 
     fn line(&self, anchor: Anchor) -> Option<&Line<'static>> {
@@ -1637,6 +1819,7 @@ impl CachedEntry {
             _ => 0,
         };
         Self {
+            activity: false,
             revision: entry.revision,
             width,
             expanded,
@@ -2352,7 +2535,8 @@ mod history_tests {
         }
         t.selected_expandable = Some(parent);
         t.select_expandable(1);
-        assert_eq!(t.selected_expandable, Some(after));
+        // The following call belongs to the same compact activity group.
+        assert_eq!(t.selected_expandable, Some(parent));
         t.select_expandable(-1);
         assert_eq!(t.selected_expandable, Some(parent));
         let plan = t.render_plan(80, 40, &Theme::default());
