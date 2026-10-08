@@ -35,7 +35,7 @@ export class DurableAgentSession extends BaseSession {
         const key='snapshot-effect-'+i;
         sql.exec("INSERT INTO managed_code_effects(effect_key,session_id,turn_id,parent_call_id,call_id,name,input_hash,generation,state,receipt_chunks,created_at,operation_id,model_call_index,scope_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
           key,sql.exec('SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton=1').one().session_id,id,'parent-'+i,'nested-'+i,'exec_command','PRIVATE_INPUT_SENTINEL','PRIVATE_GENERATION_SENTINEL',i===2?'pending':'completed',i===2?null:i===1?300:1,Date.now(),id,7,2);
-        if(i!==2) for(let chunk=0;chunk<(i===1?300:1);chunk++) sql.exec('INSERT INTO managed_code_effect_receipt_chunks VALUES(?,?,?)',key,chunk,'PRIVATE_RECEIPT_SENTINEL');
+        if(i!==2) for(let chunk=0;chunk<(i===1?300:1);chunk++) sql.exec('INSERT INTO managed_code_effect_receipt_chunks VALUES(?,?,?)',key,chunk,'PRIVATE_RECEIPT_SENTINEL'.padEnd(i===0?65536:330,'x'));
       }
     }
     if(seed === 'noise') {
@@ -43,6 +43,10 @@ export class DurableAgentSession extends BaseSession {
       for(let i=0;i<120;i++) sql.exec("INSERT INTO managed_code_effects(effect_key,session_id,turn_id,parent_call_id,call_id,name,input_hash,generation,state,created_at,operation_id,model_call_index,scope_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         'child-noise-'+i,'child-session',id,'noise-parent','noise-'+i,'exec_command','PRIVATE_INPUT_SENTINEL','PRIVATE_GENERATION_SENTINEL','pending',Date.now(),id,8,2);
     }
+    if(seed === 'receipt-schema-break') sql.exec('ALTER TABLE managed_code_effect_receipt_chunks RENAME COLUMN chunk_index TO retained_chunk_index');
+    if(seed === 'receipt-schema-restore') sql.exec('ALTER TABLE managed_code_effect_receipt_chunks RENAME COLUMN retained_chunk_index TO chunk_index');
+    if(seed === 'effect-schema-break') sql.exec('ALTER TABLE managed_code_effects RENAME COLUMN operation_id TO retained_operation_id');
+    if(seed === 'effect-schema-restore') sql.exec('ALTER TABLE managed_code_effects RENAME COLUMN retained_operation_id TO operation_id');
     const values=['managed_turns','managed_recovery_safety','managed_code_effects','managed_code_effect_receipt_chunks','nanocodex_durable_states','nanocodex_durable_owners'].map(table=>sql.exec('SELECT * FROM '+table+' ORDER BY rowid').toArray());
     const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(values)));
     return Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
@@ -290,7 +294,7 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     assert.equal(expanded.recovery.effects.data[1].receipt.observed_chunks,257);
     assert.equal(expanded.recovery.effects.data[1].receipt.truncated,true);
     assert.equal(expanded.recovery.effects.data[2].receipt.observed_chunks,1);
-    assert.equal(expanded.recovery.effects.data[2].receipt.observed_bytes,24);
+    assert.equal(expanded.recovery.effects.data[2].receipt.observed_bytes,undefined);
     assert.doesNotMatch(JSON.stringify(expanded.recovery),/PRIVATE_|input_hash|generation|receipt_json|effect_key/);
     assert.equal(await recoveryFixture(false),recoveryBefore,"inspection must preserve safety, effects, turns, durable heads and owners");
     const noiseBefore=await recoveryFixture('noise');
@@ -303,6 +307,26 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     assert.ok(busy.recovery.stopped_root_effects.data[0].data.every(effect=>effect.session_id!=='child-session'));
     assert.equal(await recoveryFixture(false),noiseBefore);
     assert.doesNotMatch(JSON.stringify(busy.recovery),/PRIVATE_|input_hash|generation|receipt_json|effect_key/);
+    // Real SQLite incompatibility, not a mocked helper: a broken receipt
+    // query must leave root safety and effect identity readable, redact its
+    // SQL error, and leave all stored evidence unchanged.
+    const brokenBefore=await recoveryFixture('receipt-schema-break');
+    const partial=await inspect("diagnostics",{thread_id:aliceThreads[0],limit:100});
+    assert.equal(partial.recovery.available,true);
+    assert.equal(partial.recovery.turns.data[0].abrupt_attempts,4);
+    assert.equal(partial.recovery.effects.data.length,100);
+    assert.equal(partial.recovery.stopped_root_effects.data[0].data.length,3);
+    assert.ok(partial.recovery.effects.data.every(effect=>effect.receipt.available===false));
+    assert.equal(partial.recovery.effects.data[0].receipt.reason,"receipt_metadata_unavailable");
+    assert.equal(await recoveryFixture(false),brokenBefore);
+    assert.doesNotMatch(JSON.stringify(partial.recovery),/PRIVATE_|SQLITE|no such|retained_chunk_index/);
+    await recoveryFixture('receipt-schema-restore');
+    await recoveryFixture('effect-schema-break');
+    const staged=await inspect("diagnostics",{thread_id:aliceThreads[0],limit:10});
+    assert.equal(staged.recovery.available,false);
+    assert.equal(staged.recovery.stage,"effects");
+    assert.doesNotMatch(JSON.stringify(staged.recovery),/PRIVATE_|SQLITE|no such|retained_operation_id/);
+    await recoveryFixture('effect-schema-restore');
     principal=alice;
     const ownerDiagnostics=await call(`/v1/agents/${aliceThreads[0]}/diagnostics`);
     assert.equal(ownerDiagnostics.recovery,undefined,"recovery snapshot remains admin-only");

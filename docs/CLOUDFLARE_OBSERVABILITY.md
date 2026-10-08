@@ -190,9 +190,12 @@ snapshot does not include archived turns or parse the root runtime head.
 
 Compare `abrupt_attempts` with the ordinary `attempt_count`: they measure
 separate recovery paths. Missing safety rows remain null. Effect receipt
-inspection returns chunk counts and byte sizes, never receipt contents, inputs,
+inspection returns chunk counts, never receipt contents, inputs,
 source, hashes or credentials. Receipt scans stop at 257 chunks; `truncated`
-means the reported count and size are lower bounds, not verified integrity.
+means the reported count is a lower bound, not verified integrity. Receipt metadata uses
+the chunk-key index and never reads or casts receipt bodies. A failed receipt
+query is marked unavailable on that effect; other safety/effect metadata remains
+readable. Snapshot-level failures include a fixed stage code without SQL errors.
 Unavailable tables or snapshots are explicit. Reads do not acquire runtime
 ownership, settle operations or replenish recovery budgets. Ordinary owner
 and Connect diagnostics do not expose this administrator snapshot.
