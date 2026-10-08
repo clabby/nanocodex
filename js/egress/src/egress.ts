@@ -2225,6 +2225,10 @@ function closeSponsoredSocket(socket: WebSocket, code: number, reason: string): 
 
 async function handleControl(request: Request, url: URL, env: EgressEnv): Promise<Response> {
   // This control API is service-binding only; public model egress never enters it.
+  // Any credential mutation drops this isolate's cached reads for that user.
+  const mutatedUser = request.method !== "GET" && request.method !== "HEAD"
+    ? /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials(?:\/|$)/.exec(url.pathname)?.[1] : undefined;
+  if (mutatedUser) forgetCachedCredentials(env, mutatedUser);
   const gmailPush = /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/gmail-push\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/.exec(url.pathname);
   if (gmailPush) {
     if (!env.GMAIL_PUSH_MAILBOXES) return jsonError(503, "gmail_push_unavailable");
@@ -2744,6 +2748,7 @@ async function handleClaudeModels(env: EgressEnv, userId: string): Promise<Respo
         await cancelResponseBody(response);
         refreshed = true;
         result = consumeRpcData(await userBroker(env, userId).resolveClaudeCredential(true, credential.revision));
+        if (result.status === 200 && result.credential) cachePut(caches(env).claude, userId, result, CREDENTIAL_CACHE_MS); else caches(env).claude.delete(userId);
         if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
         credential = result.credential;
         secrets.push(credential.headers.authorization?.replace(/^Bearer /, "") ?? "");
@@ -2854,6 +2859,7 @@ async function handleClaudeMessages(
       await cancelResponseBody(response);
       phase = "credential_refresh";
       result = consumeRpcData(await userBroker(env, authority.owner).resolveClaudeCredential(true, credential.revision));
+      if (result.status === 200 && result.credential) cachePut(caches(env).claude, authority.owner, result, CREDENTIAL_CACHE_MS); else caches(env).claude.delete(authority.owner);
       if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
       credential = result.credential;
       secrets.push(credential.headers.authorization?.replace(/^Bearer /, "") ?? "");
@@ -3237,6 +3243,7 @@ async function reportChatGptLimit(
   select = true,
   egressRequestId?: string,
 ): Promise<boolean> {
+  forgetCachedCredentials(env, userId); // the broker's account selection is changing
   const controller = new AbortController();
   const started = Date.now();
   const failed = (outcome: "timeout" | "error") => console.warn({
@@ -3348,6 +3355,44 @@ export function isLegacyLocalBootstrapCredential(
   }
 }
 
+/**
+ * Isolate-local cache of plain credential reads. Cloudflare runs this Worker
+ * next to the caller, so a hit avoids a round trip to the user's broker on
+ * every model call. Bounded by CREDENTIAL_CACHE_MS (a revoked or switched
+ * credential can keep working this long) and by provider expiry. Recovery,
+ * revision fences and account pins always read the broker, and a recovery
+ * result replaces the cached entry.
+ */
+const CREDENTIAL_CACHE_MS = 10 * 60_000;
+const CREDENTIAL_CACHE_EARLY_MS = 5 * 60_000;
+const CREDENTIAL_CACHE_MAX = 1024;
+type CachedClaude = { status: number; credential: ClaudeSubscriptionCredential | null };
+type CredentialCaches = { model: Map<string, { value: CanonicalResolve; until: number }>; claude: Map<string, { value: CachedClaude; until: number }> };
+// Scoped to the broker binding, so distinct deployments/tests never share entries.
+const credentialCaches = new WeakMap<object, CredentialCaches>();
+function caches(env: EgressEnv): CredentialCaches {
+  let entry = credentialCaches.get(env.USER_CREDENTIALS);
+  if (!entry) credentialCaches.set(env.USER_CREDENTIALS, entry = { model: new Map(), claude: new Map() });
+  return entry;
+}
+function cacheGet<T>(cache: Map<string, { value: T; until: number }>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (!entry) return undefined;
+  if (entry.until > Date.now()) return entry.value;
+  cache.delete(key);
+  return undefined;
+}
+function cachePut<T>(cache: Map<string, { value: T; until: number }>, key: string, value: T, ttl: number): void {
+  if (!(ttl > 0)) { cache.delete(key); return; }
+  if (cache.size >= CREDENTIAL_CACHE_MAX) cache.delete(cache.keys().next().value!);
+  cache.set(key, { value, until: Date.now() + ttl });
+}
+/** Drop cached reads for a user after any credential mutation in this isolate. */
+export function forgetCachedCredentials(env: EgressEnv, userId: string): void {
+  caches(env).model.delete(userId);
+  caches(env).claude.delete(userId);
+}
+
 async function resolveUserCredential(
   env: EgressEnv,
   userId: string,
@@ -3355,7 +3400,16 @@ async function resolveUserCredential(
   revision?: number,
   accountId?: string,
 ): Promise<ModelCredentialValue & Pick<ResolvedModelCredential, "broker_ms" | "broker_activation_ms" | "broker_age_ms" | "broker_resolve_id">> {
-  const result: CanonicalResolve = consumeRpcData(await userBroker(env, userId).resolveModelCredential(recover, revision, accountId));
+  const plain = !recover && revision === undefined && accountId === undefined;
+  let result = plain ? cacheGet(caches(env).model, userId) : undefined;
+  if (!result) {
+    result = consumeRpcData(await userBroker(env, userId).resolveModelCredential(recover, revision, accountId)) as CanonicalResolve;
+    if (result.status >= 200 && result.status < 300 && result.credential && (plain || recover)) {
+      const expiresAt = result.credential.expiresAt;
+      cachePut(caches(env).model, userId, { ...result, resolve_ms: 0 },
+        Math.min(CREDENTIAL_CACHE_MS, expiresAt === undefined ? CREDENTIAL_CACHE_MS : expiresAt - CREDENTIAL_CACHE_EARLY_MS - Date.now()));
+    } else if (plain || recover) caches(env).model.delete(userId);
+  }
   if (result.status < 200 || result.status >= 300) {
     if (result.status === 429) throw new EgressFailure(429, accountId ? "chatgpt_account_exhausted" : "chatgpt_accounts_exhausted");
     throw new EgressFailure(result.status === 404 ? 409 : 503, accountId ? "chatgpt_account_unavailable" : "user_credential_unavailable");
@@ -3382,7 +3436,12 @@ type CanonicalResolve = Readonly<{ status: number; credential: ModelCredentialVa
 async function resolvePlainClaudeCredential(env: EgressEnv, userId: string): Promise<{
   status: number; credential: ClaudeSubscriptionCredential | null;
 }> {
-  return consumeRpcData(await userBroker(env, userId).resolveClaudeCredential());
+  const cached = cacheGet(caches(env).claude, userId);
+  if (cached) return cached;
+  const result = consumeRpcData(await userBroker(env, userId).resolveClaudeCredential()) as { status: number; credential: ClaudeSubscriptionCredential | null };
+  if (result.status === 200 && result.credential) cachePut(caches(env).claude, userId, result, CREDENTIAL_CACHE_MS);
+  else caches(env).claude.delete(userId);
+  return result;
 }
 
 async function resolveSshIdentity(

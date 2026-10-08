@@ -31,7 +31,7 @@ describe("Session-only model egress", () => {
     const entrypoint = new SessionModelEgress(createExecutionContext(), env);
     for (let i = 0; i < 2; i++) expect((await entrypoint.fetch(request())).status).toBe(200);
     expect(getByName).toHaveBeenCalledWith(owner);
-    expect(lookup).toHaveBeenCalledTimes(2);
+    expect(lookup).toHaveBeenCalledTimes(1); // isolate cache serves the second plain read
     expect(callback).not.toHaveBeenCalled();
     expect(upstream).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(log.mock.calls)).not.toContain("fixture-provider-secret");

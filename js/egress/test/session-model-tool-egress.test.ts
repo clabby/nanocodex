@@ -71,7 +71,7 @@ describe("Session model egress: managed web search and image tools", () => {
     expect(upstream).toHaveBeenCalledTimes(12);
     expect(upstream.mock.calls.map(([request]) => (request as Request).url)).toEqual(
       Array.from({ length: 12 }, (_, i) => UPSTREAM[TOOL_PATHS[i % 3]!]));
-    expect(lookup).toHaveBeenCalledTimes(12);
+    expect(lookup).toHaveBeenCalledTimes(1); // isolate cache serves repeat plain reads
     expect(new Set(getByName.mock.calls.map(([name]) => name))).toEqual(new Set([owner]));
     expect(JSON.stringify(log.mock.calls)).not.toContain("fixture-provider-secret");
   });
