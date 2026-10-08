@@ -118,9 +118,7 @@ output/code-observation-workerd/. This local workerd/Rust integration does not
 claim a deployed Cloudflare platform restart or production thread recovery.
 
 The standalone workerd command prepares the pinned QuickJS WASM before running.
-The CI-selected hand-retirement-journey.test.mjs lifecycle entry point also
-imports these two restart journeys; they therefore run in the bindings job's
-Exercise single-Hand upgrade and routing step even while broad tests are
-paused. That step already prepares the evaluator and downloads the current
-WASM build. The existing Hand-retirement journey additionally requires its
-historical baseline commit to be available in the checkout.
+It is included in test:recovery, but the current CI workflow does not invoke
+that package command. Broad JS tests are also paused. CI execution of these
+journeys remains pending a workflow change with the required workflow grant;
+local passing runs do not establish CI coverage.

@@ -1,7 +1,3 @@
-// The CI lifecycle entry point also exercises retained Code Mode work after
-// physical owner loss. Keep these journeys selected while the broad suite is paused.
-import "./code-observation-workerd-journey.test.mjs";
-
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
