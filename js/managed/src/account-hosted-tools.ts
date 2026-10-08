@@ -257,9 +257,13 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     // Recheck after asynchronous regional discovery; revocation may have interleaved.
     if (!this.#shares.grant(id, recipientId)) return undefined;
     const alias = `shared:${id}`;
-    const screens = (snapshot.screens ?? []).filter(target => target.machine_id === grant.machine_id).map(target => {
+    const screens = (snapshot.screens ?? []).filter(target => target.machine_id === grant.machine_id).flatMap(target => {
       const exposed = { ...target, machine_id: alias, machine_name: `${target.machine_name} (shared)` };
-      return { ...exposed, generation: this.#shares.route(id, screenTool(exposed).definition.name, screenTool(target).route_token) };
+      const original = screenTool(target);
+      const published = snapshot.tools.find(tool => tool.provider === "screens"
+        && tool.definition.name === original.definition.name
+        && (parseRelayRouteToken(tool.route_token)?.token ?? tool.route_token) === original.route_token);
+      return published ? [{ ...exposed, generation: this.#shares.route(id, screenTool(exposed).definition.name, published.route_token) }] : [];
     });
     const selected = snapshot.machines.find(entry => entry.machine.id === grant.machine_id);
     if (!selected && !screens.length) return undefined;
@@ -280,17 +284,20 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
     const grant = route && this.#shares.grant(route.share_id, recipientId);
     if (!route || !grant || invocation.machine_id !== `shared:${grant.id}` || route.name !== invocation.name
       ) return unavailable();
-    if (route.route_token.startsWith("screen:v1:")) {
-      const screen = this.#remote.list(true).find(target => target.machine_id === grant.machine_id
-        && target.agent_tools && screenTool(target).route_token === route.route_token);
-      if (!screen) return unavailable();
-      const key = JSON.stringify([sharedSession, invocation.call_id]);
-      const controller = new AbortController(); this.#sharedScreens.set(key, controller);
-      try {
-        return await this.#remote.invoke(screenTool(screen).definition.name, route.route_token, invocation.input,
-          sharedSession, AbortSignal.any([signal, controller.signal]),
-          { threadId: invocation.thread_id, callId: invocation.call_id, turnId: invocation.turn_id }) ?? unavailable();
-      } finally { this.#sharedScreens.delete(key); }
+    const screenRelay = parseRelayRouteToken(route.route_token);
+    const screenRoute = screenRelay?.token ?? route.route_token;
+    if (screenRoute.startsWith("screen:v1:")) {
+      const snapshot = await this.#ownedSnapshot(grant.machine_id);
+      const published = snapshot.tools.find(tool => tool.provider === "screens" && tool.route_token === route.route_token);
+      if (!published || !this.#shares.grant(grant.id, recipientId)) return unavailable();
+      if (screenRelay && !this.env.NANOCODEX_HAND_RELAYS) return unavailable();
+      const forwarded = new Request("https://account-tools.internal/invoke", { method: "POST", signal,
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ ...invocation,
+          owner_id: ownerId, machine_id: undefined, name: published.definition.name,
+          route_token: screenRoute, session_id: sharedSession }) });
+      return screenRelay
+        ? this.env.NANOCODEX_HAND_RELAYS!.getByName(handRelayName(ownerId, screenRelay.region)).fetch(forwarded)
+        : this.fetch(forwarded);
     }
     if (!sharedMachineTool(route.name)) return unavailable();
     const relay = parseRelayRouteToken(route.route_token);
@@ -693,6 +700,7 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
         const share = this.#shares.received().find(entry => body.machine_id === `shared:${entry.id}`);
         if (share) await this.env.NANOCODEX_ACCOUNT_TOOLS?.getByName(share.owner_id).cancelSharedHand(share.owner_id, body.owner_id, body);
       } else {
+        this.#sharedScreens.get(JSON.stringify([body.session_id, body.call_id]))?.abort();
         const row = this.ctx.storage.sql.exec<{call_id:string}>("SELECT call_id FROM hosted_tool_calls WHERE session_id=? AND source_call_id=?", body.session_id, body.call_id).toArray()[0];
         if (row) this.#broker.cancel(row.call_id);
       }
@@ -738,12 +746,16 @@ export class AccountHostedTools extends DurableObject<AccountHostedToolsEnv> {
       observeHandCall("account.decode_input", invocation.name, startedAt, "ok", invocation.call_id, correlation, decodedAt);
       observeHandCall("account.ownership", invocation.name, decodedAt, "ok", invocation.call_id, correlation, ownedAt);
       if (invocation.machine_id === undefined && invocation.route_token.startsWith("screen:v1:")) {
-        const remote = await traceToolInvocation("hand.account.invoke", invocation.thread_id, invocation.name, {
-          sessionId: invocation.session_id, callId: invocation.call_id, turnId: invocation.turn_id,
-        }, () => this.#remote.invoke(invocation.name, invocation.route_token,
-          invocation.input, invocation.session_id, request.signal,
-          { threadId: invocation.thread_id, callId: invocation.call_id, turnId: invocation.turn_id }));
-        if (remote) return remote;
+        const key = JSON.stringify([invocation.session_id, invocation.call_id]);
+        const controller = new AbortController(); this.#sharedScreens.set(key, controller);
+        try {
+          const remote = await traceToolInvocation("hand.account.invoke", invocation.thread_id, invocation.name, {
+            sessionId: invocation.session_id, callId: invocation.call_id, turnId: invocation.turn_id,
+          }, () => this.#remote.invoke(invocation.name, invocation.route_token,
+            invocation.input, invocation.session_id, AbortSignal.any([request.signal, controller.signal]),
+            { threadId: invocation.thread_id, callId: invocation.call_id, turnId: invocation.turn_id }));
+          if (remote) return remote;
+        } finally { this.#sharedScreens.delete(key); }
       }
       const catalog = this.#broker.catalogSnapshot();
       const machineName = HOSTED_MACHINE_TOOL_NAMES.find((name) => name === invocation.name);

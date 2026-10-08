@@ -39,15 +39,20 @@ export class SharingDriver extends DurableObject {
       await this.provider.refresh(); this.tool=this.provider.machineTool(machine,'exec_command');
       return Response.json({bound:!!this.tool});
     }
+    if(operation==='bind-screen') {
+      await this.provider.refresh(); this.screen=this.provider.screenTool(machine);
+      return Response.json({bound:!!this.screen});
+    }
     if(operation==='end') {
       await this.provider.endTurn('sharing-test','sharing-turn','Interrupt');
       return Response.json({ended:true});
     }
-    const tool=operation==='stdin'?this.process:operation==='cua'?this.provider.machineTool(machine,'mcp__cua_repl__js'):this.tool;
+    const isScreen=operation==='screen'||operation==='cancel-screen';
+    const tool=isScreen?this.screen:operation==='stdin'?this.process:operation==='cua'?this.provider.machineTool(machine,'mcp__cua_repl__js'):this.tool;
     const controller=new AbortController();
-    const timer=operation==='cancel'?setTimeout(()=>controller.abort(),250):undefined;
-    const result=await tool.handler(operation==='stdin'?{session_id:7,chars:'hello'}:operation==='cua'?{code:'observe'}:{cmd:operation==='cancel'?'HOLD':'printf SHARED_OK',workdir:'/synthetic/workspace'},
-      {sessionId:'sharing-test',turnId:'sharing-turn',callId:call,model:'synthetic',signal:operation==='cancel'?controller.signal:request.signal});
+    const timer=(operation==='cancel'||operation==='cancel-screen')?setTimeout(()=>controller.abort(),250):undefined;
+    const result=await tool.handler(isScreen?{action:'observe'}:operation==='stdin'?{session_id:7,chars:'hello'}:operation==='cua'?{code:'observe'}:{cmd:operation==='cancel'?'HOLD':'printf SHARED_OK',workdir:'/synthetic/workspace'},
+      {sessionId:'sharing-test',turnId:'sharing-turn',callId:call,model:'synthetic',signal:(operation==='cancel'||operation==='cancel-screen')?controller.signal:request.signal});
     if(timer) clearTimeout(timer);
     if(operation==='invoke' && result[Symbol.for('nanocodex.processSessionTool')]) this.process=result[Symbol.for('nanocodex.processSessionTool')];
     return Response.json(result);
@@ -137,7 +142,7 @@ for (const regional of [false, true]) test(`revocable account Hand sharing (${re
       durableObjects: { DRIVER: {className:"SharingDriver",useSQLite:true}, NANOCODEX_ACCOUNT_TOOLS: { className: "AccountHostedTools", useSQLite: true },
         NANOCODEX_SESSIONS: { className: "DurableAgentSession", useSQLite: true },
         NANOCODEX_HAND_RELAYS: { className: "RegionalHandRelay", useSQLite: true } },
-      bindings: { NANOCODEX_REGIONAL_HAND_RELAYS: regional ? "true" : "false" },
+      bindings: { NANOCODEX_REGIONAL_HAND_RELAYS: regional ? "true" : "false", NANOCODEX_REGIONAL_SCREEN_RELAYS: regional ? "true" : "false" },
       r2Buckets: ["NANOCODEX_HISTORY", "NANOCODEX_WORKSPACES"],
       serviceBindings: { NANOCODEX: async request => {
         const path = new URL(request.url).pathname;
@@ -242,7 +247,14 @@ for (const regional of [false, true]) test(`revocable account Hand sharing (${re
     await cancelFrame;
     assert.ok(wire.some(row=>row.direction==='broker' && row.frame.type==='cancel'),'cancellation reaches publisher');
     assert.equal(calls().length,4);
+    const cleanupFrame=new Promise((resolve,reject)=> {
+      const timer=setTimeout(()=>reject(new Error('turn cleanup frame not delivered')),3000);
+      for(const socket of sockets) socket.on('message',data=> {
+        if(JSON.parse(String(data)).type==='turn_ended') {clearTimeout(timer);resolve();}
+      });
+    });
     assert.equal((await post('/__fixture/driver',{operation:'end'},'recipient')).value.ended,true);
+    await cleanupFrame;
     const cleanup=wire.filter(row=>row.direction==='broker' && row.frame.type==='turn_ended');
     assert.equal(cleanup.length,1,JSON.stringify(cleanup));
     assert.equal(cleanup[0].id,'owner-device');
@@ -260,6 +272,47 @@ for (const regional of [false, true]) test(`revocable account Hand sharing (${re
     assert.equal((await post('/__fixture/driver',{operation:'stdin',call:'process-after-revoke'},'recipient')).value.success,false);
     assert.equal(calls().length,4,'saved process route rejected after revoke');
     assert.equal((await inventory()).value.data.length,2,'revocation preserves owner machines');
+    // A native screen publisher exercises the separate screen relay path (not a CUA MCP tool).
+    const screenSocket = new WebSocket(new URL('/v1/account/hands/host',base).href.replace(/^http/,'ws'),
+      {headers:as('owner')});
+    sockets.push(screenSocket);
+    let answerScreen = true;
+    await new Promise((resolve,reject)=> {
+      const timer=setTimeout(()=>reject(new Error('screen publication timed out')),5000);
+      screenSocket.once('error',reject);
+      screenSocket.on('message',data=> {
+        const frame=JSON.parse(String(data)); wire.push({id:'screen-device',direction:'broker',frame});
+        if(frame.type==='ready') {
+          if(regional) assert.match(frame.generation,/^rs\.weur\./);
+          screenSocket.send(JSON.stringify({type:'catalog',machine_id:'screen-device',machine_name:'Shared screen',
+            surfaces:[{id:'desktop',name:'Desktop',kind:'desktop',width:1,height:1,controllable:true,agent_tools:true}]}));
+        }
+        if(frame.type==='published') {clearTimeout(timer);resolve();}
+        if(frame.type==='agent_call' && answerScreen) screenSocket.send(JSON.stringify({type:'agent_result',
+          request_id:frame.request_id,status:'ok',jpeg:'/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQ==',width:1,height:1}));
+      });
+    });
+    const screenShare=await post(shares,{machine_id:'screen-device'});
+    assert.equal(screenShare.status,201,JSON.stringify(screenShare));
+    const screenAlias=(await post(shares+'/redeem',{url:screenShare.value.url},'recipient')).value.machine_id;
+    assert.equal((await post('/__fixture/driver',{operation:'bind-screen',machine:screenAlias},'recipient')).value.bound,true);
+    const observed=await post('/__fixture/driver',{operation:'screen',call:'screen-observe'},'recipient');
+    assert.equal(observed.value.structuredResult?.status ?? observed.value.status,'ok',JSON.stringify(observed));
+    const screenCalls=()=>wire.filter(row=>row.id==='screen-device'&&row.frame.type==='agent_call');
+    assert.equal(screenCalls().length,1);
+    assert.equal(screenCalls()[0].frame.agent_id,'shared:'+createHash('sha256').update(JSON.stringify([recipient,'sharing-test'])).digest('hex'));
+    answerScreen=false;
+    const screenCancelled=new Promise((resolve,reject)=> {
+      const timer=setTimeout(()=>reject(new Error('screen cancellation not delivered')),3000);
+      screenSocket.on('message',data=> {if(JSON.parse(String(data)).type==='agent_cancel'){clearTimeout(timer);resolve();}});
+    });
+    await post('/__fixture/driver',{operation:'cancel-screen',call:'screen-cancel'},'recipient');
+    await screenCancelled;
+    assert.equal(screenCalls().length,2);
+    await request(shares+'/'+screenShare.value.id,{method:'DELETE'});
+    const deniedScreen=await post('/__fixture/driver',{operation:'screen',call:'screen-after-revoke'},'recipient');
+    assert.equal(deniedScreen.value.success,false,JSON.stringify(deniedScreen));
+    assert.equal(screenCalls().length,2,'revocation blocks cached regional screen route');
     if (process.env.NANOCODEX_TEST_CLI) {
       const cliHome = join(output, 'cli-home'); await mkdir(cliHome);
       const runCLI = async (actor, args) => {
