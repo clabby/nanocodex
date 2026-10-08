@@ -694,3 +694,8 @@ html[data-theme="light"] .chat-workspace {
   .agent-navigation-backdrop { animation: agent-navigation-backdrop-in .2s ease-out; }
 }
 @keyframes agent-navigation-backdrop-in { from { opacity: 0; } }
+/* Landscape phones keep the persistent sidebar: hold it and the header clear of the notch. */
+@media (pointer: coarse) and (min-width: 761px) {
+  .chat-workspace .agent-navigation { padding-left: max(6px, env(safe-area-inset-left)); }
+  .chat-workspace .agent-chat-header { padding-right: max(12px, env(safe-area-inset-right)); }
+}
