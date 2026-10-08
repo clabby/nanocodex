@@ -14,7 +14,6 @@ use std::{
 };
 
 const MAX_FILE: usize = 1024 * 1024;
-const MAX_OUTPUT: usize = 64 * 1024;
 const MAX_VISITS: usize = 10_000;
 const MAX_SEARCH_BYTES: u64 = 128 * 1024 * 1024;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
@@ -267,7 +266,7 @@ impl ClaudeWorkspaceFiles {
             .ok_or("invalid offset")?;
         let limit = input
             .get("limit")
-            .map_or(Some(2000), Value::as_u64)
+            .map_or(Some(u64::MAX), Value::as_u64)
             .ok_or("invalid limit")?;
         if offset == 0 || limit == 0 {
             return Err("offset and limit must be positive".into());
@@ -277,7 +276,7 @@ impl ClaudeWorkspaceFiles {
             .lines()
             .enumerate()
             .skip(offset.saturating_sub(1).min(usize::MAX as u64) as usize)
-            .take(limit.min(2000) as usize)
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
         {
             if !push_bounded(&mut out, &format!("{}\t{}\n", i + 1, line)) {
                 break;
@@ -795,13 +794,6 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
 }
 
 fn push_bounded(output: &mut String, line: &str) -> bool {
-    if output.len() + line.len() > MAX_OUTPUT {
-        const MARKER: &str = "[output truncated]\n";
-        if output.len() + MARKER.len() <= MAX_OUTPUT {
-            output.push_str(MARKER);
-        }
-        return false;
-    }
     output.push_str(line);
     true
 }
@@ -1187,8 +1179,8 @@ mod tests {
             .execute("Read", json!({"file_path":path,"limit":50_000}))
             .await
             .unwrap();
-        assert!(read.len() <= 64 * 1024);
-        assert!(read.contains("[output truncated]"));
+        assert_eq!(read, format!("1\t{}\n", "hit".repeat(50_000)));
+        assert!(!read.contains("[output truncated]"));
         let grep = files
             .execute(
                 "Grep",
@@ -1196,7 +1188,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(grep.len() <= 64 * 1024);
+        assert!(grep.ends_with(&format!("{}\n", "hit".repeat(50_000))));
         assert!(
             files
                 .execute(

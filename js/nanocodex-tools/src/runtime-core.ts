@@ -5,8 +5,6 @@ import type { NamedTool, Workspace } from "../tools/types.mjs";
 
 import { createGhCommand, createGitCommand, type ShellFetch } from "./shell.js";
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
-
 export type ComputerCommandContext = Readonly<{
   fetch: ShellFetch;
   filesystem(): Workspace;
@@ -63,7 +61,7 @@ export async function createComputerRuntimeWithoutPdf(
     executionTimeoutMs: options.executionTimeoutMs,
     executionLimits: options.executionLimits,
     maxEntries: options.maxEntries,
-    maxOutputTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: options.maxOutputTokens,
     fetch: options.fetch,
     networkMode: options.networkMode,
     customCommands: [git, gh, ...additional],
