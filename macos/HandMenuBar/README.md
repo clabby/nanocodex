@@ -37,6 +37,13 @@ the private command directory when it exits, including after a crash.
 The companion refreshes every five seconds during sign-in, when reopened, and
 otherwise every thirty seconds. Opening the menu does not initiate sign-in.
 
+**Keep Mac Awake** is on by default and controls the standalone Hand's persisted
+idle-sleep setting. It changes without restarting the Hand or interrupting work.
+The display can turn off and macOS can lock normally; closing the lid or choosing
+Sleep can still suspend the Mac. Keeping awake uses more battery. The same setting
+is available through `nanocodex hand keep-awake on` or `off`; omit the value to
+inspect it. The menu refreshes the observed setting after a change.
+
 Start, Stop, Restart, Refresh Status, and Open Hand Log control or inspect the
 independent local Hand service. Mutating requests are serialized and never
 short-cancelled or automatically retried after failure; Refresh Status reconciles

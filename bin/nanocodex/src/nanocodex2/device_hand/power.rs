@@ -1,7 +1,6 @@
 //! Idle system sleep assertion owned by the standalone publisher, not a socket.
 #[cfg(any(target_os = "macos", test))]
 use std::{
-    ffi::OsStr,
     io,
     process::{Child, Command, Stdio},
 };
@@ -12,27 +11,6 @@ pub(super) struct KeepAwake {
 }
 
 impl KeepAwake {
-    pub(super) fn acquire() -> Option<Self> {
-        #[cfg(target_os = "macos")]
-        {
-            if !enabled(
-                true,
-                std::env::var_os("NANOCODEX_HAND_KEEP_AWAKE").as_deref(),
-            ) {
-                return None;
-            }
-            match Self::spawn(command(std::process::id())) {
-                Ok(guard) => Some(guard),
-                Err(error) => {
-                    tracing::warn!(%error, "cannot start Hand idle sleep inhibition; continuing without it");
-                    None
-                }
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        None
-    }
-
     #[cfg(any(target_os = "macos", test))]
     fn spawn(mut command: Command) -> io::Result<Self> {
         command
@@ -43,11 +21,6 @@ impl KeepAwake {
             child: command.spawn()?,
         })
     }
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn enabled(macos: bool, value: Option<&OsStr>) -> bool {
-    macos && value != Some(OsStr::new("0"))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -72,16 +45,6 @@ impl Drop for KeepAwake {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn mac_only_default_and_explicit_opt_out() {
-        for value in [None, Some(OsStr::new("1")), Some(OsStr::new(""))] {
-            assert!(enabled(true, value));
-            assert!(!enabled(false, value));
-        }
-        assert!(!enabled(true, Some(OsStr::new("0"))));
-        assert!(!enabled(false, Some(OsStr::new("0"))));
-    }
 
     #[test]
     fn command_asserts_only_idle_sleep_and_watches_daemon() {
@@ -147,5 +110,93 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert!(!String::from_utf8_lossy(&output.stdout).contains(&owner));
+    }
+}
+
+/// A small owned watcher applies preference changes across socket reconnects.
+/// Shutdown wakes and joins it before the publisher lock is released, so the
+/// old owner's cleanup cannot remove a new owner's receipt or assertion.
+#[cfg(target_os = "macos")]
+pub(super) struct Monitor {
+    stop: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+impl Monitor {
+    pub(super) fn start(home: std::path::PathBuf) -> std::io::Result<Self> {
+        let stop = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let stopping = stop.clone();
+        let worker = std::thread::Builder::new().name("hand-power".into()).spawn(move || {
+            use crate::hand_keep_awake as preference;
+            let overridden = std::env::var_os(preference::ENVIRONMENT).as_deref() == Some(std::ffi::OsStr::new("0"));
+            let mut assertion: Option<KeepAwake> = None;
+            let mut configured = true;
+            let mut previous = serde_json::Value::Null;
+            loop {
+                let mut problem = match preference::configured(&home) {
+                    Ok(value) => { configured = value; None }
+                    Err(error) => Some(error.to_string()),
+                };
+                let enabled = configured && !overridden;
+                if let Some(guard) = assertion.as_mut() {
+                    match guard.child.try_wait() {
+                        Ok(None) => {}
+                        Ok(Some(status)) => {
+                            problem = Some(format!("Hand sleep assertion helper exited: {status}"));
+                            assertion = None;
+                        }
+                        Err(error) => {
+                            problem = Some(error.to_string());
+                            assertion = None;
+                        }
+                    }
+                }
+                if !enabled { assertion = None; }
+                else if assertion.is_none() {
+                    match KeepAwake::spawn(command(std::process::id())) {
+                        Ok(guard) => assertion = Some(guard),
+                        Err(error) => problem = Some(error.to_string()),
+                    }
+                }
+                let state = serde_json::json!({"daemon_pid": std::process::id(),
+                    "configured": configured, "active": assertion.is_some(),
+                    "environment_override": overridden, "error": problem});
+                if state != previous {
+                    if let Some(error) = problem.as_deref() {
+                        tracing::warn!(%error, "Hand keep-awake setting could not be applied completely");
+                    }
+                    match preference::write(&preference::state_path(&home), &state) {
+                        Ok(()) => previous = state,
+                        Err(error) => tracing::warn!(%error, "Cannot publish Hand keep-awake status"),
+                    }
+                }
+                let (lock, changed) = &*stopping;
+                let stop = lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let (stop, _) = changed.wait_timeout_while(stop, std::time::Duration::from_secs(1), |stop| !*stop)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if *stop { break; }
+            }
+            drop(assertion);
+            let _ = std::fs::remove_file(preference::state_path(&home));
+        })?;
+        Ok(Self {
+            stop,
+            worker: Some(worker),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        let (lock, changed) = &*self.stop;
+        *lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        changed.notify_all();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }

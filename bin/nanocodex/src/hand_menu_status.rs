@@ -47,8 +47,14 @@ async fn local_status() -> Value {
     let result = tokio::time::timeout(Duration::from_secs(3), async {
         let state = crate::hand_service::status().await?;
         let pending = crate::hand_service::is_pending().await?;
+        #[cfg(target_os = "macos")]
+        let keep_awake = std::env::var_os("HOME").and_then(|home| {
+            crate::hand_keep_awake::snapshot(std::path::Path::new(&home), state.pid).ok()
+        });
+        #[cfg(not(target_os = "macos"))]
+        let keep_awake: Option<Value> = None;
         Ok::<_, eyre::Report>(json!({"installed": state.installed, "loaded": state.loaded,
-            "pid": state.pid, "pending_login": pending, "error": null}))
+            "pid": state.pid, "pending_login": pending, "keep_awake": keep_awake, "error": null}))
     })
     .await;
     match result {

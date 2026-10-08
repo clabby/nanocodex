@@ -105,7 +105,27 @@ The real SQLite/WebSocket/PTY recovery journey runs with `pnpm --filter nanocode
 
 On macOS, the standalone daemon prevents idle system sleep by default using `/usr/bin/caffeinate -i -w <daemon PID>`. The assertion starts after exclusive publisher ownership and state opening, survives reconnects and client disconnects, and ends when the daemon shuts down. It does not keep the display awake or bypass lid-close sleep. If the helper cannot start, the daemon logs a warning and continues without sleep inhibition. Linux and Windows do not acquire this assertion.
 
-Set `NANOCODEX_HAND_KEEP_AWAKE=0` in the standalone service environment to opt out (for launchd, use its plist `EnvironmentVariables` dictionary and reload the service when convenient). An environment variable in an observing terminal does not change an already running service. The macOS app’s `keepMacAwake` preference controls its own ProcessInfo assertion separately; it does not configure the standalone daemon.
+Use **Keep Mac Awake** in the standalone Hand menu, or `nanocodex hand keep-awake on|off`.
+Omit the value to inspect JSON containing the saved `configured` preference,
+effective `enabled` value and `active` daemon assertion (null if unconfirmed).
+The setting defaults to on, persists in `~/.nanocodex/hand-keep-awake.json`, and
+applies within one second without restarting the service or interrupting work.
+The daemon owns its watcher through reconnects and releases the assertion on
+shutdown. Screen locking and display sleep work normally; keeping awake uses
+more battery. This does not unlock the Mac or permit interaction with protected
+login screens.
+
+The existing `NANOCODEX_HAND_KEEP_AWAKE=0` service-environment opt-out remains
+an override. The menu shows it and disables its checkbox; remove that override
+and restart the service to resume control through the persistent setting. An
+environment variable in an observing terminal does not change a running service.
+
+Run `node bin/nanocodex/tests/hand_keep_awake_e2e.mjs /absolute/path/to/nanocodex`
+on a running updated macOS Hand to verify off/on, persisted settings, unchanged
+owner PID, and the actual macOS idle-system assertion. The journey restores the
+original preference and never locks, stops, or restarts the Hand.
+
+The macOS app’s `keepMacAwake` preference controls its own ProcessInfo assertion separately; it does not configure the standalone daemon.
 
 ## Install
 

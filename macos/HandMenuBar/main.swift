@@ -6,6 +6,14 @@ import Darwin
 // safe status projection and launches the existing interactive login on request.
 struct HandStatus: Decodable {
     struct Local: Decodable {
+        struct KeepAwake: Decodable {
+            let enabled: Bool
+            let active: Bool?
+            let can_change: Bool?
+            let environment_override: Bool?
+            let error: String?
+        }
+        let keep_awake: KeepAwake?
         let installed: Bool?
         let loaded: Bool?
         let pid: Int?
@@ -62,7 +70,7 @@ struct MenuPresentation {
         let waiting = local?.pending_login == true && !running
         let localKnown = local?.error == nil && local?.installed != nil && local?.loaded != nil
         if busy && !checking {
-            lines.append("Local service: \(operation == "start" ? "Starting…" : operation == "stop" ? "Stopping…" : "Restarting…")")
+            lines.append(operation == "keep-awake" ? "Keep awake: Updating…" : "Local service: \(operation == "start" ? "Starting…" : operation == "stop" ? "Stopping…" : "Restarting…")")
         } else if checking {
             lines.append("Local service: Checking…")
         } else if !localKnown {
@@ -75,6 +83,12 @@ struct MenuPresentation {
             lines.append("Local service: Starting…")
         } else {
             lines.append(local?.installed == true ? "Local service: Stopped" : "Local service: Not installed")
+        }
+        if let awake = local?.keep_awake, operation != "keep-awake" || !busy {
+            if awake.error != nil { lines.append("Keep awake: Could not apply setting") }
+            else if awake.environment_override == true { lines.append("Keep awake: Off (service override)") }
+            else if awake.enabled && awake.active == false { lines.append("Keep awake: On · Assertion unavailable") }
+            else { lines.append("Keep awake: \(awake.enabled ? "On" : "Off")") }
         }
         let accountState = status?.account.state ?? "unknown"
         if checking { lines.append("Account: Checking…") }
@@ -128,7 +142,7 @@ struct MenuPresentation {
             // Checking is not evidence that the last observed warning cleared.
             // Keep it until a new observation succeeds; initial checking has
             // no prior observation to warn about.
-            warning: failure != nil || ((status != nil || !checking) && (local?.error != nil || ["expired", "network_error", "permission_denied", "unknown"].contains(accountState) || ["partial", "network_error", "permission_denied", "unknown"].contains(status?.inventory.state ?? "unknown"))))
+            warning: failure != nil || ((status != nil || !checking) && (local?.error != nil || local?.keep_awake?.error != nil || ["expired", "network_error", "permission_denied", "unknown"].contains(accountState) || ["partial", "network_error", "permission_denied", "unknown"].contains(status?.inventory.state ?? "unknown"))))
     }
 
     private static func resource(_ hand: HandStatus.Inventory.Hand, complete: Bool) -> String {
@@ -241,6 +255,12 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let signInFailure { add(signInFailure) }
         add(view.stop ? "Stop Hand" : "Start Hand", #selector(toggleHand), enabled: view.canToggle)
         add("Restart Hand", #selector(restartHand), enabled: view.canRestart)
+        let keepAwake = NSMenuItem(title: "Keep Mac Awake", action: #selector(toggleKeepAwake), keyEquivalent: "")
+        keepAwake.target = self
+        keepAwake.state = status?.local.keep_awake.map { $0.enabled ? .on : .off } ?? .mixed
+        keepAwake.isEnabled = !busy && status?.local.keep_awake?.can_change == true && status?.local.error == nil
+        keepAwake.toolTip = "Prevents idle system sleep while the Hand runs. The screen can turn off and lock. Closing the lid or choosing Sleep can still suspend the Mac."
+        next.addItem(keepAwake)
         add("Refresh Status", #selector(refreshStatus), enabled: !busy)
         next.addItem(.separator())
         add("Open Hand Log", #selector(openLog), enabled: true)
@@ -275,6 +295,8 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             current.action = fresh.action
             current.target = fresh.target
             current.isEnabled = fresh.isEnabled
+            current.state = fresh.state
+            current.toolTip = fresh.toolTip
             if let child = fresh.submenu {
                 if let existing = current.submenu { updateMenu(existing, from: child) }
                 else {
@@ -302,7 +324,7 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // Serialized child processes keep every network read off the AppKit thread.
-    private func run(_ operation: String, completion: @escaping (CommandResult) -> Void) {
+    private func run(_ operation: String, arguments: [String] = [], completion: @escaping (CommandResult) -> Void) {
         guard !busy else { return }
         busy = true
         pendingOperation = operation
@@ -311,7 +333,7 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         render()
         let child = Process()
         child.executableURL = cli
-        child.arguments = ["hand", operation]
+        child.arguments = ["hand", operation] + arguments
         child.standardInput = FileHandle.nullDevice
         let output = Pipe()
         child.standardOutput = operation == "menu-status" ? output : FileHandle.nullDevice
@@ -370,8 +392,8 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func perform(_ operation: String) {
-        run(operation) { [weak self] result in
+    private func perform(_ operation: String, arguments: [String] = []) {
+        run(operation, arguments: arguments) { [weak self] result in
             guard let self else { return }
             if result.succeeded {
                 self.quitFailure = nil
@@ -385,6 +407,11 @@ final class HandMenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.render()
             }
         }
+    }
+
+    @objc private func toggleKeepAwake() {
+        guard !busy, status?.local.error == nil, let awake = status?.local.keep_awake, awake.can_change == true else { return }
+        perform("keep-awake", arguments: [awake.enabled ? "off" : "on"])
     }
 
     private func reconcileSignIn() {

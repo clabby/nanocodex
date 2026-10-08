@@ -15,6 +15,10 @@ mod continue_auth;
 mod continue_sessions;
 mod control;
 mod device_hand;
+#[cfg(target_os = "macos")]
+#[path = "../hand_keep_awake.rs"]
+#[allow(dead_code)]
+mod hand_keep_awake;
 #[path = "../hand_login.rs"]
 mod hand_login;
 mod hand_observability;

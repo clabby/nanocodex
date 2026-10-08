@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use super::native_hand::NativeState;
 
 mod account;
+#[cfg(any(target_os = "macos", test))]
 mod power;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod service_start;
@@ -722,7 +723,12 @@ async fn share(
     match open(directory) {
         Ok(mut state) => {
             // Hold through reconnects and cleanup, after both publisher locks.
-            let _keep_awake = power::KeepAwake::acquire();
+            #[cfg(target_os = "macos")]
+            let _keep_awake = power::Monitor::start(home()?)
+                .map_err(|error| {
+                    tracing::warn!(%error, "Cannot start Hand power watcher");
+                })
+                .ok();
             let socket = socket_path(directory)?;
             let listener = transport::Listener::bind(&socket).map_err(error)?;
             let lease_cancel = cancel.clone();
