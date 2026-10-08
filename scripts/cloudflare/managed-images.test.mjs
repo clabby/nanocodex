@@ -56,6 +56,8 @@ test('input receipts survive unrelated commits and invalidate every relevant sou
     assert.notEqual(fingerprint('phone', account, '1', dir), firstPhone);
     assert.equal(fingerprint('sandbox', account, '1', dir), firstSandbox);
     put('hands/remote/image/labwc/config', 'new desktop'); commit();
+    assert.equal(fingerprint('sandbox', account, '1', dir), firstSandbox);
+    put('js/managed/Dockerfile', 'FROM scratch\nRUN true'); commit();
     assert.notEqual(fingerprint('sandbox', account, '1', dir), firstSandbox);
     const beforeRust = fingerprint('sandbox', account, '1', dir);
     put('crates/nanocodex-remote/src/runtime.rs', 'new shared publisher'); commit();
@@ -84,7 +86,9 @@ test('Rust inputs follow local Cargo packages and external binary sources', () =
   assert.ok(!covers(phone, 'crates/nanocodex-remote/src/lib.rs'));
   // Sandboxes are not Hands: no Rust source enters the sandbox image.
   for (const path of ['Cargo.lock', 'bin/nanocodex/src/nanocodex2/main.rs', 'crates/nanocodex-managed/src/lib.rs']) assert.ok(!covers(sandbox, path), path);
-  for (const path of ['hands/remote/image/labwc/rc.xml', 'crates/nanocodex-vm/image/toolkit/python.txt']) assert.ok(covers(sandbox, path), path);
+  for (const path of ['js/managed/Dockerfile', 'js/managed/scripts/check-dev-stack.sh', 'crates/nanocodex-vm/image/toolkit/python.txt']) assert.ok(covers(sandbox, path), path);
+  // Static image: desktop config and build/publish tooling never rebuild it.
+  for (const path of ['hands/remote/image/labwc/rc.xml', 'scripts/cloudflare/managed-images.mjs', 'scripts/cloudflare/wrangler-docker.mjs', 'js/managed/scripts/prepare-hand-image.mjs']) assert.ok(!covers(sandbox, path), path);
   assert.ok(!covers(sandbox, 'hands/remote/README.md'));
 });
 

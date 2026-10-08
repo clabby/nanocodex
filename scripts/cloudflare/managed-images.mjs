@@ -19,10 +19,9 @@ export const images = {
   },
   sandbox: {
     dockerfile: 'js/managed/Dockerfile', context: 'js/managed', source: './Dockerfile',
+    // Only what lands in the image. Build/publish tooling is not an input.
     inputs: ['js/managed/Dockerfile', 'js/managed/Dockerfile.dockerignore', 'js/managed/.dockerignore',
-      'js/managed/scripts/prepare-hand-image.mjs', 'js/managed/scripts/bundle-hand-desktop.sh',
-      'js/managed/scripts/check-dev-stack.sh', 'hands/remote/image/labwc',
-      'crates/nanocodex-vm/image/toolkit'],
+      'js/managed/scripts/check-dev-stack.sh', 'crates/nanocodex-vm/image/toolkit'],
     // No Rust package: Cloudflare sandboxes are execution environments, not Hands.
   },
 };
@@ -34,7 +33,8 @@ export function rustInputs(pkg, cwd = process.cwd()) {
 export function imageInputs(image, cwd = process.cwd()) {
   assert.ok(images[image], 'unknown managed image');
   const rust = images[image].package ? rustInputs(images[image].package, cwd) : [];
-  return [...images[image].inputs, ...rust, ...commonInputs];
+  // Rust images also key on the Cargo input resolver; the static sandbox image does not.
+  return [...images[image].inputs, ...rust, ...(images[image].package ? commonInputs : [])];
 }
 export function fingerprint(image, account, epoch = '1', cwd = process.cwd()) {
   assert.ok(images[image], 'unknown managed image');
