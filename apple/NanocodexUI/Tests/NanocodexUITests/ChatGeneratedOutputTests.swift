@@ -2,6 +2,26 @@ import XCTest
 @testable import NanocodexUI
 
 final class ChatGeneratedOutputTests: XCTestCase {
+    func testClaudeAndResponsesAttachmentsRenderWithoutBinaryDiagnostics() throws {
+        let content: [[String: Any]] = [
+            ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "aW1hZ2U="]],
+            ["type": "document", "title": "brief.pdf", "source": ["type": "base64", "media_type": "application/pdf", "data": "JVBERi0="]],
+            ["type": "document", "title": "notes.txt", "source": ["type": "text", "media_type": "text/plain", "data": "Meeting notes"]],
+            ["type": "input_file", "filename": "extra.pdf", "file_data": "data:application/pdf;base64,JVBERi0x"],
+            ["type": "document", "title": "remote.pdf", "source": ["type": "url", "url": "https://example.test/remote.pdf"]]
+        ]
+        let result = try json(["content": content])
+        let outputs = ChatGeneratedOutput.parse(results: [result, result], includeText: true)
+        XCTAssertEqual(outputs.map(\.kind), [.image, .file, .text, .file, .file, .file])
+        XCTAssertEqual(outputs[1].title, "brief.pdf")
+        XCTAssertEqual(outputs[4].title, "extra.pdf")
+        XCTAssertEqual(outputs[5].source, "https://example.test/remote.pdf")
+        let diagnostic = ChatGeneratedOutput.sanitizedText(result)
+        XCTAssertFalse(diagnostic.contains("aW1hZ2U="))
+        XCTAssertFalse(diagnostic.contains("JVBERi0"))
+        print("Native result projection: Claude image/PDF/text/URL and Responses file retained; duplicate replay merged; binary diagnostics redacted")
+    }
+
     func testComputerContextDoesNotConvertArtifactsIntoScreens() throws {
         let result = #"{"content":[{"type":"resource_link","uri":"https://example.invalid/report.pdf","mimeType":"application/pdf"},{"type":"input_image","image_url":"data:image/svg+xml;base64,c3Zn"}]}"#
         let outputs = ChatGeneratedOutput.parse(results: [result], computerScreen: true)

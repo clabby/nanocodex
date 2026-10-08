@@ -1137,24 +1137,20 @@ fn host_reply(
                 blocks.push(match item {
                     ToolResultBlock::Text { text } => json!({"type":"text","text":text}),
                     ToolResultBlock::Image { source } => {
-                        let source = match source {
+                        let image_url = match source {
                             ImageSource::Base64 { media_type, data } => {
-                                if !matches!(
-                                    media_type.as_str(),
-                                    "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-                                ) {
-                                    return Err("unsupported Claude image media type".into());
-                                }
-                                json!({"type":"base64","media_type":media_type,"data":data})
+                                format!("data:{media_type};base64,{data}")
                             }
-                            ImageSource::Url { url } => {
-                                if !url.starts_with("https://") {
-                                    return Err("host image URL must be HTTPS".into());
-                                }
-                                json!({"type":"url","url":url})
-                            }
+                            ImageSource::Url { url } => url,
                         };
+                        let (source, _) = crate::prompt::image_source(&image_url)
+                            .map_err(|error| error.to_string())?;
                         json!({"type":"image","source":source})
+                    }
+                    ToolResultBlock::Document { file_data } => {
+                        let (block, _) = crate::prompt::document_block(&file_data, None)
+                            .map_err(|error| error.to_string())?;
+                        serde_json::to_value(block).map_err(|error| error.to_string())?
                     }
                     ToolResultBlock::UnsupportedMedia { media_type } => {
                         return Err(format!(

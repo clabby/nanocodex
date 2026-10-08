@@ -94,6 +94,32 @@ final class MessageAttachmentTests: XCTestCase {
         await fulfillment(of: [cancelled], timeout: 2)
     }
 
+    func testClaudeImageFormatsPreserveOriginalFilesAndHistory() throws {
+        let fixtures: [(String, Data)] = [
+            ("image/jpeg", try png(format: "public.jpeg")),
+            ("image/png", try png()),
+            ("image/gif", try png(format: "com.compuserve.gif")),
+            ("image/webp", try XCTUnwrap(Data(base64Encoded: "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA")))
+        ]
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try AttachmentStore(scope: "formats", rootDirectory: root)
+        for (mime, bytes) in fixtures {
+            let name = "fixture." + String(mime.dropFirst(6))
+            let prepared = try AttachmentPreparation.prepare(data: bytes, name: name, mediaType: mime)
+            XCTAssertEqual(prepared.attachment.mediaType, mime)
+            try store.save(prepared)
+            XCTAssertEqual(try Data(contentsOf: store.url(for: prepared.attachment)), bytes)
+            let input = try store.content(for: [prepared.attachment])
+            let event = try AgentEvent(.object(["cursor": .string("1"), "type": .string("turn_accepted"),
+                "turn_id": .string("format"), "input": .array(input)]))
+            XCTAssertEqual(transcript([event]).first?.imageFiles, [prepared.attachment])
+            let preview = try XCTUnwrap(CGImageSourceCreateWithData(prepared.preview as CFData, nil))
+            XCTAssertEqual(CGImageSourceGetType(preview) as String?, "public.jpeg")
+            print("Native image preparation/store/history: " + mime + "; original bytes preserved; JPEG preview decodes")
+        }
+    }
+
     func testTextProviderIsRejectedAsAnAttachment() async throws {
         let provider = NSItemProvider(object: "hello" as NSString)
         do {

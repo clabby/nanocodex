@@ -61,9 +61,9 @@ describe("Claude attachments", () => {
       async (path) => { loaded.push(path); return jpeg; },
     );
     expect(loaded).toEqual([`attachments/${id}/preview.jpg`]);
-    expect(output.map((item) => item.type)).toEqual(["text", "image", "text"]);
+    expect(output.map((item) => item.type)).toEqual(["text", "image", "text", "text"]);
     expect(output[1]).toEqual({ type: "image", image_url: `data:image/jpeg;base64,${btoa(String.fromCharCode(...jpeg))}` });
     const notJpeg = await inlineClaudeAttachmentPreviews([{ type: "text", text: descriptor }], async () => new Uint8Array([1, 2, 3]));
-    expect(notJpeg.map((item) => item.type)).toEqual(["text"]);
+    expect(JSON.stringify(notJpeg)).toContain("unavailable to Claude");
   });
 });

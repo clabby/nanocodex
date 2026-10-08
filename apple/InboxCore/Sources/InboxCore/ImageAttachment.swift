@@ -16,6 +16,15 @@ public struct TranscriptInput: Equatable, Sendable {
                 let url = part["image_url"].string.isEmpty ? part["image_url"]["url"].string : part["image_url"].string
                 return [.object(["type": .string("image"), "image_url": .string(url)])]
             }
+            if ["file", "input_file"].contains(type) {
+                // History may contain documents submitted by another client.
+                // Keep them visible without rendering their base64 payload as prose.
+                let name = part["filename"].string.trimmingCharacters(in: .whitespacesAndNewlines)
+                let data = part["file_data"].string
+                let kind = data.hasPrefix("data:application/pdf;") ? "PDF" : data.hasPrefix("data:text/plain;") ? "Plain text" : "File"
+                let label = name.isEmpty ? "[" + kind + " attachment]" : "[" + kind + " attachment: " + name + "]"
+                return [.object(["type": .string("text"), "text": .string(label)])]
+            }
             if ["text", "input_text"].contains(type) { return Self.textParts(part["text"].string) }
             return [part]
         }

@@ -93,6 +93,8 @@ pub enum ToolResultBlock {
     Text { text: String },
     /// Claude-native image block.
     Image { source: ImageSource },
+    /// Inline PDF or UTF-8 text document, encoded as a base64 data URL.
+    Document { file_data: String },
     /// Media not representable by the current Claude client result adapter.
     UnsupportedMedia { media_type: String },
 }
@@ -651,10 +653,41 @@ pub fn mcp_tool_output(result: Value) -> Result<ToolOutput, String> {
                 let resource = item
                     .get("resource")
                     .ok_or("MCP resource omitted resource body")?;
-                // Resource URIs are remote data, never authorization to read local paths.
-                blocks.push(ToolResultBlock::Text {
-                    text: serde_json::to_string(resource).map_err(|e| e.to_string())?,
-                });
+                // Resource URIs are remote data, never authorization to fetch them.
+                // Binary resources must reach the model as media, not base64 in text.
+                if let Some(blob) = resource.get("blob") {
+                    let data = blob.as_str().ok_or("MCP resource blob must be a string")?;
+                    let media_type = resource
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .ok_or("MCP binary resource omitted mimeType")?;
+                    match media_type {
+                        "application/pdf" | "text/plain" => {
+                            blocks.push(ToolResultBlock::Document {
+                                file_data: format!("data:{media_type};base64,{data}"),
+                            })
+                        }
+                        "image/png" | "image/jpeg" | "image/gif" | "image/webp" => {
+                            blocks.push(ToolResultBlock::Image {
+                                source: ImageSource::Base64 {
+                                    media_type: media_type.to_owned(),
+                                    data: data.to_owned(),
+                                },
+                            })
+                        }
+                        _ => {
+                            return Err(format!(
+                                "MCP binary resource type is unsupported by Claude: {media_type}"
+                            ));
+                        }
+                    }
+                } else if resource.get("text").and_then(Value::as_str).is_some() {
+                    blocks.push(ToolResultBlock::Text {
+                        text: serde_json::to_string(resource).map_err(|e| e.to_string())?,
+                    });
+                } else {
+                    return Err("MCP resource omitted text or blob".into());
+                }
             }
             Some("resource_link") => blocks.push(ToolResultBlock::Text {
                 text: serde_json::to_string(item).map_err(|e| e.to_string())?,

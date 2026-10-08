@@ -29,7 +29,7 @@ export function projectToolOutput(...values) {
     const url = generatedOutputUrl(source, kind);
     if (!url) return false;
     const mimeType = mime(value) || (url.startsWith("data:") ? url.slice(5).split(/[;,]/, 1)[0] : undefined);
-    const name = typeof value.name === "string" ? value.name : typeof value.title === "string" ? value.title : undefined;
+    const name = typeof value.name === "string" ? value.name : typeof value.title === "string" ? value.title : typeof value.filename === "string" ? value.filename : undefined;
     add({ kind, url, ...(name ? { name: bounded(name, 240) } : {}), ...(mimeType ? { mimeType } : {}) });
     return true;
   }
@@ -59,6 +59,24 @@ export function projectToolOutput(...values) {
       visit(value.text, depth + 1, true);
       return true;
     }
+    // Native Claude blocks carry their bytes/URL in source, including tool
+    // results retained in history. Keep documents downloadable like MCP files.
+    if ((type === "image" || type === "document") && value.source && typeof value.source === "object") {
+      const source = value.source;
+      const kind = type === "image" ? "image" : "file";
+      const metadata = { ...value, mimeType: mime(source) };
+      let retained = false;
+      if (source.type === "base64" && typeof source.data === "string" && mime(source)) {
+        retained = media(kind, `data:${mime(source)};base64,${source.data}`, metadata);
+      } else if (source.type === "url") {
+        retained = media(kind, source.url, metadata);
+      } else if (type === "document" && source.type === "text" && typeof source.data === "string") {
+        visitResource({ name: value.title || value.filename, mimeType: "text/plain", text: source.data });
+        retained = true;
+      }
+      if (!retained) text(`${value.title || value.filename || (type === "image" ? "Image" : "Document")} — preview unavailable`);
+      return true;
+    }
     const image = sourceUrl(value.image_url) ?? (typeof value.imageUrl === "string" ? value.imageUrl : undefined);
     const audio = sourceUrl(value.audio_url);
     const video = sourceUrl(value.video_url);
@@ -77,7 +95,7 @@ export function projectToolOutput(...values) {
     if (type === "resource_link" || type === "file" || type === "input_file" || type === "output_file") {
       const source = sourceUrl(value.file_url) ?? value.uri ?? value.url ?? value.file_data;
       if (!media(mediaKind(mime(value)), source, value)) {
-        text(`${value.name || value.title || "Generated file"}${typeof source === "string" && !source.startsWith("data:") ? ` — ${bounded(source, 1024)}` : " — preview unavailable"}`);
+        text(`${value.name || value.title || value.filename || "Generated file"}${typeof source === "string" && !source.startsWith("data:") ? ` — ${bounded(source, 1024)}` : " — preview unavailable"}`);
       }
       return true;
     }

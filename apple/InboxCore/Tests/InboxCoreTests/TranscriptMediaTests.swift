@@ -2,6 +2,39 @@ import XCTest
 @testable import InboxCore
 
 final class TranscriptMediaTests: XCTestCase {
+    func testDocumentHistoryRemainsVisibleAlongsideImagesAndCaptions() async throws {
+        let input: JSON = .array([
+            .object(["type": .string("text"), "text": .string("Compare these")]),
+            .object(["type": .string("file"), "filename": .string("brief.pdf"), "file_data": .string("data:application/pdf;base64,JVBERi0xLjc=")]),
+            .object(["type": .string("image"), "image_url": .string("data:image/png;base64,AQ==")]),
+            .object(["type": .string("file"), "file_data": .string("data:text/plain;base64,aGVsbG8=")]),
+            .object(["type": .string("input_file"), "filename": .string("legacy.txt")])
+        ])
+        let body = try JSONEncoder().encode(JSON.object([
+            "data": .array([.object(["cursor": .string("1"), "type": .string("turn_accepted"),
+                                    "turn_id": .string("documents"), "input": input])]),
+            "has_more": .bool(false), "latest_cursor": .string("1")]))
+        let fixture = try HTTPFixture { request in
+            XCTAssertTrue(request.path.hasSuffix("/events/history"))
+            return FixtureReply(body: String(decoding: body, as: UTF8.self))
+        }
+        defer { fixture.close() }
+        let client = ManagedClient(credential: try .init(origin: fixture.origin, apiKey: fixtureKey), configuration: fixture.configuration)
+        defer { client.close() }
+        let history = try await client.history("synthetic-documents")
+        let rows = transcript(history.events)
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.role, "You")
+        XCTAssertTrue(row.text.contains("Compare these"))
+        XCTAssertTrue(row.text.contains("brief.pdf"))
+        XCTAssertTrue(row.text.contains("Plain text"))
+        XCTAssertTrue(row.text.contains("legacy.txt"))
+        XCTAssertFalse(row.text.contains("base64"))
+        XCTAssertFalse(row.text.contains("aGVsbG8="))
+        XCTAssertEqual(row.images, ["data:image/png;base64,AQ=="])
+        print("Document history over HTTP: " + row.text + "; image retained")
+    }
+
     func testFlattenedAttachmentDescriptorsKeepSurroundingUserText() throws {
         let image = try MessageAttachment(name: "Photo.png", mediaType: "image/png", byteCount: 42)
         let imageText = ImageAttachmentContent.original(image)[0]["text"].string
