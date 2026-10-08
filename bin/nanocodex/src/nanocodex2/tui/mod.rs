@@ -27,6 +27,8 @@ mod screen;
 mod secure_input;
 mod session;
 mod share;
+mod shared;
+pub(crate) use shared::run_shared;
 mod shell;
 mod spinner;
 mod sudo_input;
