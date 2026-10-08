@@ -5,13 +5,29 @@ import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
 import path from 'node:path';
+import {nanocodexTools} from '../../nanocodex-vite/tools.mjs';
 const root=fileURLToPath(new URL('../../../',import.meta.url));process.chdir(root);
 const out='output/account-workspace';await mkdir(out,{recursive:true});
 const checkpoint=async text=>writeFile(`${out}/browser-progress.md`,`${new Date().toISOString()}\n${text}\n`);
 await checkpoint('Draft saved; building production bundle.');
 const require=createRequire(path.resolve('js/account/package.json'));
-const {build}=require('esbuild');const {chromium}=require('playwright-core');
-await build({stdin:{contents:`import React from 'react';import {createRoot} from 'react-dom/client';import {QueryClient,QueryClientProvider} from '@tanstack/react-query';import {BrowserRouter} from 'react-router';import {AccountSessionProvider} from './src/AccountSession';import {DeviceConnect} from './src/DeviceConnect';import './src/index.css';createRoot(document.getElementById('root')).render(<QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><BrowserRouter><AccountSessionProvider><DeviceConnect/></AccountSessionProvider></BrowserRouter></QueryClientProvider>);`,resolveDir:path.resolve('js/account'),sourcefile:'account-journey.tsx',loader:'tsx'},bundle:true,external:['/paradigm-mark.svg'],format:'esm',jsx:'automatic',outfile:`${out}/journey.js`,loader:{'.woff2':'dataurl','.png':'dataurl','.svg':'dataurl'}});
+const {chromium}=require('playwright-core');
+const {build}=await import('vite');
+const {default:react}=await import('@vitejs/plugin-react');
+// Use the production browser bundler and compatibility plugin. Plain esbuild
+// follows Node-only fallbacks in dependencies imported by the account UI.
+const entry=path.resolve('js/account/account-workspace-journey.tsx');
+await build({configFile:false,root:path.resolve('js/account'),define:{'process.env.NODE_ENV':JSON.stringify('production'),'process.env':'{}'},
+ worker:{format:'es',plugins:()=>[nanocodexTools()]},
+ plugins:[nanocodexTools(),react(),{name:'account-workspace-entry',
+  resolveId(id){if(id===entry)return entry;},
+  load(id){if(id===entry)return `import React from 'react';import {createRoot} from 'react-dom/client';import {QueryClient,QueryClientProvider} from '@tanstack/react-query';import {BrowserRouter} from 'react-router';import {AccountSessionProvider} from './src/AccountSession';import {DeviceConnect} from './src/DeviceConnect';import './src/index.css';import './src/MainNavigation.css';createRoot(document.getElementById('root')).render(<QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false}}})}><BrowserRouter><AccountSessionProvider><DeviceConnect/></AccountSessionProvider></BrowserRouter></QueryClientProvider>);`;},
+ }],
+ build:{outDir:path.resolve(out),emptyOutDir:false,cssCodeSplit:false,
+  lib:{entry,formats:['es'],fileName:()=> 'journey.js',cssFileName:'journey'},
+  rolldownOptions:{external:['/paradigm-mark.svg'],output:{codeSplitting:false}},
+ }});
+
 const requests=[],errors=[],shots=[];let signedOut=false, credentialsFailure=false, pendingChatGpt=false, cloudflareConnected=false, cloudflareLostReply=false;
 const wallet='0x1111111111111111111111111111111111111111';
 const user={id:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',persistent:true,address:wallet};
@@ -35,6 +51,7 @@ if(url.pathname.startsWith('/v1/')){
  }
  if(url.pathname==='/v1/connectors/cloudflare/connections/'+ 'f'.repeat(43)&&req.method==='DELETE'){cloudflareConnected=false;return reply({disconnected:true});}
  if(req.method!=='GET')return reply({error:'Unexpected fixture mutation'},405);
+ if(url.pathname==='/v1/teams')return reply({teams:[]});
  if(url.pathname==='/v1/me')return reply(signedOut?{error:'unauthorized'}:{user},signedOut?401:200);
  if(url.pathname==='/v1/credentials'){
   if(credentialsFailure)return reply({error:'synthetic outage'},503);
@@ -119,4 +136,10 @@ try{
  assert.deepEqual(errors,[]);await context.close();
  await writeFile(`${out}/requests.json`,JSON.stringify({requests,errors,shots},null,2));await checkpoint(`PASS: desktop/mobile light/dark; all routes; sign-in deep link; single save; cancel; search/filter; delete confirmation; callback error; pending login reload; retry; expired session clears secret. ${shots.length} screenshots. No page errors.`);
  console.log('PASS account workspace browser journey ('+shots.length+' screenshots)');
+ }catch(error){
+ const page=browser.contexts().flatMap(context=>context.pages()).at(-1);
+ const visible=page ? await page.locator('body').innerText().catch(()=> '') : '';
+ if(page)await page.screenshot({path:out+'/failure.png',fullPage:true}).catch(()=> {});
+ await writeFile(out+'/failure.json',JSON.stringify({error:String(error),errors,requests,visible},null,2));
+ console.error(JSON.stringify({errors,visible}));throw error;
 }finally{await browser.close();await new Promise(r=>server.close(r));}
