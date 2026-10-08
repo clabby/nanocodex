@@ -168,7 +168,7 @@ export async function releaseWorkers(plan,{ledger=createDeploymentLedger(),isCur
     try{
       if(!await isCurrent()){results.push({name,state:'superseded',seconds:0});return;}
       stage='ledger admission';
-      pending.record=await ledger.start(name,plan.fingerprints[name]);
+      pending.record=await ledger.start(name,plan.fingerprints[name],plan.topology?{topology:plan.topology}:undefined);
       console.log(`Deploying ${name}`);
       const spec=commands[name];
       const childEnv={...env};
@@ -204,7 +204,10 @@ export async function releaseWorkers(plan,{ledger=createDeploymentLedger(),isCur
     }
   }
   try{
-    for(const phase of releasePhases){
+    // Unchanged topology: one parallel phase (one health check). Otherwise the
+    // dependency-ordered phases publish entrypoints before their consumers.
+    const phases=plan.parallel?[releasePhases.flat()]:releasePhases;
+    for(const phase of phases){
       const selected=phase.filter(name=>plan.selected.includes(name));
       if(!selected.length)continue;
       // Avoid starting unrelated compilation after a newer push supersedes us.

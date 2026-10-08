@@ -22,18 +22,38 @@ export async function releaseFingerprints({cwd=process.cwd(),account=process.env
     .update(JSON.stringify([account, result[name]])).digest('hex');
   return result;
 }
-export async function selectRelease(fingerprints, {ledger=createDeploymentLedger(), force=false, revision=process.env.GITHUB_SHA}={}) {
-  const selected = (await Promise.all(Object.keys(workerSpecs).map(async name => {
-    assert.match(fingerprints[name], /^[a-f0-9]{64}$/);
-    return force || await ledger.lastSuccessfulFingerprint(name) !== fingerprints[name] ? name : null;
-  }))).filter(Boolean);
-  return {schema:1,revision,fingerprints,selected};
+// Every deployed Wrangler config: bindings, service entrypoints, Durable Object
+// classes and migrations. Cross-Worker deployment order only matters when one
+// of these changes; otherwise every selected Worker uploads in parallel.
+export const topologyFiles = ['js/egress/wrangler.broker.jsonc','js/x-api/wrangler.jsonc','js/media/wrangler.jsonc',
+  'js/managed/wrangler.jsonc','js/email/wrangler.jsonc','js/connect-dialog/wrangler.jsonc','js/connect-api/wrangler.jsonc',
+  'examples/astra-mpp-trial/wrangler.jsonc','js/chief-of-staff/wrangler.jsonc','js/connect-playground/wrangler.jsonc',
+  'js/account/wrangler.jsonc','scripts/cloudflare/release-workers.mjs'];
+export function releaseTopology(cwd=process.cwd(), account=process.env.CLOUDFLARE_ACCOUNT_ID) {
+  const hash=createHash('sha256').update(JSON.stringify({schema:1,account}));
+  for(const path of topologyFiles)hash.update(path).update('\0').update(readFileSync(resolve(cwd,path))).update('\0');
+  return hash.digest('hex');
+}
+export async function selectRelease(fingerprints, {ledger=createDeploymentLedger(), force=false, revision=process.env.GITHUB_SHA, topology}={}) {
+  for (const name of Object.keys(workerSpecs)) assert.match(fingerprints[name], /^[a-f0-9]{64}$/);
+  // Forced releases (dispatch, image rollouts) skip history and keep ordered phases.
+  if (force) return {schema:1,revision,fingerprints,selected:Object.keys(workerSpecs),...(topology?{topology,parallel:false}:{})};
+  const last = Object.fromEntries(await Promise.all(Object.keys(workerSpecs).map(async name => {
+    return [name, ledger.lastSuccessful ? await ledger.lastSuccessful(name)
+      : { fingerprint: await ledger.lastSuccessfulFingerprint(name), topology: null }];
+  })));
+  const selected = Object.keys(workerSpecs).filter(name => last[name]?.fingerprint !== fingerprints[name]);
+  // Parallel only when every selected Worker's live release already used this
+  // exact topology, so no Worker newly depends on another's new entrypoint.
+  const parallel = Boolean(topology) && selected.every(name => last[name]?.topology === topology);
+  return {schema:1,revision,fingerprints,selected,...(topology?{topology,parallel}:{})};
 }
 export function readPlan(cwd=process.cwd(), revision=process.env.GITHUB_SHA) {
   const plan=JSON.parse(readFileSync(resolve(cwd,planPath),'utf8'));
   assert.equal(plan.schema,1);assert.equal(plan.revision,revision);
   assert(Array.isArray(plan.selected));assert.equal(new Set(plan.selected).size,plan.selected.length);
   for(const name of plan.selected){assert(Object.hasOwn(workerSpecs,name));assert.match(plan.fingerprints[name],/^[a-f0-9]{64}$/);}
+  if(plan.topology!==undefined){assert.match(plan.topology,/^[a-f0-9]{64}$/);assert.equal(typeof plan.parallel,'boolean');}
   return plan;
 }
 export function scopedRelease(selected, only) {
@@ -146,12 +166,12 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const command=process.argv[2];
   if(command==='plan'){
     const only=process.env.RELEASE_ONLY;
-    const plan=await selectRelease(await releaseFingerprints(),{force:Boolean(only)||process.env.GITHUB_EVENT_NAME==='workflow_dispatch'});
+    const plan=await selectRelease(await releaseFingerprints(),{force:Boolean(only)||process.env.GITHUB_EVENT_NAME==='workflow_dispatch',topology:releaseTopology()});
     plan.selected=scopedRelease(plan.selected,only);
     writeFileSync(planPath,JSON.stringify(plan,null,2)+'\n');
     const needs=releaseNeeds(plan);
     if(process.env.GITHUB_OUTPUT)appendFileSync(process.env.GITHUB_OUTPUT,Object.entries(needs).map(([key,value])=>`${key}=${value}\n`).join(''));
-    console.log(plan.selected.length?`Selected Workers: ${plan.selected.join(', ')}`:'No Worker changes since their last successful deployments');
+    console.log(plan.selected.length?`Selected Workers: ${plan.selected.join(', ')} (${plan.parallel?'parallel: topology unchanged':'ordered phases'})`:'No Worker changes since their last successful deployments');
   }else if(command==='install'){
     const args=process.argv.slice(3);
     assert.ok(args.length===0||(args.length===1&&['--defer-astra','--all'].includes(args[0])));

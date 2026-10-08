@@ -100,3 +100,20 @@ test('background builds let early phases deploy while leaf apps bundle, and surf
   await assert.rejects(account, /Build step failed/);
   assert.ok(!completed.has('nanocodex-web'));
 });
+
+test('unchanged topology deploys every selected Worker in one parallel phase', async () => {
+  const topology = 'c'.repeat(64);
+  const ledgerWith = topologies => ({ async lastSuccessful(name) {
+    return { fingerprint: name === 'managed' || name === 'account' ? 'b'.repeat(64) : fingerprints[name], topology: name in topologies ? topologies[name] : topology };
+  } });
+  const same = await selectRelease(fingerprints, { ledger: ledgerWith({}), revision: 'r', topology });
+  assert.deepEqual(same.selected, ['managed', 'account']);
+  assert.equal(same.parallel, true);
+  // A selected Worker last released under another topology keeps ordered phases.
+  assert.equal((await selectRelease(fingerprints, { ledger: ledgerWith({ account: 'd'.repeat(64) }), revision: 'r', topology })).parallel, false);
+  // Records from before topology tracking are ordered too.
+  assert.equal((await selectRelease(fingerprints, { ledger: ledgerWith({ managed: null }), revision: 'r', topology })).parallel, false);
+  // An unselected Worker's older topology does not matter.
+  assert.equal((await selectRelease(fingerprints, { ledger: ledgerWith({ x: 'd'.repeat(64) }), revision: 'r', topology })).parallel, true);
+  assert.equal((await selectRelease(fingerprints, { ledger: ledgerWith({}), force: true, topology })).parallel, false);
+});

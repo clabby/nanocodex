@@ -393,3 +393,18 @@ test('health check classifies actual HTTP and stalled body failures', async () =
     await assert.rejects(accountHealth(undefined,{url:origin+'/stall',timeoutMs:50}),e=>e.category==='timeout');
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
 });
+
+test('parallel plans upload every selected Worker together with one health check and record topology', async () => {
+  const f = fixture(['media', 'managed', 'egress', 'account']);
+  f.plan.parallel = true; f.plan.topology = 'c'.repeat(64);
+  const topologies = [];
+  const start = f.options.ledger.start;
+  f.options.ledger.start = async (name, fingerprint, options) => { topologies.push(options?.topology); return start(name, fingerprint, options); };
+  await f.release();
+  const starts = f.events.map((row, i) => [row, i]).filter(([row]) => row[0] === 'start').map(([, i]) => i);
+  const firstSuccess = f.events.findIndex(row => row[0] === 'success');
+  assert.equal(starts.length, 4);
+  assert.ok(starts.every(i => i < firstSuccess), 'all uploads start before any receipt');
+  assert.equal(f.events.filter(row => row[0] === 'health').length, 1);
+  assert.deepEqual(topologies, Array(4).fill('c'.repeat(64)));
+});

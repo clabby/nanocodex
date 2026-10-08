@@ -87,6 +87,11 @@ export function createDeploymentLedger({ repository = process.env.GITHUB_REPOSIT
   };
   return {
     async lastSuccessfulFingerprint(worker) {
+      return (await this.lastSuccessful(worker))?.fingerprint ?? null;
+    },
+    // The newest successful, still-live release and the Worker topology it
+    // was deployed with (null for releases recorded before topology existed).
+    async lastSuccessful(worker) {
       const environment = deploymentEnvironment(worker);
       try {
         // Never search history for a matching success: a rollback or interrupted
@@ -106,10 +111,10 @@ export function createDeploymentLedger({ repository = process.env.GITHUB_REPOSIT
         const description = statuses[0].description;
         if (typeof description !== 'string' || !/^cf:v1:[a-f0-9-]{36}:[a-f0-9-]{36}$/.test(description)) return null;
         if (description !== await liveReceipt(worker, payload.fingerprint)) return null;
-        return payload.fingerprint;
+        return { fingerprint: payload.fingerprint, topology: fingerprintValid(payload.topology) ? payload.topology : null };
       } catch { return null; }
     },
-    async start(worker, fingerprint) {
+    async start(worker, fingerprint, { topology } = {}) {
       const environment = deploymentEnvironment(worker);
       if (!fingerprintValid(fingerprint)) throw new Error('Deployment ledger requires a SHA-256 fingerprint');
       if (typeof ref !== 'string' || ref.length !== 40 || !/^[a-f0-9]{40}$/.test(ref)) {
@@ -117,7 +122,7 @@ export function createDeploymentLedger({ repository = process.env.GITHUB_REPOSIT
       }
       const expected = context(worker);
       const result = await call({ method: 'POST', path: base, body: {
-        ref, environment, payload: { schema: 2, fingerprint, ...expected }, auto_merge: false,
+        ref, environment, payload: { schema: 2, fingerprint, ...expected, ...(fingerprintValid(topology) ? { topology } : {}) }, auto_merge: false,
         required_contexts: [], production_environment: true, transient_environment: false,
       } });
       if (!idValid(result?.id) || result.environment !== environment || result.sha !== ref) throw failure();
