@@ -60,15 +60,18 @@ Outcome-unknown details continue to be carried in textual evidence.
   same/new observer IDs, foreign sessions, stale owners, corrupt receipt,
   missing legacy ID, cancellation before execution, oversized output, wait
   budget, count/byte retention, and production Claude consumption.
-- 53 runtime/retention/lifecycle tests passed across native, QuickJS and worker
-  evaluators, including Node host identity admission.
+- 68 runtime/retention/lifecycle/preemption tests passed across native, QuickJS
+  and worker evaluators, including Node host identity admission and Node/browser
+  host ABI preemption. This is the complete test set from the prior 62-pass,
+  6-missing-dependency-failure log; all 68 now pass after isolated dependency
+  installation.
 - Focused strict TypeScript check of managed-code-observations.ts and
   managed-recovery-safety.ts passed; git diff --check passed.
 - Test runner added as npm run test:code-observations and included in
   test:recovery. Node transform-types plus the existing test loader is required.
 
 Evidence logs are in output/yield-cell-lifetime/final-recovery.log,
-final-runtime.log and final-typecheck.log in this checkout. Earlier failing logs
+final-full-runtime.log and final-typecheck.log in this checkout. Earlier failing logs
 reflect missing development dependencies or an incorrect strip-types invocation;
 they are retained and are superseded only by the named final checks above.
 Dependency provisioning was isolated under the ignored output directory.
