@@ -6,8 +6,6 @@ import {
   EXECUTION_OUTPUT_SCHEMA,
 } from "./execution-contract.mjs";
 
-const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
-const MAX_OUTPUT_TOKENS = 100_000;
 const OUTPUT_TRUNCATION_NOTICE = "\n[output truncated by exec_command]";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -59,10 +57,7 @@ export async function justBash(options) {
   );
   const maxEntries = options.maxEntries === undefined
     ? undefined : positiveInteger(options.maxEntries, undefined, "maxEntries");
-  const maxOutputTokens = Math.min(
-    MAX_OUTPUT_TOKENS,
-    positiveInteger(options.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, "maxOutputTokens"),
-  );
+  const maxOutputTokens = positiveInteger(options.maxOutputTokens, undefined, "maxOutputTokens");
   const shellFilesystem = new WorkspaceShellFileSystem(options.filesystem, maxEntries, options.executionLimits?.maxInputBytes ?? DEFAULT_EXECUTION_LIMITS.maxInputBytes);
   // Shared workspaces refresh before every command. Opening here duplicates
   // the first refresh and puts a remote storage listing on chat-only startup.
@@ -128,12 +123,12 @@ export async function createJustBashRuntime(options) {
   );
   const defaultMaxOutputTokens = positiveInteger(
     options.defaultMaxOutputTokens,
-    DEFAULT_MAX_OUTPUT_TOKENS,
+    options.maxOutputTokens,
     "defaultMaxOutputTokens",
   );
   const maxOutputTokens = positiveInteger(
     options.maxOutputTokens,
-    defaultMaxOutputTokens,
+    undefined,
     "maxOutputTokens",
   );
   if (defaultMaxOutputTokens > maxOutputTokens) {
@@ -310,8 +305,8 @@ async function executeCommand({
     ? root
     : resolvePath(root, root, requiredString(input.workdir, "workdir"));
   const outputTokens = Math.min(
-    maxOutputTokens,
-    positiveInteger(input.max_output_tokens, defaultMaxOutputTokens, "max_output_tokens"),
+    maxOutputTokens ?? Infinity,
+    positiveInteger(input.max_output_tokens, defaultMaxOutputTokens, "max_output_tokens") ?? Infinity,
   );
   onCategory("exception");
   const deadline = new AbortController();

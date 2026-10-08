@@ -8,7 +8,7 @@ export const EXEC_COMMAND_PARAMETERS = Object.freeze({
     login: { type: "boolean", description: "True runs with login-shell semantics when supported." },
     tty: { type: "boolean", description: "True allocates a PTY when supported." },
     yield_time_ms: { type: "number", description: "Wait before yielding output. Defaults to 10000 ms." },
-    max_output_tokens: { type: "number", description: "Output token budget. Defaults to 10000 tokens." },
+    max_output_tokens: { type: "number", description: "Optional output token budget. Embedded Bash has no default token limit; native Hands may apply their own defaults." },
     prefix_rule: { type: "array", items: { type: "string" }, description: "Reusable approval prefix for `require_escalated`." },
     sandbox_permissions: { type: "string", enum: ["use_default", "require_escalated"], description: "Per-command sandbox policy request." },
   },
