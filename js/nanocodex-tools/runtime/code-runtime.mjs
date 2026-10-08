@@ -743,7 +743,22 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       if (typeof options.cell_id !== "string") throw new TypeError("wait requires a string cell_id");
       if (options.terminate !== undefined && typeof options.terminate !== "boolean") throw new TypeError("terminate must be boolean");
       const cell = cells.get(options.cell_id);
-      if (!cell || cell.sessionId !== sessionId) throw new Error(`exec cell ${options.cell_id} not found`);
+      if (!cell || cell.sessionId !== sessionId) {
+        // Cells hold live evaluator promises, not durable continuations. A
+        // retained exec/wait receipt can outlive this registry after recovery.
+        // Never rerun guest source to repair a missing wait: nested effects may
+        // have executed even when their final receipt was not acknowledged.
+        // Do not reveal another session's cell or infer cancellation/completion
+        // from absence. The ID prefix proves only a generation mismatch.
+        const generation = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):[1-9][0-9]*$/i.exec(options.cell_id)?.[1];
+        const reason = generation && generation !== cellGeneration
+          ? "The cell ID belongs to a different runtime generation."
+          : "The cell is unavailable in this session.";
+        throw new Error(`CODE_CELL_UNAVAILABLE: exec cell ${options.cell_id} not found. ${reason} `
+          + "Its execution outcome is unknown; this wait cannot resume it or confirm termination. "
+          + "Do not rerun the script or retry uncertain effects. Reconcile the original exec and nested call IDs "
+          + "against retained tool receipts or external state; reuse original operation identities where supported.");
+      }
       if (cell.observing) throw new Error(`exec cell ${cell.id} already has an active observer`);
       cell.turn = turns.get(sessionId) ?? 0;
       if (options.terminate && !cell.finished && !cell.result) {

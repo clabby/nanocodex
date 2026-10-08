@@ -68,10 +68,58 @@ for (const loss of ["cancel-turn", "release-session", "replace-runtime"]) {
       const final = await parse((replacement ?? cell.runtime).waitCodeObserved(
         JSON.stringify({ cell_id: id(cell.first) }), "owner", "wait"));
       assert.equal(final.success, false);
-      assert.match(text(final), /exec cell .* not found/);
+      assert.match(text(final), /CODE_CELL_UNAVAILABLE: exec cell .* not found/);
+      assert.match(text(final), /execution outcome is unknown/);
+      assert.match(text(final), /Do not rerun the script or retry uncertain effects/);
+      assert.equal(final.cell, undefined); // No fabricated terminal receipt.
+      assert.deepEqual(final.nested_calls, []);
+      assert.match(text(final), loss === "replace-runtime"
+        ? /different runtime generation/ : /unavailable in this session/);
+      const again = await parse((replacement ?? cell.runtime).waitCodeObserved(
+        JSON.stringify({ cell_id: id(cell.first), terminate: true }), "owner", "wait-again"));
+      assert.equal(again.success, false);
+      assert.match(text(again), /cannot resume it or confirm termination/);
       assert.equal(cell.calls(), 1);
       console.log(JSON.stringify({ scenario: loss, initial: cell.first, final, calls: cell.calls() }));
     } finally { cell.release(); await cell.runtime.reset(); await replacement?.reset(); }
   });
 }
 
+
+test("wrong session cannot inspect, consume, or terminate another session's yielded cell", async () => {
+  const cell = await yielded();
+  try {
+    const wrong = await parse(cell.runtime.waitCodeObserved(
+      JSON.stringify({ cell_id: id(cell.first), terminate: true }), "other", "wait"));
+    assert.equal(wrong.success, false);
+    assert.match(text(wrong), /unavailable in this session/);
+    assert.doesNotMatch(text(wrong), /synthetic-once|partial/);
+    assert.equal(wrong.cell, undefined);
+    cell.release();
+    await tick();
+    const final = await parse(cell.runtime.waitCodeObserved(
+      JSON.stringify({ cell_id: id(cell.first) }), "owner", "wait"));
+    assert.equal(final.success, true);
+    assert.match(text(final), /Script completed/);
+    assert.equal(final.nested_calls.length, 1);
+    assert.equal(cell.calls(), 1);
+  } finally { cell.release(); await cell.runtime.reset(); }
+});
+
+test("consumed final receipt is not misreported as runtime replacement or replayed", async () => {
+  const cell = await yielded();
+  try {
+    cell.release();
+    await tick();
+    const first = await parse(cell.runtime.waitCodeObserved(
+      JSON.stringify({ cell_id: id(cell.first) }), "owner", "wait"));
+    assert.equal(first.success, true);
+    const second = await parse(cell.runtime.waitCodeObserved(
+      JSON.stringify({ cell_id: id(cell.first) }), "owner", "wait-again"));
+    assert.equal(second.success, false);
+    assert.match(text(second), /CODE_CELL_UNAVAILABLE/);
+    assert.doesNotMatch(text(second), /different runtime generation/);
+    assert.deepEqual(second.nested_calls, []);
+    assert.equal(cell.calls(), 1);
+  } finally { cell.release(); await cell.runtime.reset(); }
+});
