@@ -98,6 +98,18 @@ if [[ "$build_mode" == release ]]; then
     echo "missing Binaryen dependency for the Nanocodex release WASM build" >&2
     exit 1
   fi
+  # The npm package runs Binaryen compiled to JavaScript (~100 s for -Oz). A
+  # native wasm-opt of the same release writes byte-identical output in ~16 s,
+  # so NANOCODEX_WASM_OPT may name one; any version mismatch keeps the package.
+  if [[ -n "${NANOCODEX_WASM_OPT:-}" ]]; then
+    binaryen_version="$("$binaryen" --version)"
+    if [[ -x "$NANOCODEX_WASM_OPT" ]] \
+      && [[ "$("$NANOCODEX_WASM_OPT" --version 2>/dev/null)" == "$binaryen_version" ]]; then
+      binaryen="$NANOCODEX_WASM_OPT"
+    else
+      echo "NANOCODEX_WASM_OPT is not $binaryen_version; using the npm Binaryen package" >&2
+    fi
+  fi
 fi
 fingerprint="$({
   wasm-bindgen --version

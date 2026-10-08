@@ -45,6 +45,14 @@ dispatch, never on master pushes or a schedule. Deployment never waits on CI. Th
 starts in the background as soon as Rust is installed, and its sccache server is
 started outside Turbo so the GitHub Actions cache backend stays enabled.
 
+Every WASM release build on a cache miss (CI, previews, deploys) installs the
+native `wasm-opt` matching the pinned npm `binaryen` release
+(`.github/actions/native-binaryen`). The npm package runs Binaryen compiled to
+JavaScript: its `-Oz` pass took ~100 s locally and ~130 s on CI. The native
+binary emits byte-identical output in ~16 s. `build-js-package.sh` uses
+`NANOCODEX_WASM_OPT` only when its `--version` matches the package; bump the
+action's version and checksum together with the package.
+
 ## Measurement
 
 Report runner wait, actual job execution, deployment completion, and endurance

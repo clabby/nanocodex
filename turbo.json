@@ -37,6 +37,7 @@
         "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_*"
       ],
       "passThroughEnv": [
+        "NANOCODEX_WASM_OPT",
         "SCCACHE_*",
         "ACTIONS_CACHE_URL",
         "ACTIONS_RESULTS_URL",

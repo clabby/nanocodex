@@ -89,3 +89,5 @@ runs:
       if: steps.verify.outputs.hit != 'true'
       with:
         tool: wasm-bindgen-cli@0.2.126
+    - uses: ./.github/actions/native-binaryen
+      if: steps.verify.outputs.hit != 'true'
