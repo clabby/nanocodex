@@ -10,7 +10,7 @@
 use serde_json::{Value, json};
 
 /// Maximum command size, measured in UTF-8 bytes.
-pub const MAX_COMMAND_BYTES: usize = 16 * 1024;
+pub const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 /// Maximum description size, measured in UTF-8 bytes.
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
 /// Maximum returned bytes for each of stdout and stderr.
