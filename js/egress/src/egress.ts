@@ -17,7 +17,7 @@ import {
   AgentSubjectDirectory,
   type BrokerEnv,
   UserCredentialBroker,
-  type UserCredentialSnapshot,
+  type ModelCredentialValue,
   type VaultEntry,
   type VaultKind,
   validChatGptCredentialImport,
@@ -52,6 +52,8 @@ import {
 } from "./ssh";
 
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
+export { SessionCredentialPrewarm, UserCredentialSnapshot } from "./credential-snapshot";
+import { snapshotStub, type SnapshotResolve } from "./credential-snapshot";
 export { UserConnectorBroker } from "./connector-broker";
 export { WhatsAppAccount } from "./whatsapp-account";
 export { SpotifyRateLimit } from "./spotify-rate-limit";
@@ -3009,7 +3011,7 @@ function buildUpstreamRequest(
   original: Request,
   env: EgressEnv,
   operation: ModelOperation,
-  credential: UserCredentialSnapshot,
+  credential: ModelCredentialValue,
   body: Uint8Array | null,
 ): Request {
   const headers = new Headers();
@@ -3073,7 +3075,7 @@ function buildUpstreamRequest(
 function upstreamUrl(
   env: EgressEnv,
   operation: ModelOperation,
-  kind: UserCredentialSnapshot["kind"],
+  kind: ModelCredentialValue["kind"],
 ): URL {
   if (kind === "openai") return new URL(operation.openai);
   const configured = env.CODEX_RELAY_URL?.trim();
@@ -3109,7 +3111,7 @@ function realtimeRelayRpc(env: EgressEnv, request: Request): boolean {
 async function fetchUpstream(
   env: EgressEnv,
   userId: string,
-  credential: UserCredentialSnapshot,
+  credential: ModelCredentialValue,
   operation: ModelOperation,
   request: Request,
   upstreamFetch: typeof fetch,
@@ -3273,7 +3275,7 @@ async function subjectUser(response: Response): Promise<string> {
 async function reportChatGptLimit(
   env: EgressEnv,
   userId: string,
-  credential: UserCredentialSnapshot,
+  credential: ModelCredentialValue,
   resetAt: number,
   select = true,
   egressRequestId?: string,
@@ -3328,7 +3330,7 @@ async function resolveCredential(
   return { ...await resolveSponsoredChatGptCredential(env, recover, revision), source: "sponsored" };
 }
 
-type ResolvedModelCredential = UserCredentialSnapshot & Readonly<{
+type ResolvedModelCredential = ModelCredentialValue & Readonly<{
   source: "sponsored" | "user";
   broker_ms?: number;
   broker_activation_ms?: number;
@@ -3340,7 +3342,7 @@ async function resolveSponsoredChatGptCredential(
   env: EgressEnv,
   recover: boolean,
   revision?: number,
-): Promise<UserCredentialSnapshot> {
+): Promise<ModelCredentialValue> {
   const sponsorUserId = env.NANOCODEX_SPONSORED_CHATGPT_USER_ID?.trim();
   if (!sponsorUserId || !USER_ID.test(sponsorUserId)) {
     throw new EgressFailure(409, "sponsored_chatgpt_unavailable");
@@ -3371,7 +3373,7 @@ export function isLegacyLocalBootstrapCredential(
     "ALLOW_LOCAL_CREDENTIAL_CLAIM" | "ENVIRONMENT" | "LOCAL_CHATGPT_BOOTSTRAP"
     | "NANOCODEX_SPONSORED_CHATGPT_USER_ID">,
   userId: string,
-  credential: UserCredentialSnapshot,
+  credential: ModelCredentialValue,
 ): boolean {
   if (!localClaimEnabled(env) || credential.kind !== "chatgpt" || credential.provenance
     || userId === env.NANOCODEX_SPONSORED_CHATGPT_USER_ID?.trim()) {
@@ -3395,8 +3397,13 @@ async function resolveUserCredential(
   recover: boolean,
   revision?: number,
   accountId?: string,
-): Promise<UserCredentialSnapshot & Pick<ResolvedModelCredential, "broker_ms" | "broker_activation_ms" | "broker_age_ms" | "broker_resolve_id">> {
-  const result = consumeRpcData(await userBroker(env, userId).resolveModelCredential(recover, revision, accountId));
+): Promise<ModelCredentialValue & Pick<ResolvedModelCredential, "broker_ms" | "broker_activation_ms" | "broker_age_ms" | "broker_resolve_id">> {
+  // Only a plain read in a trusted placement region may use the regional
+  // leased snapshot. Recovery, revision fences, pinned accounts and failover
+  // stay on the canonical broker's serialized queue.
+  const regional = !recover && revision === undefined && accountId === undefined && env.trustedPlacementRegion
+    ? await resolveRegionalCredential(env, userId, env.trustedPlacementRegion) : undefined;
+  const result: CanonicalResolve = regional ?? consumeRpcData(await userBroker(env, userId).resolveModelCredential(recover, revision, accountId));
   if (result.status < 200 || result.status >= 300) {
     if (result.status === 429) throw new EgressFailure(429, accountId ? "chatgpt_account_exhausted" : "chatgpt_accounts_exhausted");
     throw new EgressFailure(result.status === 404 ? 409 : 503, accountId ? "chatgpt_account_unavailable" : "user_credential_unavailable");
@@ -3406,15 +3413,42 @@ async function resolveUserCredential(
     || !Number.isSafeInteger(value.revision)) {
     throw new EgressFailure(503, "invalid_credential_response");
   }
-  return { ...value, ...(Number.isFinite(result.resolve_ms) && result.resolve_ms >= 0
+  return { ...value, ...(typeof result.resolve_ms === "number" && Number.isFinite(result.resolve_ms) && result.resolve_ms >= 0
     ? { broker_ms: result.resolve_ms } : {}),
-    ...(Number.isFinite(result.activation_ms) && result.activation_ms >= 0
+    ...(typeof result.activation_ms === "number" && Number.isFinite(result.activation_ms) && result.activation_ms >= 0
       ? { broker_activation_ms: result.activation_ms } : {}),
-    ...(Number.isFinite(result.activation_age_ms) && result.activation_age_ms >= 0
+    ...(typeof result.activation_age_ms === "number" && Number.isFinite(result.activation_age_ms) && result.activation_age_ms >= 0
       ? { broker_age_ms: result.activation_age_ms } : {}),
     ...(typeof result.resolve_id === "string" && /^[0-9a-f-]{36}$/.test(result.resolve_id)
       ? { broker_resolve_id: result.resolve_id } : {}),
   };
+}
+
+type CanonicalResolve = Readonly<{ status: number; credential: ModelCredentialValue | null;
+  resolve_ms?: number; activation_ms?: number; activation_age_ms?: number; resolve_id?: string }>;
+
+/** undefined means "use the canonical broker": unavailable binding, a fenced
+ * or refused grant, or any replica failure. A definitive canonical answer
+ * relayed by the replica (404/409/422/429) is returned as-is. */
+async function resolveRegionalCredential(
+  env: EgressEnv,
+  userId: string,
+  region: string,
+): Promise<CanonicalResolve | undefined> {
+  const stub = snapshotStub(env, userId, region);
+  if (!stub) return undefined;
+  const startedAt = Date.now();
+  let result: SnapshotResolve;
+  try {
+    result = consumeRpcData(await stub.resolve(userId, region)) as SnapshotResolve;
+  } catch {
+    return undefined;
+  }
+  console.info({ type: "egress.credential.snapshot", source: result.source, status: result.status,
+    snapshot_ms: Date.now() - startedAt,
+    ...(result.canonical_ms !== undefined ? { canonical_ms: result.canonical_ms } : {}) });
+  if (result.status === 403 || result.status >= 500) return undefined;
+  return { status: result.status, credential: result.credential, resolve_ms: Date.now() - startedAt };
 }
 
 async function resolveSshIdentity(
