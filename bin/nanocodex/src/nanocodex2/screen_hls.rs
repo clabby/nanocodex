@@ -301,9 +301,7 @@ impl Uploader {
                 self.pop(dir);
             }
             if let Some(front) = self.window.front_mut() {
-                if !front.discontinuity {
-                    front.discontinuity = true;
-                }
+                front.discontinuity = true;
             }
         }
         if self.window.is_empty() {
@@ -625,7 +623,7 @@ mod tests {
         };
         if kind != "video/mp2t"
             || body.is_empty()
-            || body.len() % 188 != 0
+            || !body.len().is_multiple_of(188)
             || body.chunks(188).any(|p| p[0] != 0x47)
         {
             return (400, String::new());
