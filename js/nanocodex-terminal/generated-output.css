@@ -73,3 +73,23 @@
 
 .agent-rich-markdown [data-streamdown="strong"] { font-weight: 650; }
 .agent-rich-markdown [data-streamdown="link"] { text-decoration: underline; text-underline-offset: 3px; }
+
+/* Inline HTML previews: a slim header and an isolated, auto-sized frame. */
+.agent-rich-parts { display: grid; gap: 16px; min-width: 0; max-width: 100%; }
+.agent-html-preview { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; max-width: 100%; margin: 4px 0; border: 1px solid var(--terminal-border, #ddd); border-radius: 12px; background: var(--terminal-background, #fff); overflow: hidden; }
+.agent-html-preview-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; padding: 4px 6px 4px 14px; background: var(--terminal-hover, #f6f6f6); border-bottom: 1px solid var(--terminal-border, #ddd); color: var(--terminal-muted, #737373); font: 12px/1.4 var(--terminal-font-sans, system-ui, sans-serif); }
+.agent-html-preview-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono, ui-monospace, monospace); }
+.agent-html-preview-actions, .agent-html-preview-actions > [role="group"] { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.agent-html-preview-actions > [role="group"] { margin-inline-end: 6px; }
+.agent-html-preview button { min-height: 28px; padding: 4px 8px; font: inherit; color: inherit; background: transparent; border: 0; border-radius: 6px; cursor: pointer; }
+.agent-html-preview button:hover, .agent-html-preview button[aria-pressed="true"] { background: var(--terminal-background, #fff); color: var(--terminal-foreground, #171717); }
+.agent-html-preview button:focus-visible { outline: 2px solid var(--terminal-foreground, #171717); outline-offset: 1px; }
+.agent-html-preview iframe { display: block; width: 100%; min-height: 48px; border: 0; background: #fff; color-scheme: light; transition: height .12s ease-out; }
+.agent-html-preview iframe.is-sizing { visibility: hidden; }
+.agent-html-preview-notice { display: grid; place-items: center; margin: 0; padding: 16px; color: var(--terminal-muted, #888); font-size: 13px; }
+.agent-html-preview-source { min-width: 0; padding: 0 12px; }
+.agent-html-preview-source .agent-rich-markdown [data-streamdown="code-block"] { margin-block: 12px; }
+.agent-html-preview.is-expanded { position: fixed; inset: 24px; z-index: 1000; margin: 0; box-shadow: 0 24px 80px #0005; }
+.agent-html-preview.is-expanded iframe { height: 100%; }
+.agent-html-preview.is-expanded .agent-html-preview-source { overflow: auto; }
+@media (prefers-reduced-motion: reduce) { .agent-html-preview iframe { transition: none; } }

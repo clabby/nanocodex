@@ -18,18 +18,8 @@ if (process.argv.includes("--source-only")) {
 }
 
 await access(new URL("index.html", client));
-const assets = await readdir(new URL("assets/", client));
-const JavaScript = assets.filter((name) => name.endsWith(".js"));
-const bundled = (await Promise.all(
-  JavaScript.map((name) => readFile(new URL(`assets/${name}`, client), "utf8")),
-)).join("\n");
-
-assert(bundled.includes("Copy markdown"), "the native documentation surface is missing");
-assert(bundled.includes("That page is not in the manual"), "the docs not-found boundary is missing");
-for (const page of pages) {
-  assert(bundled.includes(page.title), `the docs bundle omits ${page.route}`);
-}
-
+// The app no longer bundles a docs surface; documentation ships as
+// agent-readable Markdown exports only.
 const byRoute = new Map(pages.map((page) => [page.route, page]));
 const orderedPages = routes.map((route) => byRoute.get(route));
 await mkdir(docsOutput, { recursive: true });

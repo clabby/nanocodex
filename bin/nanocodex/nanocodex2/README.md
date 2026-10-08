@@ -5,7 +5,31 @@ scheduled prompts as the web and native apps. Run `nanocodex2 login` to sign in
 with an SMS code. `NANOCODEX_MANAGED_URL` selects another cluster.
 Running `nanocodex2` opens a new interactive session;
 `nanocodex2 attach AGENT_URL_OR_ID` resumes an existing one with local workspace
-tools.
+tools. Both a bare ID and an account thread URL are accepted:
+
+```bash
+nanocodex2 attach THREAD_ID
+nanocodex2 attach 'https://nanocodex.gakonst.workers.dev/agent/THREAD_ID'
+```
+
+These two forms use your account access. To open a shared thread, pass its
+complete URL in quotes:
+
+```bash
+nanocodex2 attach 'https://nanocodex.gakonst.workers.dev/share/THREAD_ID#token=SHARE_TOKEN'
+```
+
+Alternatively, pass the share URL without its `#token=...` fragment and paste the
+token into the hidden terminal prompt. This keeps it out of shell history.
+
+Shared attachment needs no account login. It displays history and follows live
+updates; write-enabled links also accept text messages. Read-only links cannot
+submit messages. Scroll back to load earlier history, use `/id` to display the
+thread ID, and `/exit` or Ctrl+C to leave. Owner controls and local workspace
+tools are unavailable in shared mode. Revoked links stop updating and clear the
+displayed transcript. The token stays in memory and is not written to Nanocodex's
+session or prompt caches.
+
 The local tool runtime also includes Mercator discovery through
 `https://mercator.sh/mcp` by default. Use `tool_search` to find its free
 read-only discovery tools. For paid jobs, add the protected

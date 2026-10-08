@@ -13,11 +13,13 @@ mod client;
 mod connectors;
 mod driver;
 mod error;
+mod hand_shares;
 mod model;
 mod native_secure_input;
 mod phone_services;
 mod private_input;
 mod share;
+mod shared;
 mod sse;
 mod types;
 mod vault;
@@ -42,6 +44,7 @@ pub use client::{ManagedClient, ManagedClientBuilder};
 pub use connectors::*;
 pub use driver::ManagedAgent;
 pub use error::ManagedError;
+pub use hand_shares::{CreatedHandShare, HandShare, HandShares, RedeemedHandShare};
 pub use model::{
     AvailableModel, CatalogAvailabilityError, CatalogProviderAvailability, ManagedModel,
     ModelCatalog,
@@ -57,6 +60,10 @@ pub use private_input::{
     private_input_output_text,
 };
 pub use share::{CreatedShareLink, ShareLink, SharePermission};
+pub use shared::{
+    SharedEventStream, SharedHistoryPage, SharedThreadClient, SharedThreadMetadata,
+    SharedTurnReceipt,
+};
 pub use sse::{
     EventCursor, ManagedEventFuture, ManagedEventSource, ManagedEventStream, ManagedEvents,
 };

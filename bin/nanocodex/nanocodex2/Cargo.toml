@@ -156,3 +156,7 @@ path = "../tests/nanocodex2_connectors.rs"
 [[test]]
 name = "nanocodex2_background_hand"
 path = "../tests/nanocodex2_background_hand.rs"
+
+[[test]]
+name = "nanocodex2_hand_share"
+path = "../tests/nanocodex2_hand_share.rs"

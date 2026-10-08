@@ -1,11 +1,14 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router";
 import { ArrowUpRight, Bot, Check, Copy, LockKeyhole, Monitor, Moon, Phone, Plug, Sun } from "lucide-react";
 import { AccountChooser } from "nanocodex-connect-ui/AccountChooser";
 import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import { useAccountSession } from "./AccountSession";
+import { pathForSurface } from "./navigation";
+import { preloadAgentExperience } from "./agentExperiencePreload";
+import { MainNavigationLinks, NanocodexMark } from "./MainNavigation";
 import "./HomeLanding.css";
 
-const ConnectHome = lazy(() => import("./ConnectHome").then((module) => ({ default: module.ConnectHome })));
 
 const installCommand = "curl -fsSL https://nanocodex.paradigm.xyz | bash";
 const cliSteps = [
@@ -25,25 +28,16 @@ type Theme = "light" | "dark";
 type ThemeProps = { theme?: Theme; onThemeChange?: (theme: Theme) => void };
 
 /**
- * The homepage: signed-out visitors get the product pitch, a sign-in form and
- * the CLI quick start; signed-in accounts land directly on their Connections.
+ * The homepage is the same product page for every visitor. Signed-out
+ * visitors get a sign-in form; signed-in accounts get shortcuts to their
+ * agents (`/agents`) and account connections (`/account`) instead.
  */
 export function HomeLanding({ theme, onThemeChange }: ThemeProps) {
-  const session = useAccountSession();
-  const account = session.account?.persistent ? session.account : null;
-  if (account) {
-    return (
-      <Suspense fallback={<HomeLoading />}>
-        <ConnectHome theme={theme} onThemeChange={onThemeChange} />
-      </Suspense>
-    );
-  }
-  if (session.status === "checking") return <HomeLoading />;
   return <HomeMarketing theme={theme} onThemeChange={onThemeChange} />;
 }
 
 function HomeLoading() {
-  return <div className="home-landing-loading" role="status"><span className="account-loading-dot" />Opening Nanocodex…</div>;
+  return <div className="home-landing-loading" role="status"><span className="account-loading-dot" />Checking your account…</div>;
 }
 
 function useTheme(controlled: Theme | undefined, onChange: ((theme: Theme) => void) | undefined) {
@@ -85,8 +79,22 @@ function CopyCommand({ command, label }: { command: string; label: string }) {
 
 function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
   const session = useAccountSession();
+  const navigate = useNavigate();
+  const account = session.account?.persistent ? session.account : null;
+  const checking = session.status === "checking" && !account;
   const [theme, toggleTheme] = useTheme(controlledTheme, onThemeChange);
   const signIn = useRef<HTMLElement>(null);
+  const signInRequested = useRef(false);
+  const agentsPath = pathForSurface("agent");
+  const agentIntent = { onFocus: preloadAgentExperience, onPointerEnter: preloadAgentExperience, onPointerDown: preloadAgentExperience };
+  const accountPath = pathForSurface("connect");
+  // An explicit sign-in from this page continues to the account connections;
+  // an existing session simply sees the signed-in homepage.
+  useEffect(() => {
+    if (!account || !signInRequested.current) return;
+    signInRequested.current = false;
+    navigate(accountPath);
+  }, [account, accountPath, navigate]);
   const focusSignIn = () => {
     signIn.current?.scrollIntoView({ behavior: "smooth", block: "center" });
     signIn.current?.querySelector<HTMLInputElement>("input")?.focus({ preventScroll: true });
@@ -94,20 +102,19 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
   return (
     <div className="home-landing" data-testid="home-landing">
       <header className="home-landing-topbar">
-        <a href="/" className="home-landing-brand" aria-label="Nanocodex home">
-          <svg aria-hidden="true" viewBox="76 76 872 872"><rect x="76" y="76" width="872" height="872" rx="194" fill="#292929" /><path d="M326 695V332L638 695V332" fill="none" stroke="#f7f7f7" strokeWidth="67" strokeLinecap="round" strokeLinejoin="round" /><circle cx="742" cy="691" r="27" fill="#8cb38c" /></svg>
+        <Link to="/" className="home-landing-brand" aria-label="Nanocodex home" aria-current="page">
+          <NanocodexMark />
           <span>Nanocodex</span>
-        </a>
-        <nav className="home-landing-links" aria-label="Site">
-          <a href="/docs">Docs</a>
-          <a href="/agent">Agents</a>
-          <a href="/changelog">Changelog</a>
-          <a href="https://github.com/gakonst/nanocodex" target="_blank" rel="noreferrer">GitHub <ArrowUpRight aria-hidden="true" /></a>
+        </Link>
+        <MainNavigationLinks current="home" className="home-landing-navigation" />
+        <div className="home-landing-links">
           <button className="home-icon-button" type="button" onClick={toggleTheme} aria-label={`Use ${theme === "light" ? "dark" : "light"} appearance`} title="Change appearance">
             {theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
           </button>
-          <button className="home-button home-button--small" type="button" onClick={focusSignIn}>Sign in</button>
-        </nav>
+          {account || checking ? null : (
+            <button className="home-button home-button--small" type="button" onClick={focusSignIn}>Sign in</button>
+          )}
+        </div>
       </header>
       <main className="home-landing-main">
         <section className="home-hero" aria-labelledby="home-title">
@@ -118,8 +125,13 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
             Sign in once, connect your accounts, and let them act across email, calendar, code and your own machines.
           </p>
           <div className="home-hero-actions">
-            <button className="home-button" type="button" onClick={focusSignIn}>Sign in to connect accounts</button>
-            <a className="home-button home-button--ghost" href="#home-cli">Install the CLI</a>
+            {account ? <>
+              <Link className="home-button" to={agentsPath} {...agentIntent}>Open your agents</Link>
+              <Link className="home-button home-button--ghost" to={accountPath}>Manage connections</Link>
+            </> : <>
+              <button className="home-button" type="button" onClick={focusSignIn} disabled={checking}>Sign in to connect accounts</button>
+              <a className="home-button home-button--ghost" href="#home-cli">Install the CLI</a>
+            </>}
           </div>
           <ul className="home-logos" aria-label="Supported connections">
             {logos.map((id) => <li key={id}><ConnectionLogo id={id} /></li>)}
@@ -134,12 +146,30 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
             </div>
             <p className="home-fine">Windows: <code>irm https://nanocodex.paradigm.xyz/install.ps1 | iex</code></p>
           </article>
+          {account ? (
+            <section className="home-panel home-signed-in" aria-labelledby="home-signed-in-title">
+              <h2 id="home-signed-in-title">You’re signed in</h2>
+              <p>{account.address ? `Personal account ${account.address.slice(0, 6)}…${account.address.slice(-4)}` : "Your personal account"} is ready. Pick up a conversation or manage what your agents can reach.</p>
+              <div className="home-signed-in-actions">
+                <Link className="home-button" to={agentsPath} {...agentIntent}>Agents</Link>
+                <Link className="home-button home-button--ghost" to={accountPath}>Account &amp; connections</Link>
+              </div>
+            </section>
+          ) : checking ? (
+            <section className="home-panel home-sign-in" aria-label="Account">
+              <HomeLoading />
+            </section>
+          ) : (
           <section className="home-panel home-sign-in connect-onboarding" ref={signIn} aria-labelledby="home-sign-in-title">
             <h2 id="home-sign-in-title">Sign in on the web</h2>
             <p>Use the same account as the CLI. After signing in you’ll land on your Connections.</p>
             <AccountChooser disabled={session.operation !== null} failure={session.error}
-              onChooseAccount={(selection) => void session.chooseAccount(selection)} />
+              onChooseAccount={(selection) => {
+                signInRequested.current = true;
+                void session.chooseAccount(selection);
+              }} />
           </section>
+          )}
         </section>
         <section className="home-features" aria-label="What you can connect">
           {features.map((feature) => (
@@ -153,7 +183,7 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
       </main>
       <footer className="home-landing-footer">
         <span>Built by Paradigm</span>
-        <nav aria-label="Footer"><a href="/docs">Docs</a><a href="/code">Source</a><a href="/evals">Evals</a><a href="/router">Router</a></nav>
+        <a href="https://github.com/gakonst/nanocodex" target="_blank" rel="noreferrer">GitHub <ArrowUpRight aria-hidden="true" /></a>
       </footer>
     </div>
   );

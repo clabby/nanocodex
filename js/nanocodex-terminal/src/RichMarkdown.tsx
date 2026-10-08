@@ -1,7 +1,9 @@
-import { memo, useEffect, useRef, useState, type ComponentProps } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { Streamdown, extractTableDataFromElement, tableDataToTSV, tableDataToCSV } from "streamdown";
 import { code } from "@streamdown/code";
 import { mermaid } from "@streamdown/mermaid";
+import { HtmlPreview } from "./HtmlPreview.js";
+import { splitHtmlFences } from "./htmlDocument.js";
 
 const plugins = { code, mermaid };
 const controls = {
@@ -52,13 +54,28 @@ function MarkdownTable({ node: _node, ref: _ref, ...props }: ComponentProps<"tab
 }
 const components = { input: MarkdownInput, img: MarkdownImage, table: MarkdownTable };
 
-/** Shared, sanitized rich content for responses and generated tool output. */
-export const RichMarkdown = memo(function RichMarkdown({ children, streaming = false }: {
+/** Shared, sanitized rich content for responses and generated tool output.
+ * Raw HTML never enters this document; closed ```html fences become sandboxed
+ * previews whose props stay stable while later tokens stream in. */
+export const RichMarkdown = memo(function RichMarkdown({ children, streaming = false, htmlPreviews = true }: {
   children: string;
   streaming?: boolean;
+  /** Render closed ```html fences as previews; false keeps them as code. */
+  htmlPreviews?: boolean;
 }) {
+  const parts = useMemo(() => htmlPreviews ? splitHtmlFences(children) : undefined, [children, htmlPreviews]);
+  if (!parts) return <MarkdownBlock text={children} streaming={streaming} />;
+  if (parts.length === 1 && parts[0]!.kind === "markdown") return <MarkdownBlock text={children} streaming={streaming} />;
+  return <div className="agent-rich-parts">
+    {parts.map((part, index) => part.kind === "html"
+      ? <HtmlPreview key={`html:${part.offset}`} html={part.text} />
+      : <MarkdownBlock key={`md:${part.offset}`} text={part.text} streaming={streaming && index === parts.length - 1} />)}
+  </div>;
+});
+
+const MarkdownBlock = memo(function MarkdownBlock({ text, streaming }: { text: string; streaming: boolean }) {
   return <Streamdown className="agent-rich-markdown" components={components} plugins={plugins}
     controls={controls} mermaid={diagramOptions} linkSafety={linkSafety} skipHtml
     mode={streaming ? "streaming" : "static"} isAnimating={streaming}
-    caret={streaming ? "block" : undefined}>{children}</Streamdown>;
+    caret={streaming ? "block" : undefined}>{text}</Streamdown>;
 });

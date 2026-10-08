@@ -28,7 +28,6 @@ mod secure_input;
 mod session;
 mod share;
 mod shared;
-pub(crate) use shared::run_shared;
 mod shell;
 mod spinner;
 mod sudo_input;
@@ -40,6 +39,7 @@ mod vault;
 mod voice_clone;
 
 pub(crate) use self::managed2::run_managed2;
+pub(crate) use self::shared::run_shared;
 
 use self::{
     components::{

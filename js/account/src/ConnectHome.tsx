@@ -6,14 +6,16 @@ import { AccountChooser } from "nanocodex-connect-ui/AccountChooser";
 import { AccountMenu } from "./AccountMenu";
 import { Vault } from "./Vault";
 import { useAccountSession } from "./AccountSession";
+import { accountSectionPaths } from "./navigation";
+import { MainNavigationLinks, NanocodexMark } from "./MainNavigation";
 import "./AccountWorkspace.css";
 
 const sections = [
-  { path: "/connect", label: "Connections", icon: Plug, section: "connections", description: "Models and services your agents can use. Credentials stay in the broker; agents only receive scoped access." },
-  { path: "/connect/vault", label: "Vault", icon: LockKeyhole, section: "vault", description: "" },
+  { path: accountSectionPaths.connections, label: "Connections", icon: Plug, section: "connections", description: "Models and services your agents can use. Credentials stay in the broker; agents only receive scoped access." },
+  { path: accountSectionPaths.vault, label: "Vault", icon: LockKeyhole, section: "vault", description: "" },
   { path: "/services/phone", label: "Phone numbers", icon: Phone, section: "phone", description: "Dedicated numbers for SMS verification codes and calls." },
-  { path: "/connect/wallet", label: "Wallet", icon: Wallet, section: "wallet", description: "Your account wallet for paid tools and services." },
-  { path: "/connect/access", label: "API access", icon: KeyRound, section: "access", description: "Keys for the CLI, SDKs and apps that act on your account." },
+  { path: accountSectionPaths.wallet, label: "Wallet", icon: Wallet, section: "wallet", description: "Your account wallet for paid tools and services." },
+  { path: accountSectionPaths.access, label: "API access", icon: KeyRound, section: "access", description: "Keys for the CLI, SDKs and apps that act on your account." },
 ] as const;
 
 export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
@@ -24,7 +26,8 @@ export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
   const session = useAccountSession();
   const [localTheme, setLocalTheme] = useState<"light" | "dark">(() => document.documentElement.dataset.theme === "light" ? "light" : "dark");
   const theme = controlledTheme ?? localTheme;
-  const section = sections.find(item => item.path === (location.pathname.replace(/\/+$/, "") === "/vault" ? "/connect/vault" : location.pathname.replace(/\/+$/, ""))) ?? sections[0];
+  const currentPath = location.pathname.replace(/\/+$/, "");
+  const section = sections.find(item => item.path === (currentPath === "/vault" ? accountSectionPaths.vault : currentPath)) ?? sections[0];
   const account = session.account?.persistent ? session.account : null;
   const heading = useRef<HTMLHeadingElement>(null);
   const previousPath = useRef(location.pathname);
@@ -53,12 +56,12 @@ export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
       <a className="account-skip" href="#account-content">Skip to content</a>
       <header className="account-hub-topbar">
         <NavLink to="/" className="account-hub-brand" aria-label="Nanocodex home">
-          <svg aria-hidden="true" viewBox="76 76 872 872"><rect x="76" y="76" width="872" height="872" rx="194" fill="#292929" /><path d="M326 695V332L638 695V332" fill="none" stroke="#f7f7f7" strokeWidth="67" strokeLinecap="round" strokeLinejoin="round" /><circle cx="742" cy="691" r="27" fill="#8cb38c" /></svg>
+          <NanocodexMark />
           <span>Nanocodex</span>
         </NavLink>
+        <MainNavigationLinks current="connect" className="account-hub-navigation" />
         <div className="account-hub-utilities">
           {account ? <button className="account-icon-button account-mobile-sign-out" type="button" disabled={session.operation !== null} onClick={() => void session.signOut()} aria-label="Sign out" title="Sign out"><LogOut aria-hidden="true" /></button> : null}
-          <a href="/docs" className="account-docs">Docs <ArrowUpRight aria-hidden="true" /></a>
           <button className="account-icon-button" type="button" onClick={toggleTheme} aria-label={`Use ${theme === "light" ? "dark" : "light"} appearance`} title="Change appearance">
             {theme === "light" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
           </button>
@@ -77,15 +80,15 @@ export function ConnectHome({ theme: controlledTheme, onThemeChange }: {
           <aside className="account-hub-sidebar">
             <span className="account-nav-label">Your account</span>
             <nav aria-label="Account navigation">
-              {sections.map(item => <NavLink end={item.path === "/connect"} key={item.path} to={item.path}
-                className={({ isActive }) => isActive || (item.section === "connections" && location.pathname === "/") ? "active is-current" : undefined}>
+              {sections.map(item => <NavLink end={item.path === accountSectionPaths.connections} key={item.path} to={item.path}
+                className={({ isActive }) => isActive ? "active is-current" : undefined}>
                 <item.icon aria-hidden="true" /><span>{item.label}</span>
               </NavLink>)}
             </nav>
             <div className="account-hub-cli">
               <span>From your terminal</span>
               <code>nanocodex2 login</code>
-              <a href="/docs/getting-started">Install the CLI <ArrowUpRight aria-hidden="true" /></a>
+              <a href="/#home-cli">Install the CLI <ArrowUpRight aria-hidden="true" /></a>
             </div>
             <div className="account-hub-identity">
               <CircleUserRound aria-hidden="true" />

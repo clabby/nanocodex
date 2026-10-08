@@ -14,3 +14,5 @@ export async function preloadEvalOverview(): Promise<void> {
   const { preloadEvalOverview } = await import("./Evals");
   await preloadEvalOverview();
 }
+
+export { loadAgentExperience, preloadAgentExperience } from "./agentExperiencePreload";

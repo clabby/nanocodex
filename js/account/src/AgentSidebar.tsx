@@ -1,11 +1,7 @@
 import {
-  BookOpen,
-  ChevronDown,
   CircleUserRound,
-  Compass,
   Layers,
-  Link2,
-  MessageCircle,
+  House,
   PanelLeftClose,
   Search,
   SquarePen,
@@ -22,13 +18,7 @@ import { Link, useLocation } from "react-router";
 import { AgentSearchDialog } from "./AgentSearchDialog";
 import type { ManagedConversation } from "./managedAgentRuntime";
 import { useModalBoundary } from "./modalBoundary";
-import {
-  connectDemoUrl,
-  demoNavigation,
-  gitNavigation,
-  pathForSurface,
-  primaryNavigation,
-} from "./navigation";
+import { NanocodexMark } from "./MainNavigation";
 
 /** Web navigation owns presentation; the managed runtime still owns conversation selection. */
 export function AgentSidebar({
@@ -132,7 +122,7 @@ export function AgentSidebar({
       >
         <div className="agent-navigation-brand">
           <Link to="/" aria-label="Nanocodex home">
-            <span className="paradigm-mark" aria-hidden="true" />
+            <NanocodexMark />
             <span>Nanocodex</span>
           </Link>
           {!landing ? (
@@ -168,17 +158,17 @@ export function AgentSidebar({
             <SquarePen />
             <span>{landing ? "New chat" : "New agent"}</span>
           </button>
-          <Link to="/" aria-current={landing ? "page" : undefined}>
-            <MessageCircle />
-            <span>Chat</span>
+          <Link to="/">
+            <House aria-hidden="true" />
+            <span>Home</span>
           </Link>
-          <Link to="/agent" aria-current={!landing ? "page" : undefined}>
+          <Link to="/agents" aria-current={!landing ? "page" : undefined}>
             <Layers aria-hidden="true" />
             <span>Agents</span>
           </Link>
-          <Link to="/connect">
-            <Link2 />
-            <span>Connections</span>
+          <Link to="/account">
+            <CircleUserRound aria-hidden="true" />
+            <span>Account</span>
           </Link>
         </nav>
         <div className="agent-navigation-history">
@@ -235,7 +225,7 @@ export function AgentSidebar({
             {landing ? (
               <div className="agent-navigation-empty">
                 <p>Give your work a place to keep going.</p>
-                <Link to="/agent">
+                <Link to="/agents">
                   Open your agents <span aria-hidden="true">↗</span>
                 </Link>
               </div>
@@ -255,38 +245,7 @@ export function AgentSidebar({
           </div>
         </div>
         <div className="agent-navigation-footer">
-          <Link to="/docs">
-            <BookOpen aria-hidden="true" />
-            <span>Documentation</span>
-          </Link>
-          <details className="agent-navigation-explore">
-            <summary>
-              <Compass aria-hidden="true" />
-              <span>Explore</span>
-              <ChevronDown aria-hidden="true" />
-            </summary>
-            <nav aria-label="Explore Nanocodex">
-              {[
-                ...demoNavigation.filter(({ surface }) => surface !== "agent"),
-                ...primaryNavigation.filter(
-                  ({ surface }) => surface !== "docs",
-                ),
-                ...gitNavigation,
-              ].map(({ surface, label }) => (
-                <Link key={surface} to={pathForSurface(surface)}>
-                  {label}
-                </Link>
-              ))}
-              <a
-                href={connectDemoUrl(window.location.origin)}
-                target="_blank"
-                rel="noreferrer"
-              >
-                Connect playground ↗
-              </a>
-            </nav>
-          </details>
-          <Link className="agent-navigation-account" to="/connect">
+          <Link className="agent-navigation-account" to="/account">
             <CircleUserRound aria-hidden="true" />
             <span>
               <strong>{persistent ? "Your account" : "Get started"}</strong>
