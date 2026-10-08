@@ -190,6 +190,25 @@ and durable-state recovery after failures.
 `upstream_ms` includes our
 subscription relay and must not be interpreted as provider-only latency.
 
+Regional credential snapshots (`UserCredentialSnapshot`, one per region and
+owner, region in the fixed seven-region set) serve only plain model reads (no
+recovery, revision, or account pin) placed by trusted Session or managed
+realtime authority. Every other read, refresh, selection, and mutation stays on
+the canonical broker. The broker grants a sealed lease bounded by 10 minutes and
+by credential expiry minus the refresh-early window, registering the holder
+durably before replying; it refuses a zero-length lease rather than return an
+unregistered credential. Before any credential mutation is acknowledged, every
+holder whose plain-read projection changed must durably raise its epoch floor
+and drop its snapshot. A failed invalidation stays pending across retries and
+restarts, regardless of lease expiry; until that holder acknowledges, every
+mutation (including idempotent retries) fails with
+`credential_revocation_pending` and no grant is issued. The replica discards
+late grants below its floor and rechecks floor, entry identity, lease expiry,
+and credential expiry after the canonical RPC, after sealing, and after the
+durable write. `test/credential-snapshot-journey.test.mjs` exercises these paths
+in workerd, including a grant reply held across a rotation and one held past its
+lease.
+
 Caught Claude Messages failures emit `egress.claude.failure` with a random
 `egress_request_id`, failure phase, built-in error class and upstream attempt
 count, plus a validated deployment SHA when available. The response includes the same ID in

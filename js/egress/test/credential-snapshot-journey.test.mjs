@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 
 // Production broker, regional snapshot DO, sealed storage and RPC run in
 // workerd with persisted state across a process restart. Only the OAuth
-// provider and the per-region invalidation fault switch are synthetic.
+// provider, the per-region invalidation fault switch and the grant-reply
+// delay gate are synthetic.
 const require = createRequire(import.meta.url);
 const wranglerRequire = createRequire(require.resolve("wrangler/package.json"));
 const { build } = wranglerRequire("esbuild");
@@ -20,7 +21,7 @@ const EARLY_MS = 5 * 60_000;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const jwt = value => `${Buffer.from('{"alg":"none"}').toString("base64url")}.${Buffer.from(JSON.stringify(value)).toString("base64url")}.fixture`;
 
-test("regional credential lease: revocation ACK, retry, restart, zero lease", { timeout: 90_000 }, async t => {
+test("regional credential lease: revocation ACK, delayed grant race, expiry after await, retry, restart, zero lease", { timeout: 90_000 }, async t => {
   await mkdir(output, { recursive: true });
   const bundle = await build({
     entryPoints: [join(directory, "test/fixtures/credential-snapshot-entry.ts")], bundle: true, write: false,
@@ -44,8 +45,28 @@ test("regional credential lease: revocation ACK, retry, restart, zero lease", { 
   const record = (kind, detail = {}) => trace.push({ kind, ...detail, elapsed_ms: Math.round(performance.now() - began) });
   const failing = new Set();
   let invalidations = 0, refreshes = 0;
+  const gates = new Map();
+  const holdGrant = region => {
+    let arrived, release;
+    const reached = new Promise(r => { arrived = r; });
+    const released = new Promise(r => { release = r; });
+    gates.set(region, { arrived, released });
+    return { reached, release };
+  };
   const provider = async request => {
     const url = new URL(request.url);
+    if (url.hostname === "fault.fixture" && url.pathname.startsWith("/grant/")) {
+      const region = url.pathname.split("/").pop();
+      const gate = gates.get(region);
+      if (gate) {
+        gates.delete(region);
+        record("grant_reply_held", { region });
+        gate.arrived();
+        await gate.released;
+        record("grant_reply_released", { region });
+      }
+      return new Response(null, { status: 200 });
+    }
     if (url.hostname === "fault.fixture") {
       const region = url.pathname.split("/").pop();
       invalidations++;
@@ -114,6 +135,28 @@ test("regional credential lease: revocation ACK, retry, restart, zero lease", { 
   assert.equal((await control("DELETE", "openai")).status, 204);
   record("rotation_revoked");
 
+  // 1b. Delayed canonical grant race. A first-time region's grant is
+  // registered by the broker, then its reply is held in transit while a
+  // rotation completes. The rotation must wait for that holder's ACK, and the
+  // late old grant must never be served or cached.
+  assert.equal((await control("PUT", "openai", { api_key: "sk-race-old" })).status, 204);
+  const gate = holdGrant("eeur");
+  const racing = regional("eeur");
+  await gate.reached;
+  const beforeRace = trace.filter(e => e.kind === "invalidate" && e.region === "eeur").length;
+  assert.equal((await control("PUT", "openai", { api_key: "sk-race-new" })).status, 204);
+  assert.equal(trace.filter(e => e.kind === "invalidate" && e.region === "eeur").length, beforeRace + 1,
+    "rotation acknowledged without ACK from the in-flight grant holder");
+  gate.release();
+  result = await racing;
+  assert.notEqual(result.secret, "sk-race-old", "late pre-rotation grant served");
+  assert.deepEqual([result.status, result.source, result.secret], [200, "filled", "sk-race-new"]);
+  result = await regional("eeur");
+  assert.deepEqual([result.status, result.source, result.secret], [200, "snapshot", "sk-race-new"]);
+  assert.equal((await control("DELETE", "openai")).status, 204);
+  record("delayed_grant_fenced");
+
+
   // 2. A grant whose lease would be zero (token inside refresh-early window,
   // refresh backoff) must never hand the credential to the replica.
   assert.equal((await control("PUT", "chatgpt", shortChatGpt("short", 3_000))).status, 204);
@@ -159,4 +202,22 @@ test("regional credential lease: revocation ACK, retry, restart, zero lease", { 
   result = await regional();
   assert.deepEqual([result.status, result.secret], [200, "sk-synthetic-c"]);
   record("refilled_after_ack");
+
+  // 5. Expiry after await. The grant carries a positive (~3 s) lease, but
+  // its reply is held past both lease and credential refresh window. The
+  // filled response must be refused, not served from the stale grant.
+  assert.equal((await control("DELETE", "openai")).status, 204);
+  assert.equal((await control("PUT", "chatgpt", shortChatGpt("held", 3_000))).status, 204);
+  const held = holdGrant("apac");
+  const expiring = regional("apac");
+  await held.reached;
+  await sleep(4_500);
+  held.release();
+  result = await expiring;
+  assert.equal(result.secret, null, "grant served after its lease expired in transit");
+  assert.notEqual(result.status, 200);
+  result = await regional("apac");
+  assert.equal(result.secret, null, "expired grant was cached");
+  assert.equal(trace.filter(e => e.kind === "grant_reply_held" && e.region === "apac").length, 1);
+  record("expired_grant_refused");
 });
