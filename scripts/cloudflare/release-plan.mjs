@@ -11,11 +11,11 @@ import { releasedAccountIdentity } from './released-account-image.mjs';
 import { createDeploymentLedger } from './deployment-ledger.mjs';
 
 export const planPath = '.ci-release-plan.json';
-export async function releaseFingerprints({cwd=process.cwd(),account=process.env.CLOUDFLARE_ACCOUNT_ID,epoch=process.env.MANAGED_IMAGE_CACHE_EPOCH || '1'}={}) {
-  const result = await fingerprintWorkers(cwd);
+export async function releaseFingerprints({cwd=process.cwd(),account=process.env.CLOUDFLARE_ACCOUNT_ID,epoch=process.env.MANAGED_IMAGE_CACHE_EPOCH || '1',released={}}={}) {
   // Only already-published images affect an API release; source changes cannot
   // schedule a native build here. Freeze the selection for this job.
-  const [images, relay] = await Promise.all([resolveReleasedImages({account,cwd,epoch}), releasedAccountIdentity({account,cwd})]);
+  const [result, images, relay] = await Promise.all([fingerprintWorkers(cwd), resolveReleasedImages({account,cwd,epoch}), releasedAccountIdentity({account,cwd})]);
+  Object.assign(released,{phone:images.phone.ref,sandbox:images.sandbox.ref,relay});
   result.managed=createHash('sha256').update(JSON.stringify([result.managed,images.phone.ref,images.sandbox.ref])).digest('hex');
   result.account=createHash('sha256').update(JSON.stringify([result.account,relay])).digest('hex');
   for (const name of Object.keys(result)) result[name] = createHash('sha256')
@@ -29,8 +29,10 @@ export const topologyFiles = ['js/egress/wrangler.broker.jsonc','js/x-api/wrangl
   'js/managed/wrangler.jsonc','js/email/wrangler.jsonc','js/connect-dialog/wrangler.jsonc','js/connect-api/wrangler.jsonc',
   'examples/astra-mpp-trial/wrangler.jsonc','js/chief-of-staff/wrangler.jsonc','js/connect-playground/wrangler.jsonc',
   'js/account/wrangler.jsonc','scripts/cloudflare/release-workers.mjs'];
-export function releaseTopology(cwd=process.cwd(), account=process.env.CLOUDFLARE_ACCOUNT_ID) {
-  const hash=createHash('sha256').update(JSON.stringify({schema:1,account}));
+// Released container images are part of the topology: an unchanged topology
+// lets deploys skip Wrangler's container application comparison.
+export function releaseTopology(cwd=process.cwd(), account=process.env.CLOUDFLARE_ACCOUNT_ID, released={}) {
+  const hash=createHash('sha256').update(JSON.stringify({schema:2,account,released}));
   for(const path of topologyFiles)hash.update(path).update('\0').update(readFileSync(resolve(cwd,path))).update('\0');
   return hash.digest('hex');
 }
@@ -166,7 +168,9 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const command=process.argv[2];
   if(command==='plan'){
     const only=process.env.RELEASE_ONLY;
-    const plan=await selectRelease(await releaseFingerprints(),{force:Boolean(only)||process.env.GITHUB_EVENT_NAME==='workflow_dispatch',topology:releaseTopology()});
+    const released={};
+    const fingerprints=await releaseFingerprints({released});
+    const plan=await selectRelease(fingerprints,{force:Boolean(only)||process.env.GITHUB_EVENT_NAME==='workflow_dispatch',topology:releaseTopology(process.cwd(),process.env.CLOUDFLARE_ACCOUNT_ID,released)});
     plan.selected=scopedRelease(plan.selected,only);
     writeFileSync(planPath,JSON.stringify(plan,null,2)+'\n');
     const needs=releaseNeeds(plan);

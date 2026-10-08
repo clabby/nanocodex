@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,7 +75,7 @@ const healthAttempt=(attempts,seconds,last)=>
   `after ${attempts} attempt${attempts===1?'':'s'} over ${seconds.toFixed(1)}s`+
   (last.observedRevision?`; last observed revision ${last.observedRevision}`:'');
 export async function waitForAccountHealth(expectedRevision,{deadlineMs=120_000,timeoutMs=20_000,
-  retryDelayMs=2_000,maxRetryDelayMs=10_000,minimumProbeMs=5_000,probe=accountHealth,sleep=ms=>new Promise(done=>setTimeout(done,ms)),
+  retryDelayMs=500,maxRetryDelayMs=2_000,minimumProbeMs=5_000,probe=accountHealth,sleep=ms=>new Promise(done=>setTimeout(done,ms)),
   now=Date.now,log=console.log,...options}={}) {
   const started=now();
   for(let attempts=1;;attempts++){
@@ -118,6 +118,11 @@ export async function accountHealth(expectedRevision,{url='https://nanocodex.gak
     if(health.deployment_sha===undefined||health.deployment_sha===null)throw new AccountHealthError('revision_missing');
     if(health.deployment_sha!==expectedRevision)throw new AccountHealthError('revision_mismatch',undefined,health.deployment_sha);
   }
+}
+// Run the package's installed Wrangler instead of resolving it through npx.
+export function localWrangler(command,directory,exists=existsSync){
+  if(command[0]!=='npx'||command[1]!=='wrangler')return command;
+  return exists(join(directory,'node_modules/.bin/wrangler'))?['node_modules/.bin/wrangler',...command.slice(2)]:command;
 }
 export function buildEnvironment(env){
   const buildEnv={...env};
@@ -173,7 +178,14 @@ export async function releaseWorkers(plan,{ledger=createDeploymentLedger(),isCur
       const spec=commands[name];
       const childEnv={...env};
       for(const key of ['ASTRA_MANAGED_API_KEY','ASTRA_MPP_SECRET','TEMPO_API_KEY'])delete childEnv[key];
-      const command=[...spec.command,'--message',env.DEPLOY_MESSAGE??'','--tag',releaseTag(plan.fingerprints[name])];
+      const command=[...localWrangler(spec.command,resolve(cwd,spec.directory)),'--message',env.DEPLOY_MESSAGE??'','--tag',releaseTag(plan.fingerprints[name])];
+      // Parallel plans prove configs and released image refs are unchanged, so
+      // skip Wrangler's per-container-application comparison (~1s per app).
+      if(plan.parallel){
+        const at=command.indexOf('--containers-rollout');
+        if(at>=0)command[at+1]='none';
+        else if(name==='account'||name==='managed')command.push('--containers-rollout','none');
+      }
       if(name==='account')command.push('--var',`DEPLOYMENT_SHA:${plan.revision}`);
       if(name==='astra'){
         const secrets=Object.fromEntries([

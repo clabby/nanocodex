@@ -3,13 +3,17 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { writeFileSync, rmSync } from 'node:fs';
+import { existsSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { currentRelease } from './current-production-release.mjs';
 import { accountValid, providerIdValid } from './live-worker-state.mjs';
+
+// The package's installed Wrangler; npx resolution adds latency to each call.
+export const wrangler = (directory, args, exists = existsSync) => exists(join(directory, 'node_modules/.bin/wrangler'))
+  ? [join(directory, 'node_modules/.bin/wrangler'), args] : ['npx', ['wrangler', ...args]];
 
 const require = createRequire(new URL('../../js/managed/package.json', import.meta.url));
 const binding = 'NANOCODEX_CRM';
@@ -62,7 +66,7 @@ async function productionDatabase({ env, request, guard }) {
 // metadata only; credentials never enter this process or a generated config.
 async function existingWranglerDatabase({ config, env, run }) {
   try {
-    const output = await run('npx', ['wrangler', 'd1', 'list', '--json', '--config', config, '--env='], {
+    const output = await run(...wrangler(dirname(config), ['d1', 'list', '--json', '--config', config, '--env=']), {
       cwd: dirname(config), env, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8',
     });
     const databases = JSON.parse(output);
@@ -124,11 +128,11 @@ export async function deployManaged(mode, {
   const target = ['--config', generated, '--env='];
   try {
     if (mode === 'deploy') await guard();
-    await run('npx', ['wrangler', 'd1', 'migrations', 'apply', binding,
-      mode === 'deploy' ? '--remote' : '--local', ...target], options);
+    await run(...wrangler(dirname(config), ['d1', 'migrations', 'apply', binding,
+      mode === 'deploy' ? '--remote' : '--local', ...target]), options);
     if (mode === 'deploy') await guard();
-    await run('npx', ['wrangler', 'deploy', ...target,
-      ...deployArgs, ...(mode === 'preview' ? ['--dry-run', '--containers-rollout', 'none'] : [])], options);
+    await run(...wrangler(dirname(config), ['deploy', ...target,
+      ...deployArgs, ...(mode === 'preview' ? ['--dry-run', '--containers-rollout', 'none'] : [])]), options);
   } finally {
     rmSync(generated, { force: true });
   }

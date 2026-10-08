@@ -16,17 +16,51 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Skip superseded push
-      id: current-release
-      shell: bash
-      run: node scripts/cloudflare/current-production-release.mjs
-    - name: Select Workers changed since their successful deployments
-      id: plan
-      if: steps.current-release.outputs.active == 'true'
+    # Plan (freshness check, fingerprints, ledger lookups) in the background
+    # while Node and the cached dependencies restore; both take ~5-10s.
+    - name: Start the release plan in the background
       shell: bash
       env:
         RELEASE_ONLY: ${{ inputs.component }}
-      run: node scripts/cloudflare/release-plan.mjs plan
+      run: |
+        plan="$RUNNER_TEMP/release-plan"; mkdir -p "$plan"
+        nohup bash -c '
+          set -o pipefail
+          GITHUB_OUTPUT="$0/guard.out" node scripts/cloudflare/current-production-release.mjs
+          code=$?
+          if [ $code -eq 0 ] && grep -qx "active=true" "$0/guard.out"; then
+            GITHUB_OUTPUT="$0/plan.out" node scripts/cloudflare/release-plan.mjs plan
+            code=$?
+          fi
+          echo $code > "$0/exit"
+        ' "$plan" > "$plan/log" 2>&1 &
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: 24
+        # The pnpm store is only needed when installed modules miss.
+        cache: ''
+    # Restore installed dependencies for every deployable Worker in one entry.
+    # A hit skips pnpm install (~22s plus the store restore) entirely.
+    - name: Restore deployment dependencies
+      id: modules
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          node_modules
+          js/*/node_modules
+          examples/*/node_modules
+        key: deploy-modules-v1-${{ runner.os }}-node24-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'patches/**', 'examples/astra-mpp-trial/package-lock.json', 'scripts/cloudflare/worker-inputs.mjs') }}
+    - name: Select Workers changed since their successful deployments
+      id: plan
+      shell: bash
+      run: |
+        plan="$RUNNER_TEMP/release-plan"
+        for _ in $(seq 1 1200); do [ -f "$plan/exit" ] && break; sleep 0.1; done
+        cat "$plan/log"
+        [ -f "$plan/exit" ] || { echo '::error::Release plan timed out'; exit 1; }
+        code=$(cat "$plan/exit")
+        [ "$code" -eq 0 ] || exit "$code"
+        if [ -f "$plan/plan.out" ]; then cat "$plan/plan.out" >> "$GITHUB_OUTPUT"; fi
     - name: Reuse unchanged WASM outputs
       id: wasm
       if: steps.plan.outputs.wasm == 'true'
@@ -44,24 +78,6 @@ runs:
           > "$RUNNER_TEMP/wasm-cargo.log" 2>&1 &
     - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       if: steps.plan.outputs.workspace == 'true'
-    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-      if: steps.plan.outputs.any == 'true'
-      with:
-        node-version: 24
-        # The pnpm store is only needed when installed modules miss.
-        cache: ''
-    # Restore installed dependencies for every deployable Worker in one entry.
-    # A hit skips pnpm install (~22s plus the store restore) entirely.
-    - name: Restore deployment dependencies
-      id: modules
-      if: steps.plan.outputs.any == 'true'
-      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-      with:
-        path: |
-          node_modules
-          js/*/node_modules
-          examples/*/node_modules
-        key: deploy-modules-v1-${{ runner.os }}-node24-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', '.npmrc', 'patches/**', 'examples/astra-mpp-trial/package-lock.json', 'scripts/cloudflare/worker-inputs.mjs') }}
     - name: Install every deployable Worker's dependencies
       if: steps.plan.outputs.any == 'true' && steps.modules.outputs.cache-hit != 'true'
       shell: bash
@@ -85,6 +101,7 @@ runs:
       if: steps.plan.outputs.any == 'true'
       shell: bash
       env:
+        WRANGLER_SEND_METRICS: "false"
         # The cached node_modules is authoritative. Nested `pnpm run` calls (the
         # WASM package build) otherwise re-install the whole workspace and check
         # the lockfile against the registry first (~17s).

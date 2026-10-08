@@ -40,11 +40,10 @@ export async function fingerprintWorkers(cwd = process.cwd()) {
   // Include new source files but never ignored/generated local build products.
   const paths = [...new Set(execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd, encoding: 'utf8' }).split('\0').filter(Boolean))]
     .filter(path => !generated.test(path)).sort();
-  const contents = new Map();
-  for (const path of paths) {
-    try { contents.set(path, await readFile(`${cwd}/${path}`)); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; } // Deleted working-tree inputs.
-  }
+  // Read concurrently: sequential awaits left the process idle on I/O for ~1s.
+  const read = await Promise.all(paths.map(path => readFile(`${cwd}/${path}`).then(bytes => [path, bytes],
+    error => { if (error.code !== 'ENOENT') throw error; return null; }))); // Deleted working-tree inputs.
+  const contents = new Map(read.filter(Boolean));
   const packages = new Map();
   for (const [path, bytes] of contents) {
     if (/^(?:js|examples)\/[^/]+\/package\.json$/.test(path)) {

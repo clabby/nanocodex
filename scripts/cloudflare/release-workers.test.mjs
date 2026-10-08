@@ -5,7 +5,7 @@ import { existsSync, writeFileSync, readFileSync, statSync, mkdtempSync, rmSync 
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DeploymentLedgerError } from './deployment-ledger.mjs';
-import { releaseWorkers, releasePhases, prepareReleasePhase, guardedCommand, accountHealth, AccountHealthError } from './release-workers.mjs';
+import { releaseWorkers, releasePhases, prepareReleasePhase, guardedCommand, accountHealth, AccountHealthError, localWrangler } from './release-workers.mjs';
 function fixture(selected, overrides = {}) {
   const events = [], calls = [];
   const plan = { revision: 'b'.repeat(40), selected, fingerprints: Object.fromEntries(selected.map(name => [name, 'a'.repeat(64)])) };
@@ -407,4 +407,25 @@ test('parallel plans upload every selected Worker together with one health check
   assert.ok(starts.every(i => i < firstSuccess), 'all uploads start before any receipt');
   assert.equal(f.events.filter(row => row[0] === 'health').length, 1);
   assert.deepEqual(topologies, Array(4).fill('c'.repeat(64)));
+});
+
+test('parallel plans skip container comparisons; ordered plans keep immediate rollouts', async () => {
+  const command = (f, name) => f.calls.find(call => call.options.directory === (name === 'account' ? 'js/account' : 'js/managed')).command;
+  const parallel = fixture(['managed', 'account']); parallel.plan.parallel = true; parallel.plan.topology = 'c'.repeat(64);
+  await parallel.release();
+  for (const name of ['managed', 'account']) {
+    const args = command(parallel, name);
+    assert.equal(args[args.indexOf('--containers-rollout') + 1], 'none', name);
+  }
+  const ordered = fixture(['managed', 'account']);
+  await ordered.release();
+  const managed = command(ordered, 'managed');
+  assert.equal(managed[managed.indexOf('--containers-rollout') + 1], 'immediate');
+  assert.ok(!command(ordered, 'account').includes('--containers-rollout'));
+});
+
+test('Wrangler commands use the package binary when installed', () => {
+  assert.deepEqual(localWrangler(['npx', 'wrangler', 'deploy'], '/pkg', () => true), ['node_modules/.bin/wrangler', 'deploy']);
+  assert.deepEqual(localWrangler(['npx', 'wrangler', 'deploy'], '/pkg', () => false), ['npx', 'wrangler', 'deploy']);
+  assert.deepEqual(localWrangler(['node', 'script.mjs'], '/pkg', () => true), ['node', 'script.mjs']);
 });
