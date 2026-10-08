@@ -30,6 +30,7 @@ export class Session extends DurableObject {
       return Promise.resolve(new Response(null,{status:101,webSocket:client}));
     }};
     const speculative={fetch:(req)=>{
+      if(mode==='stalled'){this.upgrades++;return new Promise(()=>{});}
       if(mode==='throw')throw Error('sync failure');
       if(mode==='reject')return Promise.reject(Error('async failure'));
       if(mode==='http')return Promise.resolve(new Response('unavailable',{status:503}));
@@ -66,11 +67,22 @@ test('prepared upgrade uses real SDK once after admission and cleans failures/mi
   const call=(path,id)=>mf.dispatchFetch('https://fixture.internal'+path+(path.includes('?')?'&':'?')+'id='+id);
   async function state(id,predicate){for(let i=0;i<1200;i++){const value=await(await call('/state',id)).json();if(predicate(value))return value;await new Promise(r=>setTimeout(r,10));}throw Error('state did not converge');}
   try {
-    for(const mode of ['reuse','throw','reject','http','mismatch','retire','late','expiry']){
+    for(const mode of ['reuse','throw','reject','http','mismatch','retire','late','stalled','expiry']){
       const pending=call('/start?mode='+mode,mode);
       if(!['throw','reject','http'].includes(mode))await state(mode,v=>v.upgrades===1);
       const held=await(await call('/state',mode)).json();
       assert.equal(held.frames,0);assert.equal(held.committed,false);
+      if(mode==='stalled') {
+        await call('/release',mode);
+        await call('/dispose',mode);
+        let deadline;
+        try {
+          assert.equal((await Promise.race([pending,new Promise((_,reject)=>{deadline=setTimeout(()=>reject(Error('cancel did not settle stalled consume')),1000);})])).status,409);
+        } finally { clearTimeout(deadline); }
+        const cancelled=await(await call('/state',mode)).json();
+        assert.equal(cancelled.frames,0);assert.equal(cancelled.upgrades,1);
+        continue;
+      }
       if(['retire','late'].includes(mode))await call('/dispose',mode);
       if(mode==='expiry')await state(mode,v=>v.closed===1);
       await call('/release',mode);

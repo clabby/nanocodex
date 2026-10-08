@@ -209,6 +209,29 @@ durable write. `test/credential-snapshot-journey.test.mjs` exercises these paths
 in workerd, including a grant reply held across a rotation and one held past its
 lease.
 
+Fresh direct Sessions may also prepare an auth-only Responses WebSocket in
+this existing regional holder. The private `SessionModelEgress` preparation RPC
+acknowledges that the holder owns the handshake before Session initialization
+writes begin. It returns an opaque, one-use handle; WebSockets themselves cannot
+be serialized through Workers RPC. Consumption therefore uses the private fetch
+path, after Session ownership has passed `storage.sync()` and current ownership
+and runtime generation have been checked again. Exact headers, subject, owner,
+and region bind the handoff. No inference frame is sent during preparation.
+
+Preparations expire after 10 seconds and are limited to eight outstanding
+operations per holder. Cancellation immediately settles a waiting consumer;
+work still waiting on an unabortable credential RPC remains charged to the
+limit until it settles. Credential invalidation cancels unconsumed preparations.
+Late sockets are closed. A missing, unsupported, expired, or failed preparation
+uses the ordinary model path only after the same admission and authority
+checks. The Session waits at most one second for the preparation acknowledgment;
+a late acknowledgment is cancelled. This bound is not a provider timeout.
+`egress.prepared_model_upgrade` logs safe subject/outcome/timing fields and
+`managed.model_upgrade_preparation` records acknowledgment and consumption.
+Neither emits handle values or headers. The real-workerd prepared-model-upgrade
+journey covers the managed helper and fetch handoff. Production traces, rather
+than local invocation or a timer yield, establish whether setup overlaps commit.
+
 Caught Claude Messages failures emit `egress.claude.failure` with a random
 `egress_request_id`, failure phase, built-in error class and upstream attempt
 count, plus a validated deployment SHA when available. The response includes the same ID in

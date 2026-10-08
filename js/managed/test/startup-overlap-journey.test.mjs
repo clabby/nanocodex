@@ -89,6 +89,8 @@ export class UserAccount extends RealUserAccount {
 const info=console.info.bind(console);
 console.info=(record,...rest)=>info(record && typeof record==='object'?JSON.stringify(record):record,...rest);
 export class FixtureEgress extends WorkerEntrypoint {
+  // Exercise rollout fallback; the egress journey covers acknowledged handoff.
+  prepareModelUpgrade() { return { status: "unsupported" }; }
   fetch(request) { return this.env.MODEL.getByName('startup').fetch(request); }
   async readAccountDiscovery(owner,component) {
     const response=await this.env.MODEL.getByName('startup').fetch('https://fixture.internal/'+component);
@@ -430,8 +432,8 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     assert.match(JSON.stringify(await waitTurn(liveTurn,ready.session_id,liveToken)),/STARTUP_OK/);
     const liveTrace=await(await backend.fetch('https://fixture.internal/__trace')).json();
     const liveRequests=liveTrace.filter(row=>row.event==='provider.request');
-    assert.equal(liveTrace.filter(row=>row.event==='provider.connect').length,2,'live turn reuses exactly one early socket');
-    assert.ok(records.some(row=>row.type==='managed.model_upgrade_preparation' && row.outcome==='consumed'),'SDK consumes pre-write upgrade');
+    assert.equal(liveTrace.filter(row=>row.event==='provider.connect').length,2,'live turn opens exactly one fallback socket');
+    assert.ok(records.some(row=>row.type==='managed.model_upgrade_preparation' && row.outcome==='ack_unavailable'),'unsupported preparation safely falls back');
     assert.equal(liveRequests.length,4);
     assert.ok(liveRequests[3].tools.includes('exec'),'first live prompt retains tools after discovery');
     assert.match(JSON.stringify(liveRequests[3].input),/startup_context/,'first live prompt retains the startup snapshot');

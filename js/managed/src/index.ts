@@ -6551,10 +6551,10 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#liveAdmissionReserved = true;
     try {
       if (earlyRuntimeId) {
-        // Service binding fetch may defer dispatch through stub initialization.
-        // Let it reach the transport before writes close the output gate; do
-        // not wait for the handshake or bypass durability for inference frames.
-        await scheduler.wait(0);
+        // A remote holder acknowledges ownership of the auth-only handshake
+        // before these writes close our output gate. WebSocket transfer and
+        // every inference frame still wait for durable admission.
+        await this.#preparedModelUpgrade?.acknowledged();
         // Trusted RPCs may run during the yield. Never overwrite ownership or
         // resurrect a session retired/imported by another handler.
         if (this.#deleting || this.#deleted || this.#durabilityExported
