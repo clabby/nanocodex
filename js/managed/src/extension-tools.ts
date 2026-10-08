@@ -8,9 +8,10 @@ export type ManagedExtensionOptions = {
   clientIngressColo?: string | null;
   organizationId: string; teamId: string; ownerId: string; sessionId: string;
   memories: DurableObjectNamespace<import("./memory-scope").MemoryScope>;
+  automaticTeamContribution?: boolean;
   personal(context: ToolContext): boolean;
   /** The host must resolve live authority, including subagent scope, on each call. */
-  authorize(name: string, context: ToolContext): void;
+  authorize(name: string, context: ToolContext): void | Promise<void>;
 };
 /** Bind the memory tools to the authenticated user's permitted partitions. */
 export function managedExtensionTools(options: ManagedExtensionOptions): NamedTool[] {

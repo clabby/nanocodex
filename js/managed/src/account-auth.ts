@@ -1,3 +1,4 @@
+import { routeCompanyTeamRequest, handleCompanyRequest, readCompanyMembership } from "./company-teams";
 import { requireSameOriginMutation } from "./same-origin-mutation";
 export { requireSameOriginMutation };
 import { readTodoSourceHealth } from "./todo-source-health";
@@ -610,6 +611,8 @@ export async function routeAccountRequest(
   env: AccountAuthEnv,
   url: URL,
 ): Promise<Response | undefined> {
+  const companyResponse = await routeCompanyTeamRequest(request, env, url);
+  if (companyResponse) return companyResponse;
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
     return json({ error: "not_found" }, { status: 404 });
   }
@@ -1177,6 +1180,15 @@ export async function authenticatePersistentAccount(
 }
 
 /** Native Vault forms use an account-owned API key, never a Connect grant. */
+export async function authenticateCompanyAccount(
+  request: Request, env: AccountAuthEnv, url = new URL(request.url),
+): Promise<Principal | undefined> {
+  const principal = await authenticate(request, env, url);
+  if (!principal || (principal.kind !== "account_session" && principal.kind !== "api_key") || principal.connectGrant) return undefined;
+  const account = resolvedPrincipalAccounts.get(principal) ?? await readAccount(env, principal.userId);
+  return account?.persistent === true ? principal : undefined;
+}
+
 export async function authenticateVaultAccount(
   request: Request, env: AccountAuthEnv, url = new URL(request.url),
 ): Promise<Principal | undefined> {
@@ -2154,6 +2166,13 @@ export async function revokeApiKey(
 
 
 export class UserAccount extends DurableObject<AccountAuthEnv> {
+  async listCompanyTeams(): Promise<string[]> {
+    return [...(await this.ctx.storage.list<string>({ prefix: "company-index:" })).values()];
+  }
+  async addCompanyTeam(id: string): Promise<void> {
+    if (!isUuid(id)) throw new Error("invalid company id");
+    await this.ctx.storage.put(`company-index:${id}`, id);
+  }
   constructor(ctx: DurableObjectState, env: AccountAuthEnv) {
     super(ctx, env);
     if (env.NANOCODEX_PERFORMANCE_TRACE === "true") this.ctx = performanceState(this.ctx);
@@ -2574,6 +2593,9 @@ function agentSummary(row: AgentRegistryRow): AgentSummary {
 }
 
 export class Organization extends DurableObject<AccountAuthEnv> {
+  async resolveCompanyMembership(userId: string) {
+    return readCompanyMembership(this.ctx.storage, userId);
+  }
   /**
    * Register a regional API-key replica for userId, then read that user's
    * grant, with no other I/O between: a mutation either is read here or
@@ -2626,6 +2648,7 @@ export class Organization extends DurableObject<AccountAuthEnv> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/company/")) return handleCompanyRequest(this.ctx.storage, request);
     if (url.pathname === "/initialize" && request.method === "PUT") {
       const body = await request.json<{
         organizationId?: unknown;

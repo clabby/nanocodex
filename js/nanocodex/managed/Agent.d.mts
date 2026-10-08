@@ -118,6 +118,8 @@ export type ArtifactPage = Readonly<{ data: readonly Artifact[]; publications: r
 export type WebhookState = Readonly<{ endpoint: { url: string } | null; deliveries: readonly Readonly<{ id: string; attempt: number; retry_at: number; status: "pending" | "delivered" | "failed" }>[] }>;
 
 export type CreateOptions = Options & Readonly<{
+  /** Omission creates a private personal session. Team scope contributes completed history. */
+  scope?: Readonly<{ type: "personal" } | { type: "team"; team_id: string }>;
   /**
    * Account-scoped creation key: 1–256 printable ASCII characters without spaces.
    * Persist before calling to retry after restart; omission generates a key per invocation.
@@ -152,6 +154,7 @@ export type Capabilities = Readonly<{
 }>;
 
 export type State = Readonly<{
+  scope?: Readonly<{ type: "personal" } | { type: "team"; team_id: string }>;
   agent_id: string;
   session_id: string;
   has_snapshot: boolean;

@@ -213,3 +213,12 @@ Deleting an agent removes its triggers. Portable durability export currently
 returns `409 cron_triggers_present` while any trigger or pending delivery exists: delete
 triggers and let claimed deliveries finish before transfer, then recreate schedules at the destination. This avoids
 silently dropping schedules or running the same schedule on two agents.
+
+### Company and team session scope
+
+New sessions default to private personal context. To contribute completed history
+and memory to a company or team where the account is a writer or owner, create
+with `Agent.create({ scope: { type: "team", team_id: companyOrTeamId } })`.
+`createAndPrompt` accepts the same scope. The scope is retained immutably and
+returned by `agent.state()`; changing it requires a new session. Membership and
+normal account capabilities are checked on the server.

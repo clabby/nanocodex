@@ -1,0 +1,12 @@
+.teams-panel { display: grid; gap: 12px; min-width: 0; padding-block: 16px; }
+.teams-panel h2, .teams-panel h3, .teams-panel h4, .teams-panel p { margin: 0; }
+.teams-panel p { color: var(--text-muted, inherit); }
+.teams-panel form, .teams-panel label, .teams-panel section { display: grid; gap: 8px; }
+.teams-panel input, .teams-panel textarea, .teams-panel select { font: inherit; color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 8px; min-width: 0; max-width: 100%; }
+.teams-panel textarea { width: 100%; box-sizing: border-box; min-height: 72px; }
+.teams-panel ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.teams-panel li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; overflow-wrap: anywhere; }
+.teams-panel button { width: fit-content; max-width: 100%; }
+.team-session-chooser { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border-color, #8885); }
+.team-session-chooser p { flex-basis: 100%; margin: 0; }
+.agent-scope { display: block; font-size: 12px; font-weight: normal; }
