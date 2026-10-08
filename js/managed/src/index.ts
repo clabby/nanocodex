@@ -15,7 +15,7 @@ import { Claude } from 'nanocodex/worker';
 import { createManagedClaudeTools } from './claude-tools';
 import { managedClaudeTasks } from './claude-tasks';
 import type { Options as ClaudeOptions } from '../../nanocodex/runtime/claude.mjs';
-import { availableManagedModels, defaultSettingsForModel, selectDefaultManagedModel } from "./model-catalog";
+import { availableManagedModels, availableClaudeChildModels, defaultSettingsForModel, selectDefaultManagedModel } from "./model-catalog";
 import { ManagedRecoverySafety, MANAGED_RECOVERY_UNKNOWN, createManagedCodeEffectJournal } from "./managed-recovery-safety";
 import { nativeAppValidator } from "./prompt-apps-native";
 import { gmailDecisionReceipts } from "./gmail-firehose-receipts";
@@ -10542,7 +10542,7 @@ export class DurableAgentSession extends DurableComputerObject {
           assertRuntimeOwned();
           assertRoutingAuthority(managedAuthorizationForRouting(this.ctx.storage, bindings, rootRoutingSessionId(), parentSessionId, hostContextRef));
         },
-        availableModels: async () => (await availableManagedModels(this.env.NANOCODEX, session.owner_id, this.env)).data.filter(model => model.provider === "claude").map(model => model.id),
+        availableModels: () => availableClaudeChildModels(this.env.NANOCODEX, session.owner_id),
       } } : {}),
       native: {
         availableModels: async () => (await availableManagedModels(this.env.NANOCODEX, session.owner_id, this.env)).data.filter(model => model.provider === "openai").map(model => model.id),

@@ -41,6 +41,21 @@ export function defaultSettingsForModel(model: ManagedAgentSettings["model"]): M
 }
 
 /** Catalog admission comes from the account broker, never a client label. */
+/** Native Claude models children may use: every model the Rust Claude harness supports, gated by the account's live grant. */
+const NATIVE_CLAUDE_CHILD_MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"] as const;
+export async function availableClaudeChildModels(broker: Fetcher, userId: string): Promise<string[]> {
+  if (!connected((await credentialStatus(broker, userId)).claude)) return [];
+  const allowed = await fetchResponseWithDeadline(broker,
+    `https://broker.internal/users/${encodeURIComponent(userId)}/credentials/claude/models`, {}, 15_000,
+    "Claude model availability", async response => {
+      if (!response.ok) throw new Error("Claude model catalog is unavailable");
+      return response.json<{ models: Array<{ id: string }> }>();
+    });
+  if (!Array.isArray(allowed.models)) throw new Error("invalid Claude model catalog");
+  // Provider IDs may carry a date suffix (claude-haiku-4-5-20251001).
+  return NATIVE_CLAUDE_CHILD_MODELS.filter(id => allowed.models.some(model => model.id === id || model.id.startsWith(`${id}-`)));
+}
+
 export async function availableManagedModels(broker: Fetcher, userId: string, runtime: ModelRuntime = {}) {
   return modelsFromStatus(broker, userId, runtime, await credentialStatus(broker, userId));
 }
