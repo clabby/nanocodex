@@ -20,6 +20,8 @@ import { useModalBoundary } from "./modalBoundary";
 import { NanocodexMark } from "./MainNavigation";
 
 /** Web navigation owns presentation; the managed runtime still owns conversation selection. */
+const SIDEBAR_PAGE = 60;
+
 export function AgentSidebar({
   conversations,
   error,
@@ -64,6 +66,23 @@ export function AgentSidebar({
   const visibleConversations = runningOnly
     ? conversations.filter((conversation) => ["running", "stopping"].includes(conversation.presentation?.status ?? ""))
     : conversations;
+  // Render the list incrementally: thousands of rows (each with prompt
+  // previews) made every sidebar interaction and stream update slow.
+  const [rowLimit, setRowLimit] = useState(SIDEBAR_PAGE);
+  const listEndRef = useRef<HTMLDivElement>(null);
+  const renderedConversations = visibleConversations.length > rowLimit
+    ? visibleConversations.slice(0, rowLimit)
+    : visibleConversations;
+  const hasMoreRows = renderedConversations.length < visibleConversations.length;
+  useEffect(() => {
+    const end = listEndRef.current;
+    if (!end || !hasMoreRows || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) setRowLimit((limit) => limit + SIDEBAR_PAGE);
+    }, { root: end.parentElement, rootMargin: "400px" });
+    observer.observe(end);
+    return () => observer.disconnect();
+  }, [hasMoreRows, rowLimit]);
   const panelRef = useRef<HTMLElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -176,9 +195,9 @@ export function AgentSidebar({
           </div> : null}
           <div className="agent-navigation-list" aria-busy={pending}>
             {!landing
-              ? visibleConversations.map((conversation, index) => (
+              ? renderedConversations.map((conversation, index) => (
                   <Fragment key={conversation.id}>
-                    {threadGroup(conversation) !== (index ? threadGroup(visibleConversations[index - 1]!) : undefined) ? (
+                    {threadGroup(conversation) !== (index ? threadGroup(renderedConversations[index - 1]!) : undefined) ? (
                       <div className="agent-navigation-group">{threadGroup(conversation)}</div>
                     ) : null}
                     <button
@@ -217,6 +236,7 @@ export function AgentSidebar({
                   </Fragment>
                 ))
               : null}
+            {!landing && hasMoreRows ? <div ref={listEndRef} className="agent-navigation-more" aria-hidden="true" style={{ height: 1 }} /> : null}
             {landing ? (
               <div className="agent-navigation-empty">
                 <p>Give your work a place to keep going.</p>
