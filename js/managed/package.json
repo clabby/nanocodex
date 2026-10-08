@@ -44,7 +44,7 @@
     "fixture:meetings": "node scripts/meeting-library-fixture.mjs",
     "test:images:node": "node --experimental-transform-types --import ./test-fixtures/node-types-loader.mjs --test test/managed-images-node.test.mjs",
     "test:images": "npm run test:images:node && vitest run --config vitest.images.config.ts",
-    "test:recovery": "node --test test/managed-crash-recovery-journey.test.mjs && npm run test:code-observations",
+    "test:recovery": "node --test test/managed-crash-recovery-journey.test.mjs && npm run test:code-observations && npm run test:code-observations:workerd",
     "test:code-observations": "node --experimental-transform-types --import ./test-fixtures/node-types-loader.mjs --test test/code-observation-recovery-node.test.mjs",
     "test:startup": "node --test test/startup-overlap-journey.test.mjs",
     "test:model-pause": "node --test test/model-pause-journey.test.mjs",
@@ -72,7 +72,8 @@
     "test:provider-vault": "node ../egress/scripts/prepare-whatsapp.mjs && node scripts/prepare-code-evaluator.mjs && node scripts/prepare-just-bash-lazy.mjs && node --test test/same-origin-mutation.test.mjs test/mercator-private-result-journey.test.mjs test/provider-vault-journey.test.mjs",
     "test:account-links": "node --test test/account-navigation-journey.test.mjs",
     "test:services": "node ../egress/scripts/prepare-whatsapp.mjs && node scripts/prepare-code-evaluator.mjs && node scripts/prepare-just-bash-lazy.mjs && node --test test/services-api-journey.test.mjs test/phone-provider-journey.test.mjs test/phone-stack-journey.test.mjs",
-    "test:hand-inventory": "node --test test/hand-inventory-journey.test.mjs"
+    "test:hand-inventory": "node --test test/hand-inventory-journey.test.mjs",
+    "test:code-observations:workerd": "node --test test/code-observation-workerd-journey.test.mjs"
   },
   "dependencies": {
     "nanocodex-computer": "workspace:*",

@@ -90,7 +90,29 @@ node --test js/nanocodex/test/code-runtime.test.mjs \
 These exercise native, QuickJS and worker evaluators, Node host identity
 admission, and Node/browser host preemption.
 
-The SQLite adapter uses synchronous disk transactions and a no-op storage.sync;
-a fault wrapper tests acknowledgement loss after persistence. This does not
-replace a deployed Cloudflare Durable Object kill/restart journey or a
-Rust/WASM integration test.
+The Node SQLite adapter uses synchronous disk transactions and a no-op
+storage.sync. The separate workerd journey uses real Durable Object SQLite and
+storage.sync, the shipped managed QuickJS evaluator, and a Rust/WASM Agent:
+
+```sh
+cd js/managed
+npm run test:code-observations:workerd
+```
+
+As with the existing managed process journeys, prepare workspace dependencies,
+the managed QuickJS asset, and the SDK pkg-web WASM build first. Each scenario
+kills only its own detached Miniflare/workerd process group with SIGKILL, then
+opens the same persisted database in a fresh process. It checks retained yielded
+receipts, a completed receipt arriving after yield, pending intent, repeated and
+terminate waits, foreign sessions, terminal observation acknowledgement loss,
+and unchanged durable evaluation/dispatch counters. A real Rust/WASM Agent then
+calls wait through its host against that recovered journal; historical receipts
+reach the synthetic model without new nested tool events.
+
+The fixture saves the yielded outer envelope in DO storage; it does not exercise
+replay through the full ManagedAgent CompletedToolCall ledger. Terminal ACK loss
+is injected immediately after the real observation record/storage sync returns.
+Only external tool responses and model transport are synthetic. Per-run bundles,
+database files and request/event traces are retained under
+output/code-observation-workerd/. This local workerd/Rust integration does not
+claim a deployed Cloudflare platform restart or production thread recovery.
