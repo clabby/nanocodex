@@ -2326,8 +2326,13 @@ async function managedFetchRoute(
       const startedAt = Date.now();
       const started = performance.now();
       try {
-        const phases = await env.NANOCODEX_SESSIONS.get(id).activationProbe();
-        return json({ kind, dispatch_ms: roundMilliseconds(performance.now() - started),
+        const stub = env.NANOCODEX_SESSIONS.get(id);
+        const phases = await stub.activationProbe();
+        const dispatchMs = Date.now() - startedAt;
+        const warmStartedAt = Date.now();
+        await stub.activationProbe();
+        return json({ kind, dispatch_ms: dispatchMs, warm_dispatch_ms: Date.now() - warmStartedAt,
+          worker_colo: (request as { cf?: { colo?: string } }).cf?.colo, object_colo: phases.colo,
           before_constructor_ms: phases.constructor_entered_at_ms - startedAt,
           constructor_ms: phases.constructor_ms,
           constructor_base_ms: phases.constructor_base_ms,
@@ -4502,12 +4507,16 @@ export class DurableAgentSession extends DurableComputerObject {
       schema_ms: this.#constructorSqlMs });
   }
 
+  #activationProbed = false;
   /** No user state: compare first activation of a named and a unique ID. */
   async activationProbe(): Promise<Readonly<{
     constructor_entered_at_ms: number; constructor_ready_at_ms: number;
-    constructor_ms: number; constructor_base_ms: number; handler_entered_at_ms: number;
+    constructor_ms: number; constructor_base_ms: number; handler_entered_at_ms: number; colo?: string;
   }>> {
     const handlerEnteredAt = Date.now();
+    if (this.#activationProbed) return { constructor_entered_at_ms: 0, constructor_ready_at_ms: 0,
+      constructor_ms: 0, constructor_base_ms: 0, handler_entered_at_ms: handlerEnteredAt };
+    this.#activationProbed = true;
     if (this.#storageInitialized && (this.#session() || this.#credentialBinding || this.#initializationOwnership()))
       throw new Error("activation_probe_not_empty");
     const phases = {
@@ -4518,7 +4527,10 @@ export class DurableAgentSession extends DurableComputerObject {
       handler_entered_at_ms: handlerEnteredAt,
     };
     await this.ctx.storage.deleteAll();
-    return phases;
+    let colo: string | undefined;
+    try { colo = /^colo=([A-Z]{3})$/m.exec(await (await fetch("https://cloudflare.com/cdn-cgi/trace")).text())?.[1]; }
+    catch { /* Diagnostic only. */ }
+    return { ...phases, colo };
   }
 
   /** Private RPC: live ownership without serializing a streamed HTTP body. */
