@@ -226,14 +226,21 @@ describe("strict Responses boundary", () => {
     const f = fixture(); await f.create();
     const header = { [INFERENCE_MAX_OUTPUT_TOKENS_HEADER]: "32" };
     expect((await f.call("POST", "/responses", { input: "x", max_output_tokens: 33 }, owner, header)).status).toBe(400);
-    expect((await f.call("POST", "/responses", { input: "x", max_output_tokens: 4097 })).status).toBe(400);
+    expect((await f.call("POST", "/responses", { input: "x", max_output_tokens: -1 })).status).toBe(400);
     expect((await f.call("POST", "/responses", { input: "x" }, owner,
-      { [INFERENCE_MAX_OUTPUT_TOKENS_HEADER]: "4097" })).status).toBe(403);
+      { [INFERENCE_MAX_OUTPUT_TOKENS_HEADER]: "invalid" })).status).toBe(403);
     expect(() => validateInferenceRequest({ input: [{ type: "function_call_output", call_id: "x", output: "oops" }] })).toThrow("invalid_tool_history");
     expect(() => validateInferenceRequest({ input: [{ type: "function_call", call_id: "x", name: "f", arguments: "{}" }] })).toThrow("invalid_tool_history");
     expect(f.ai).not.toHaveBeenCalled();
     expect((await f.call("POST", "/responses", { input: "x" }, owner, header)).status).toBe(200);
     expect(f.ai.mock.calls.find(([model]) => model === OSS_MODEL)?.[1]).toMatchObject({ max_completion_tokens: 32 });
+  });
+  it.each([undefined, 100_000])("forwards uncapped and large requested output budgets (%s)", async budget => {
+    const f = fixture(); await f.create();
+    const response = await f.call("POST", "/responses", { input: "hello", ...(budget === undefined ? {} : { max_output_tokens: budget }) });
+    expect(response.status).toBe(200);
+    const payload = f.ai.mock.calls.find(([model]) => model === OSS_MODEL)?.[1] as Record<string, unknown>;
+    expect(payload.max_completion_tokens).toBe(budget);
   });
   it.each([false, true])("returns canonical Responses format with honest buffered stream=%s", async stream => {
     const f = fixture(); await f.create();

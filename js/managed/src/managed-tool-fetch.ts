@@ -31,7 +31,6 @@ export function managedWebFetch(egress: Pick<Fetcher, "fetch">, storageId: strin
       model: value.model ?? DEFAULT_OPENAI_AGENT_SETTINGS.model,
       commands: value.commands,
       settings: { allowed_callers: ["direct"], external_web_access: true },
-      max_output_tokens: 10_000,
     });
   };
 }

@@ -149,7 +149,7 @@ async fn fixture(
 #[tokio::test]
 async fn completed_server_effect_survives_token_continuation_and_compaction() {
     let (client, log, effects, server) = fixture(Fault::Completed).await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .server_tool(ServerToolDefinition::code_execution_current())
         .build()
         .unwrap();
@@ -208,7 +208,7 @@ async fn completed_server_effect_survives_token_continuation_and_compaction() {
 
 async fn interrupted_server_effect_is_unknown(fault: Fault) {
     let (client, log, effects, server) = fixture(fault).await;
-    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .server_tool(ServerToolDefinition::code_execution_current())
         .build()
         .unwrap();
@@ -283,7 +283,7 @@ async fn cancelled_server_stream_retains_unknown_outcome() {
 #[tokio::test]
 async fn rejected_client_call_retains_prior_server_effect_as_recovery_data() {
     let (client, log, effects, server) = fixture(Fault::RejectedClient).await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .server_tool(ServerToolDefinition::code_execution_current())
         .build()
         .unwrap();

@@ -64,7 +64,7 @@ test('lists candidates and runs exactly six stateless sequential prompts', async
   assert.match(result.stdout, /fixture-high/);
   for (const req of f.requests.slice(1)) {
     assert.equal(req.headers.authorization, `Bearer ${key}`);
-    assert.deepEqual(Object.keys(JSON.parse(req.body)).sort(), ['input', 'max_output_tokens', 'model', 'store', 'stream']);
+    assert.deepEqual(Object.keys(JSON.parse(req.body)).sort(), ['input', 'model', 'store', 'stream']);
     assert.equal(JSON.parse(req.body).model, 'auto');
     assert.equal(JSON.parse(req.body).store, false);
     assert.equal(JSON.parse(req.body).stream, false);
@@ -171,4 +171,11 @@ test('unexpected JSON shapes do not break the final summary', async t => {
   assert.equal(result.code, 1, result.stderr);
   assert.match(result.stdout, /Summary/);
   assert.match(result.stdout, /no text output returned/);
+});
+
+ test('forwards explicit output budgets above the former ceiling', async t => {
+  const f = await fixture(t);
+  const result = await f.run(['--prompt', 'one', '--max-output-tokens', '131072']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(JSON.parse(f.requests[1].body).max_output_tokens, 131072);
 });

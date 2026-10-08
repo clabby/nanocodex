@@ -62,7 +62,7 @@ test('disabled probes and invalid budgets cannot reserve or dispatch', async () 
   for (const options of [{ enabled: false }, { enabled: 'true' }, ...[0, 4097, NaN, 1.5].map(dailyRequestLimit => ({ dailyRequestLimit })),
     ...[0, 46, NaN, 1.5].map(maxTargetsPerRun => ({ maxTargetsPerRun })),
     ...[-1, Infinity, 1.5].map(startIndex => ({ startIndex })),
-    ...[0, 15, 2049, NaN].map(maxCompletionTokens => ({ maxCompletionTokens }))]) {
+    ...[0, -1, Number.MAX_SAFE_INTEGER + 1, NaN].map(maxCompletionTokens => ({ maxCompletionTokens }))]) {
     const result = await probe({ ...options, store: { reserveProbe() { assert.fail('reserved'); }, append() { assert.fail('appended'); } },
       fetch() { assert.fail('dispatched'); } });
     assert.equal(result.attempted, 0);
@@ -200,7 +200,7 @@ test('requests preserve exact model and effort with bounded completion budgets a
         assert.equal(body.stream, true); assert.equal(signal.aborted, false); assert.equal(body.messages.length, 1);
         assert.match(body.messages[0].content, new RegExp(`^[a-f0-9-]{36} ${PROVIDER_PROBE_PROMPT_VERSION}`));
         prompts.push(body.messages[0].content);
-        assert.equal(body.max_tokens ?? body.max_completion_tokens, 128);
+        assert.equal(body.max_tokens ?? body.max_completion_tokens, undefined);
         assert.equal(backend === 'openrouter' ? body.reasoning?.effort : body.reasoning_effort, effort ?? undefined);
       };
       const result = await probe({ targets: [target({ backend, model, effort, ...(backend === 'workers_ai' ? { key: undefined } : {}) })],
@@ -339,7 +339,7 @@ test('Cloudflare frontier uses Responses binding payload and fresh synthetic inp
     const result = await frontierProbe([], { targets: [target({backend:'cloudflare',model:'openai/gpt-6-astra',effort,key:undefined})],
       fetch() { assert.fail('HTTP credentials must not be needed'); }, ai: { async run(model, body, options) {
         assert.equal(model, 'openai/gpt-6-astra');
-        assert.deepEqual(body, {input:body.input,stream:true,max_output_tokens:128,reasoning:{effort}});
+        assert.deepEqual(body, {input:body.input,stream:true,reasoning:{effort}});
         assert.match(body.input, /^[0-9a-f-]{36} ttft-v1\. Reply with only OK\.$/);
         inputs.push(body.input);
         assert.equal(options.signal.aborted, false);

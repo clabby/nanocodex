@@ -11,7 +11,8 @@ pub(super) struct SearchRequest<'a> {
     pub(super) input: Option<&'a [ResponseItem]>,
     pub(super) commands: &'a SearchCommands,
     pub(super) settings: SearchSettings,
-    pub(super) max_output_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) max_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, JsonSchema)]

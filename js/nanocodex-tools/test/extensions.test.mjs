@@ -123,3 +123,10 @@ test('search serializes only fields belonging to the chosen match mode', async (
     assert.equal(result.matches.length, 1);
   }
 });
+
+test('memory read preserves text beyond the former implicit token cap', async () => {
+  const content = '世界'.repeat(40_000) + '\nlast line\n';
+  const { tools } = backend({ 'large.md': content });
+  assert.deepEqual(await tools.read({ path: 'large.md' }), { path: 'large.md', start_line_number: 1, content, truncated: false });
+  assert.equal((await tools.read({ path: 'large.md', max_lines: 1 })).content, content.split('\n')[0] + '\n');
+});

@@ -13,8 +13,15 @@ class FixtureRelay extends DurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
     const path = new URL(request.url).pathname;
-    return Response.json(path.endsWith("/alpha/search")
-      ? { output: this.region } : { relay: this.region });
+    if (path.endsWith("/alpha/search")) {
+      const body = await request.json();
+      const expected = body.commands.expected_output_budget;
+      if (expected === undefined ? Object.hasOwn(body, "max_output_tokens") : body.max_output_tokens !== expected) {
+        return Response.json({ error: "unexpected output budget" }, { status: 400 });
+      }
+      return Response.json({ output: this.region });
+    }
+    return Response.json({ relay: this.region });
   }
 }
 export class RelayLegacy extends FixtureRelay { region = "legacy"; }

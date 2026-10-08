@@ -32,7 +32,10 @@ processes. This entrypoint imports Node APIs and must not be bundled into Worker
 or browser applications.
 
 Native Node Hands retain unread command output in private temporary files. Reply
-budgets control each poll, without discarding older output. Files are removed
+budgets, when explicitly supplied, control each poll without discarding older output.
+Omitting `max_output_tokens` returns all available output. Code Mode `exec` and
+`wait` likewise have no default output token budget; explicit observation budgets
+still truncate the returned observation. Files are removed
 when fully consumed or when their owning session or Hand is closed.
 
 ### Local PDF text extraction

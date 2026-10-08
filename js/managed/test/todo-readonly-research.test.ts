@@ -39,7 +39,7 @@ describe("capture public research: shipped dispatch path", () => {
     expect(request.headers.get("authorization")).toBe("Bearer NANOCODEX_PROVIDER_CREDENTIAL");
     expect(Object.keys(body.commands).sort()).toEqual(["response_length", "search_query"]);
     expect(body.commands.search_query).toEqual([{ q: "California health insurance comparison official coverage" }]);
-    expect(body.max_output_tokens).toBe(5000);
+    expect(body.max_output_tokens).toBeUndefined();
     expect(f.plans[0].messages[0].content).toContain("You have no tools"); expect(f.plans[0].tools).toBeUndefined();
   });
   it("search receives generalized queries rather than raw personal context", async () => {

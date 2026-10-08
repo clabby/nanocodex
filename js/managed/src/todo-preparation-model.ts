@@ -19,7 +19,7 @@ export async function prepareDecisionProposal(ai: TodoMailSuggestionAI | undefin
     const binding = ai as TodoMailSuggestionAI & { run(model: string, input: Record<string, unknown>, options: unknown): Promise<unknown> };
     const raw = await Promise.race([binding.run(TODO_MAIL_DRAFT_MODEL, {
       messages: [{ role: "system", content: system }, { role: "user", content: JSON.stringify(input) }],
-      response_format: { type: "json_schema", json_schema: schema }, temperature: 0.1, max_tokens: 3000, stream: false,
+      response_format: { type: "json_schema", json_schema: schema }, temperature: 0.1, stream: false,
     }, { gateway: { id: "default", collectLog: false, skipCache: true } }),
     new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("preparation_unavailable")), 25_000); })]);
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid_preparation");

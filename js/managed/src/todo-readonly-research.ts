@@ -145,7 +145,7 @@ export async function researchTodoCapture(deps: TodoResearchDependencies, input:
     const ai = deps.ai as TodoMailSuggestionAI & { run(model: string, input: Record<string, unknown>, options: unknown): Promise<unknown> };
     const raw = await deadline(() => ai.run(TODO_MAIL_DRAFT_MODEL, {
       messages: [{ role: "system", content: plannerSystem }, { role: "user", content: JSON.stringify({ owner_request: input.owner_request, owner_changes: input.owner_changes }) }],
-      response_format: { type: "json_schema", json_schema: plannerSchema }, temperature: 0, max_tokens: 400, stream: false,
+      response_format: { type: "json_schema", json_schema: plannerSchema }, temperature: 0, stream: false,
     }, { gateway: { id: "default", collectLog: false, skipCache: true } }));
     if (!object(raw) || raw.tool_calls !== undefined && (!Array.isArray(raw.tool_calls) || raw.tool_calls.length)
       || typeof raw.response === "string" && raw.response.length > 1200) fail("research_invalid_queries");
@@ -160,7 +160,7 @@ export async function researchTodoCapture(deps: TodoResearchDependencies, input:
           "user-agent": "nanocodex-managed/0.1.0", "x-nanocodex-subject": deps.subject! },
         body: JSON.stringify({ id: `todo-research:${input.request_id}`, model: "gpt-6-astra",
           commands: { search_query: queries.map(q => ({ q })), response_length: "long" },
-          settings: { allowed_callers: ["direct"], external_web_access: true }, max_output_tokens: 5000 }),
+          settings: { allowed_callers: ["direct"], external_web_access: true } }),
       }));
       if (!response.ok || response.status >= 300) { await response.body?.cancel(); fail("research_unavailable"); }
       const value: unknown = JSON.parse(await boundedText(response));

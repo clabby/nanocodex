@@ -29,7 +29,6 @@ const DEFAULT_POLL_YIELD_MS: u64 = 5_000;
 pub(crate) const MAX_EXEC_YIELD_MS: u64 = 30_000;
 pub(crate) const MAX_POLL_YIELD_MS: u64 = 300_000;
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
-const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct ExecCommand {
     script: String,
@@ -282,21 +281,13 @@ impl Session {
         let captured = Arc::new(Mutex::new(CapturedOutput::default()));
         let drains = match spawned.output {
             process::ProcessOutput::Pipes { stdout, stderr } => vec![
-                tokio::spawn(output::drain(
-                    stdout,
-                    Arc::clone(&captured),
-                    MAX_CAPTURE_BYTES,
-                )),
-                tokio::spawn(output::drain(
-                    stderr,
-                    Arc::clone(&captured),
-                    MAX_CAPTURE_BYTES,
-                )),
+                tokio::spawn(output::drain(stdout, Arc::clone(&captured), usize::MAX)),
+                tokio::spawn(output::drain(stderr, Arc::clone(&captured), usize::MAX)),
             ],
             process::ProcessOutput::Pty(reader) => vec![output::drain_blocking(
                 reader,
                 Arc::clone(&captured),
-                MAX_CAPTURE_BYTES,
+                usize::MAX,
             )],
         };
         Arc::new(Self {
@@ -374,7 +365,7 @@ impl Session {
                 self.captured
                     .lock()
                     .await
-                    .push(message.as_bytes(), MAX_CAPTURE_BYTES);
+                    .push(message.as_bytes(), usize::MAX);
                 Some(1)
             }
             Err(_) => None,

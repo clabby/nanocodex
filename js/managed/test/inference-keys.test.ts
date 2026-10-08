@@ -214,11 +214,20 @@ describe("standalone inference key authority", () => {
     expect(value).not.toHaveProperty("api_key");
   });
 
+  it("issues uncapped keys by default and preserves large explicit budgets", async () => {
+    for (const budget of [undefined, 100_000]) {
+      const response = await route(principal(), "POST", budget === undefined ? {} : { limits: { maxOutputTokens: budget } });
+      expect(response.status).toBe(201);
+      const value = await response.json<{ key: { limits: { maxOutputTokens?: number } } }>();
+      expect(value.key.limits.maxOutputTokens).toBe(budget);
+    }
+  });
+
   it("validates issuance options before persisting records", async () => {
     const owner = principal();
     for (const body of [
       { expires_at: Date.now() - 1 }, { expires_at: null }, { label: " " }, { operation_id: "wrong" },
-      { limits: { requestsPerDay: 0 } }, { limits: { maxOutputTokens: 0 } }, { limits: { maxOutputTokens: 4097 } },
+      { limits: { requestsPerDay: 0 } }, { limits: { maxOutputTokens: 0 } }, { limits: { maxOutputTokens: Number.MAX_SAFE_INTEGER + 1 } },
       { limits: { requestsPerMinute: 1.5 } }, { limits: { unknown: 10 } }, { limits: null },
       { connectors: ["github"] }, { userId: crypto.randomUUID() },
       { scope: "inference" }, { scope: "account" }, { capabilities: ["tools:use"] },

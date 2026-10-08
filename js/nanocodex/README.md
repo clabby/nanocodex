@@ -874,7 +874,9 @@ from starting.
 Code Mode is the default. Model-facing `exec` cells can yield with a first-line
 `// @exec: {"yield_time_ms": 1000, "max_output_tokens": 1000}` directive or
 `yield_control()`. The model resumes the returned cell ID through `wait`, which
-returns only new output and can terminate the cell. Cells belong to their agent
+returns only new output and can terminate the cell. Output is unbounded by default;
+`max_output_tokens` on `exec` and `max_tokens` on `wait` set explicit observation
+budgets. Cells belong to their agent
 session and are invalidated when the host shuts down; a persisted `wait` never
 restarts missing work. Embedded cells retain ownership of all nested tool calls
 until they finish or are cancelled.

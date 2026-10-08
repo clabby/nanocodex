@@ -186,8 +186,6 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
           })),
         ],
         executionTimeoutMs,
-        defaultMaxOutputTokens: 10_000,
-        maxOutputTokens: 100_000,
         executionLimits: executionTimeoutMs === undefined ? {} : { maxExecutionTimeMs: executionTimeoutMs },
         supportsParallelToolCalls: true,
         instructions: browserInstructions,

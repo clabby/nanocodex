@@ -21,7 +21,6 @@ const LOCAL_PEER_SOURCE_ROOT = "/run/nanocodex/peer-sources";
 // hand workspaces are read-only. Flush every FUSE mount before reporting
 // completion so acknowledged writes become visible.
 const WORKSPACE_FLUSH_COMMAND = "sync";
-const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const APPROXIMATE_BYTES_PER_TOKEN = 4;
 const OUTPUT_CURSOR_PREFIX = "sandbox-output-cursor:";
 const WORKSPACE_MOUNT_PROBE_TIMEOUT_MS = 10_000;
@@ -1352,10 +1351,7 @@ function requestedOutputBytes(value: unknown): number {
   if (value !== undefined && (!Number.isSafeInteger(value) || Number(value) < 0)) {
     throw new Error("max_output_tokens must be a non-negative safe integer");
   }
-  return Math.min(
-    Number.MAX_SAFE_INTEGER,
-    Number(value ?? DEFAULT_MAX_OUTPUT_TOKENS) * APPROXIMATE_BYTES_PER_TOKEN,
-  );
+  return value === undefined ? Infinity : Number(value) * APPROXIMATE_BYTES_PER_TOKEN;
 }
 
 function memoryOutputCursorStorage(): SandboxOutputCursorStorage {

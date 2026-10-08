@@ -41,8 +41,8 @@ and tool replay protection are in memory only.
 
 `Claude::latest(client)` currently selects `claude-opus-5-5`. Known coding models
 use their configured context windows; unknown IDs default to 200K unless the
-caller supplies `.context_window_tokens()`. The default output limit is 4096,
-including adaptive thinking. Explicit `.context_window_tokens()` and
+caller supplies `.context_window_tokens()`. Output defaults to the known model’s protocol maximum, including adaptive
+thinking; unknown models require an explicit `.max_tokens()` value. Explicit `.context_window_tokens()` and
 `.max_tokens()` settings should match the selected deployment.
 
 See [runtime and recovery](CLAUDE_RUNTIME.md) for context estimates, cache marker

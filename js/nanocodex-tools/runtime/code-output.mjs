@@ -20,6 +20,7 @@ export function truncateText(text, budget, formatted = false) {
 }
 
 export function limitCodeOutput(output, budget, estimateAudio = defaultAudioTokens) {
+  if (budget === undefined) return output;
   if (typeof output === "string") {
     const split = output.indexOf("Output:\n");
     return split < 0 ? output : output.slice(0, split + 8) + truncateText(output.slice(split + 8), budget, true);

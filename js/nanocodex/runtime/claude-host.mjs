@@ -316,7 +316,7 @@ function wireOutput(value) {
 
 function codeDefinitions(definitions) {
   return freezeJson([
-    { name: 'exec', description: 'Run JavaScript in the configured isolated Code Mode evaluator. Call capabilities through tools and inspect ALL_TOOLS for names and schemas. Await tool calls; use text(value), image(value), store(key, value), load(key), and yield_control(). A first-line // @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000} controls observation. If a cell is running, continue it with wait. Native capabilities: ' + JSON.stringify(definitions),
+    { name: 'exec', description: 'Run JavaScript in the configured isolated Code Mode evaluator. Call capabilities through tools and inspect ALL_TOOLS for names and schemas. Await tool calls; use text(value), image(value), store(key, value), load(key), and yield_control(). A first-line // @exec: {"yield_time_ms": 10000, "max_output_tokens": 10000} controls observation. Output has no token budget unless explicitly supplied. If a cell is running, continue it with wait. Native capabilities: ' + JSON.stringify(definitions),
       input_schema: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript source to evaluate.' } }, required: ['code'], additionalProperties: false } },
     { name: 'wait', description: 'Continue a running exec cell. Use only the cell_id returned by exec.',
       input_schema: { type: 'object', properties: { cell_id: { type: 'string' }, yield_time_ms: { type: 'integer', minimum: 0 }, max_tokens: { type: 'integer', minimum: 0 }, terminate: { type: 'boolean' } }, required: ['cell_id'], additionalProperties: false } },

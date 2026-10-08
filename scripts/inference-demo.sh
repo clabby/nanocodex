@@ -17,7 +17,7 @@ unless overridden. Requests are never retried automatically.
   --prompts FILE             Add a JSON array of strings or {label,prompt} objects
   --models-only              Print the complete candidate catalogue, then exit
   --model MODEL              Select a model/candidate instead of auto
-  --max-output-tokens N      Output budget per request, 1..4096 (default: 2048)
+  --max-output-tokens N      Optional positive output budget per request (default: provider choice)
   --timeout SECONDS          curl request deadline, 1..3600 (default: 180)
   --output DIR               Save sanitized JSON requests/responses and summary
                             in a new directory (must not already exist)
@@ -49,7 +49,7 @@ for dependency in curl jq; do
 done
 
 model=auto
-max_tokens=2048
+max_tokens=null
 timeout=180
 output_dir=
 models_only=0
@@ -82,10 +82,11 @@ while [ "$#" -gt 0 ]; do
     *) fail 'Unknown argument; use --help' ;;
   esac
 done
-case "$max_tokens" in ''|*[!0-9]*) fail '--max-output-tokens must be an integer in 1..4096' ;; esac
-[ "${#max_tokens}" -le 4 ] && [ "$max_tokens" -ge 1 ] && [ "$max_tokens" -le 4096 ] || fail '--max-output-tokens must be in 1..4096'
-# Normalize leading zeroes without Bash octal arithmetic.
-max_tokens=$(printf '%s' "$max_tokens" | jq -R 'tonumber')
+if [ "$max_tokens" != null ]; then
+  case "$max_tokens" in ''|*[!0-9]*) fail '--max-output-tokens must be a positive safe integer' ;; esac
+  # Normalize leading zeroes without Bash octal arithmetic.
+  max_tokens=$(printf '%s' "$max_tokens" | jq -Re 'tonumber | select(. >= 1 and . <= 9007199254740991 and floor == .)') || fail '--max-output-tokens must be a positive safe integer'
+fi
 case "$timeout" in ''|*[!0-9]*) fail '--timeout must be an integer in 1..3600' ;; esac
 [ "${#timeout}" -le 4 ] && [ "$timeout" -ge 1 ] && [ "$timeout" -le 3600 ] || fail '--timeout must be in 1..3600'
 timeout=$(printf '%s' "$timeout" | jq -R 'tonumber')
@@ -253,7 +254,7 @@ while [ "$index" -lt "$count" ]; do
   number=$((index+1))
   heading "[$number/$count] $label"
   printf '%s\n' "$prompt" | sanitize
-  payload=$(printf '%s' "$item" | jq -c --arg model "$model" --argjson tokens "$max_tokens" '{model:$model,input:.prompt,max_output_tokens:$tokens,stream:false,store:false}')
+  payload=$(printf '%s' "$item" | jq -c --arg model "$model" --argjson tokens "$max_tokens" '{model:$model,input:.prompt,stream:false,store:false} + (if $tokens == null then {} else {max_output_tokens:$tokens} end)')
   save_json "$(printf '%02d' "$number")-request" "$(printf '%s' "$payload" | sanitize_json)"
   request POST /responses "$payload"
   report_transport

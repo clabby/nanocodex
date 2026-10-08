@@ -187,6 +187,14 @@ describe("subscription relay through real Worker and fixture Durable Objects", (
     });
     expect(search.status).toBe(200);
     expect(await search.json()).toEqual({ output: "wnam" });
+    for (const budget of [0, 250_000, -1]) {
+      const budgeted = await SELF.fetch("https://nanocodex.internal/v1/search", {
+        method: "POST", headers: { "x-managed2-owner": owner, "x-managed2-relay-region": "wnam",
+          authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL", "content-type": "application/json" },
+        body: JSON.stringify({ session_id: "synthetic", commands: { expected_output_budget: budget }, max_output_tokens: budget }),
+      });
+      expect(budgeted.status).toBe(budget < 0 ? 400 : 200);
+    }
     const upgrade = await SELF.fetch("https://api.openai.com/v1/responses", {
       method: "GET", headers: { "x-managed2-owner": owner, "x-managed2-relay-region": "wnam",
         authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL", upgrade: "websocket" },

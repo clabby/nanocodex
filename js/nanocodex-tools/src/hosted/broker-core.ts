@@ -1615,7 +1615,9 @@ export class HostedToolsBrokerCore {
           ...(context.turnId === undefined ? {} : { turnId: context.turnId }),
           model: context.model ?? "unknown",
           input: input as Record<string, unknown> | string,
-          outputTokenBudget: 10_000,
+          // The hosted wire protocol requires a positive safe integer.
+          // Use its representable maximum when no caller budget is supplied.
+          outputTokenBudget: Number.MAX_SAFE_INTEGER,
           ...(context.signal === undefined ? {} : { signal: context.signal }),
         });
         if (outcome.status === "completed") {

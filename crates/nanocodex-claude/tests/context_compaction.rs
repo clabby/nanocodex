@@ -684,7 +684,7 @@ async fn incremental_server_pauses_retain_the_whole_turn_during_compaction() {
         None,
     )
     .await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .auto_compact_window_tokens(100_000)
         .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
         .build()
@@ -721,7 +721,7 @@ async fn failed_server_pause_summary_is_data_before_manual_compaction() {
             _ => (text("reconciled after summary failure"), "end_turn", 10),
         }, Some(2),
     ).await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .auto_compact_window_tokens(100_000)
         .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
         .build()
@@ -780,7 +780,7 @@ async fn invalid_client_continuation_preserves_prior_server_uncertainty() {
     ).await;
     let effects = Arc::new(AtomicUsize::new(0));
     let counter = effects.clone();
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
         .tool(tool(), move |_| {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -835,7 +835,7 @@ async fn end_turn_without_prior_server_result_fails_and_recovers_as_data() {
             _ => (text("reconciled missing result"), "end_turn", 10),
         }, None,
     ).await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .auto_compact_window_tokens(4_000)
         .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
         .build()
@@ -921,10 +921,8 @@ async fn context_exhaustion_retains_output_and_completed_effects() {
                     (source.clone(), "model_context_window_exceeded", 10)
                 }
                 4 => {
-                    assert!(
-                        input + body["max_tokens"].as_u64().unwrap() as usize * 4 < CAPACITY,
-                        "summary must leave room for its own output"
-                    );
+                    assert_eq!(body["max_tokens"], 128_000,
+                        "recovery preserves the caller's output budget");
                     (text("Perform the requested task."), "end_turn", 10)
                 }
                 _ => (text("completed after recovery"), "end_turn", 10),
@@ -935,7 +933,7 @@ async fn context_exhaustion_retains_output_and_completed_effects() {
     .await;
     let effects = Arc::new(AtomicUsize::new(0));
     let counter = effects.clone();
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .max_tokens(128_000)
         .adaptive_thinking()
         .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
@@ -965,7 +963,7 @@ async fn context_exhaustion_retains_output_and_completed_effects() {
     assert_eq!(log.len(), 5);
     assert_eq!(log[3]["tool_choice"], json!({"type":"none"}));
     assert_eq!(log[3]["thinking"], json!({"type":"disabled"}));
-    assert_eq!(log[3]["max_tokens"], 4096);
+    assert_eq!(log[3]["max_tokens"], 128_000);
     assert!(!log[3]["messages"].to_string().contains("completed-fetch"));
     assert_eq!(
         log[4]["messages"][1]["content"],
@@ -994,7 +992,7 @@ async fn context_exhaustion_retries_once_and_retains_partial_text_on_failure() {
         None,
     )
     .await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .build()
         .unwrap();
     let error = agent
@@ -1039,7 +1037,7 @@ async fn context_exhaustion_summary_failure_preserves_received_output() {
         None,
     )
     .await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .build()
         .unwrap();
     let error = agent
@@ -1101,7 +1099,7 @@ async fn summary_omits_invalidated_thinking_and_replays_new_reasoning() {
         Some(3),
     )
     .await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .adaptive_thinking()
         .keep_thinking()
         .build()
@@ -1172,7 +1170,7 @@ async fn output_cutoff_after_summary_replays_only_post_summary_reasoning() {
         None,
     )
     .await;
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .adaptive_thinking()
         .keep_thinking()
         .build()
@@ -1227,7 +1225,7 @@ async fn context_exhaustion_rejects_partial_client_calls_and_unresolved_server_e
         .await;
         let effects = Arc::new(AtomicUsize::new(0));
         let counter = effects.clone();
-        let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
             .server_tool(nanocodex_claude::ServerToolDefinition::web_fetch_basic(1))
             .tool(tool(), move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -1319,8 +1317,9 @@ async fn context_recovery_summary_uses_thinking_mode_each_model_accepts() {
             !summary["messages"].to_string().contains("stale-"),
             "{model}"
         );
-        // Bounded summary behavior is unchanged: no output budget increase.
-        assert_eq!(summary["max_tokens"], 4096, "{model}");
+        // Summary uses the same model maximum as the original request.
+        assert_eq!(summary["max_tokens"], log[0]["max_tokens"], "{model}");
+        assert_eq!(summary["max_tokens"], if model == "claude-haiku-4-5" { 64_000 } else { 128_000 });
         match model {
             "claude-opus-5-5" | "claude-fable-5-1" => {
                 assert_eq!(summary["thinking"], json!({"type":"adaptive"}), "{model}");
@@ -1350,7 +1349,7 @@ async fn context_recovery_summary_uses_thinking_mode_each_model_accepts() {
     }
 }
 
-// If a thinking-capable model spends the unchanged 4096-token summary budget on
+// If a thinking-capable model spends the configured summary budget on
 // reasoning, the truncated summary is rejected atomically and the failure leaves
 // the retained work available; a later manual compaction can still recover.
 #[tokio::test]
@@ -1398,7 +1397,7 @@ async fn context_recovery_summary_truncated_by_max_tokens_fails_without_losing_s
     {
         let log = requests.lock().unwrap();
         assert_eq!(log.len(), 3);
-        assert_eq!(log[2]["max_tokens"], 4096);
+        assert_eq!(log[2]["max_tokens"], 128_000);
     }
     // pending_round() has two tool calls; each ran exactly once before the
     // summary was rejected.

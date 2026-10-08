@@ -4084,12 +4084,16 @@ async function grantWebSearch(request: Request, env: Env, grant: GrantRecord): P
       && (typeof value.model !== "string" || !AGENT_MODELS.has(value.model)))) {
     throw new ApiFailure(400, "invalid_web_request", "The web search request is invalid.");
   }
+  if (value.max_output_tokens !== undefined && (typeof value.max_output_tokens !== "number"
+    || !Number.isSafeInteger(value.max_output_tokens) || value.max_output_tokens < 0)) {
+    throw new ApiFailure(400, "invalid_web_request", "The output budget must be a non-negative safe integer.");
+  }
   return fetchGrantModelTool(env, grant, "/v1/search", {
     id: value.session_id,
     model: typeof value.model === "string" ? value.model : "gpt-6.1-sol",
     commands: value.commands,
     settings: { allowed_callers: ["direct"], external_web_access: true },
-    max_output_tokens: 10_000,
+    ...(value.max_output_tokens === undefined ? {} : { max_output_tokens: value.max_output_tokens }),
   });
 }
 

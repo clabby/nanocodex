@@ -98,7 +98,7 @@ async fn chatgpt_auth_recovers_for_web_search() -> Result<()> {
         request["settings"],
         json!({"allowed_callers": ["direct"], "external_web_access": true})
     );
-    assert_eq!(request["max_output_tokens"], 10_000);
+    assert!(request.get("max_output_tokens").is_none());
     assert_eq!(
         request["input"],
         json!([{

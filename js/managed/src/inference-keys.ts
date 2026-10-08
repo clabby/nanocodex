@@ -10,7 +10,7 @@ export interface InferenceKeysEnv {
 export type InferenceKeyLimits = Readonly<{
   requestsPerDay: number;
   requestsPerMinute: number;
-  maxOutputTokens: number;
+  maxOutputTokens?: number;
 }>;
 export type InferenceKeyMetadata = Readonly<{
   /** Immutable credential scope; never supplied by callers. */
@@ -36,7 +36,6 @@ type Usage = { day: number; dayCount: number; minute: number; minuteCount: numbe
 export const DEFAULT_INFERENCE_KEY_LIMITS: InferenceKeyLimits = Object.freeze({
   requestsPerDay: 100,
   requestsPerMinute: 10,
-  maxOutputTokens: 4096,
 });
 const KEY_ID = /^[A-Za-z0-9_-]{43}$/;
 const TOKEN = /^nci_live_([A-Za-z0-9_-]{43})_([A-Za-z0-9_-]{43})$/;
@@ -58,10 +57,10 @@ function integer(value: unknown, max: number): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= max;
 }
 function limits(value: unknown): value is InferenceKeyLimits {
-  return object(value) && Object.keys(value).length === 3
+  return object(value) && Object.keys(value).every(key => ["requestsPerDay", "requestsPerMinute", "maxOutputTokens"].includes(key))
     && integer(value.requestsPerDay, 1_000_000)
     && integer(value.requestsPerMinute, 10_000)
-    && integer(value.maxOutputTokens, 4096);
+    && (value.maxOutputTokens === undefined || integer(value.maxOutputTokens, Number.MAX_SAFE_INTEGER));
 }
 function metadata(value: unknown): value is InferenceKeyMetadata {
   return object(value) && value.scope === "inference"

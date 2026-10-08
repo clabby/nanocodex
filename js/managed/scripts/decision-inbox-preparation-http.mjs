@@ -75,8 +75,8 @@ try {
       assert.ok(subjects.has(request.headers.get('x-nanocodex-subject')),'research subject must be owner-bound');
       const query=await request.json();assert.deepEqual(query.commands,{search_query:[{q:publicQuery}],response_length:'long'});
       assert.deepEqual(query.settings,{allowed_callers:['direct'],external_web_access:true});
-      assert.equal(query.model,'gpt-6-astra');assert.equal(query.max_output_tokens,5000);
-      assert.deepEqual(Object.keys(query).sort(),['commands','id','max_output_tokens','model','settings']);
+      assert.equal(query.model,'gpt-6-astra');assert.equal(query.max_output_tokens,undefined);
+      assert.deepEqual(Object.keys(query).sort(),['commands','id','model','settings']);
       researchTrace.push({query:publicQuery,source:publicSource,method:request.method,path:url.pathname});
       return Response.json({output:'Comparing health plans ('+publicSource+')\n[Retrieved fixture; wordlim 200] Compare premiums, deductibles, provider networks and covered benefits. Public comparison guidance does not establish personalized eligibility or an eligible quote.'});
     }

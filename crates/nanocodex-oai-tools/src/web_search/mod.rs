@@ -80,7 +80,8 @@ impl WebSearchHandler {
                 allowed_callers: ["direct"],
                 external_web_access: true,
             },
-            max_output_tokens: u64::try_from(context.output_token_budget()).unwrap_or(u64::MAX),
+            max_output_tokens: (context.output_token_budget() != usize::MAX)
+                .then(|| u64::try_from(context.output_token_budget()).unwrap_or(u64::MAX)),
         };
         match self.search(&request).await {
             Ok(response) => {

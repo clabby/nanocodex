@@ -10256,7 +10256,7 @@ export class DurableAgentSession extends DurableComputerObject {
     const config = this.#configuration().environment;
     if (!config) return;
     await prepareEnvironment(this.ctx.storage, config, computer.filesystem, async (cmd, step) => (
-      await computer.tool.handler({ cmd, workdir: "/brain", max_output_tokens: 1024 }, {
+      await computer.tool.handler({ cmd, workdir: "/brain" }, {
         sessionId: this.#sessionId()!, callId: `setup:${step}`, parentCallId: "", model: this.#settings().model,
         signal: AbortSignal.timeout(30_000),
       }) as { exit_code?: number; output?: string }

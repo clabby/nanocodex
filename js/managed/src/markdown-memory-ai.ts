@@ -51,7 +51,7 @@ export function createMarkdownMemoryCompletion(ai: MarkdownMemoryAi | undefined,
       raw = await boundedMemoryOperation(() => ai.run(MARKDOWN_MEMORY_MODEL, {
         messages: [{ role: 'system', content: request.system }, { role: 'user', content }],
         response_format: { type: 'json_schema', json_schema: request.schema },
-        temperature: 0, max_tokens: 2048, stream: false,
+        temperature: 0, stream: false,
       }), request.signal, options.timeoutMs);
     } catch (error) {
       // Provider errors may echo prompt content or credentials; expose only our bounded-operation errors.

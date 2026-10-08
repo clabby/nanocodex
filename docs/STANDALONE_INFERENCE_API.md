@@ -268,7 +268,7 @@ Both JSON and SSE responses expose the selected route in headers. Session ID hea
 | `input` | Required nonempty string, or 1–1,024 history items. |
 | `instructions` | Optional string; resend on every request when needed. |
 | `stream` | Boolean; default `false`. See streaming below. |
-| `max_output_tokens` | Positive integer up to the key's limit and service ceiling of 4,096; omission uses the key limit. |
+| `max_output_tokens` | Positive safe integer, bounded by an explicit key limit when present; omission uses that limit or leaves the provider default. |
 | `reasoning` | Optional `{ "effort": "low" \| "medium" \| "high" }`; filters selection; for a session, must match any retained route. |
 | `tools` | Up to 128 function/custom definitions with unique names. |
 | `tool_choice` | `"auto"`, `"none"`, `"required"`, or `{ "type": "function" \| "custom", "name": "..." }`. A named choice must match a supplied definition. |
@@ -428,7 +428,7 @@ Existing sessions keep their exact provider/model/effort pin. Autorouting remain
 
 ## Limits and retries
 
-Default inference-key limits are **100 reserved POST requests per UTC day, 10 per UTC minute, and 4,096 output tokens per inference**, with expiry 30 days after issuance. Limits can be lower for a particular key; check metadata supplied by the issuer. Daily/minute windows are fixed UTC windows, not sliding windows. HTTP 429 includes a `Retry-After` value in seconds.
+Default inference-key limits are **100 reserved POST requests per UTC day and 10 per UTC minute, with no default output-token cap**, with expiry 30 days after issuance. Limits can be lower for a particular key; check metadata supplied by the issuer. Daily/minute windows are fixed UTC windows, not sliding windows. HTTP 429 includes a `Retry-After` value in seconds.
 
 Quota is reserved before body validation for both `POST /v1/inference/sessions` and response POST requests on either alias. A rejected body or later provider failure can therefore still consume a slot. Authentication failures and quota-rejected attempts do not reserve an additional slot. Model listing and session GET/DELETE authenticate the key without reserving generation quota. Session counters describe admitted generation attempts, not the key's complete quota usage.
 
@@ -440,7 +440,7 @@ Additional ceilings:
 | JSON-encoded `input` (excluding `image_url` values) plus JSON-encoded `instructions` | 32,768 bytes |
 | History items | 1,024 |
 | Tool definitions | 128 |
-| Output tokens | At most 4,096 and no more than the key cap |
+| Output tokens | Optional positive safe integer; no more than an explicit key cap |
 | Concurrent requests to one session | One; conflicts return HTTP 409 `session_busy` |
 | Inference timeout | 120 seconds |
 | Admin issuance request body | 4,096 bytes |
@@ -501,13 +501,13 @@ curl --fail-with-body "$NANOCODEX_INFERENCE_BASE/keys" \
     operation_id:$operation_id,
     label:"trial-01",
     expires_at:$expires_at,
-    limits:{requestsPerDay:100,requestsPerMinute:10,maxOutputTokens:4096}
+    limits:{requestsPerDay:100,requestsPerMinute:10}
   }')"
 ```
 
 The response is `{"api_key":"ONE_TIME_BEARER_TOKEN","key":{...metadata...}}`. Store the token securely when issued; listing and retries never return it. Metadata contains `id`, `label`, `scope: "inference"`, `createdAt`, `expiresAt`, `limits`, and `revokedAt`; timestamps are Unix milliseconds; `revokedAt` is `null` until revoked. Issued keys always have an expiry. Digests and provider credentials are never returned.
 
-Scope is assigned by the server and cannot be supplied or changed by the caller. Accepted creation fields are `label` (default `"Inference key"`, at most 120 characters), `expires_at` (future Unix milliseconds; `null` is rejected), `limits` (partial overrides using the camelCase names above), and `operation_id` (UUID). **Omitting `expires_at` defaults to 30 days after issuance.** The explicit timestamp above makes that trial period reviewable. Limits accept positive integers up to 1,000,000 requests/day, 10,000 requests/minute, and 4,096 output tokens. Ten trial keys means ten separately authorized issuance calls, each with a distinct operation ID and label; there is no batch-count field. This guide does not assert that any keys have been issued.
+Scope is assigned by the server and cannot be supplied or changed by the caller. Accepted creation fields are `label` (default `"Inference key"`, at most 120 characters), `expires_at` (future Unix milliseconds; `null` is rejected), `limits` (partial overrides using the camelCase names above), and `operation_id` (UUID). **Omitting `expires_at` defaults to 30 days after issuance.** The explicit timestamp above makes that trial period reviewable. Limits accept positive integers up to 1,000,000 requests/day, 10,000 requests/minute, and an optional positive safe integer for output tokens. Ten trial keys means ten separately authorized issuance calls, each with a distinct operation ID and label; there is no batch-count field. This guide does not assert that any keys have been issued.
 
 Issuance claims `operation_id` once, before storing the key. Repeating a claimed ID returns HTTP 409 `already_issued` with metadata, never another token. After an uncertain issuance result, reuse the same ID to reconcile and list metadata; do not automatically create another key with a new ID. A claimed operation can survive a later storage failure. Revoke its metadata entry before intentionally issuing a replacement when the original bearer was lost or issuance could not be confirmed.
 

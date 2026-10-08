@@ -60,7 +60,7 @@ export async function downloadHandFile(
     context.signal.throwIfAborted();
     if (!active()) throw new FileDownloadError("agent_unavailable", "The conversation is no longer available", 409);
     const value = await exec.handler({ cmd: fileReadCommand(physical, chunk, windows), workdir: workspace,
-      shell: windows ? "powershell.exe" : "/bin/bash", login: false, max_output_tokens: 262144, yield_time_ms: 30000 },
+      shell: windows ? "powershell.exe" : "/bin/bash", login: false, yield_time_ms: 30000 },
     { ...context, callId: `${context.callId}-${chunk}` });
     const result = value as Record<PropertyKey, unknown> | null;
     const execution = (result?.[Symbol.for("nanocodex.toolResult")] ? result.structuredResult : result) as Record<string, unknown> | null;

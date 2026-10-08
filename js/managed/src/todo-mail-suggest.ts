@@ -24,7 +24,7 @@ export async function suggestTodoMailReply(ai: TodoMailSuggestionAI | undefined,
       binding.run(TODO_MAIL_DRAFT_MODEL, {
         messages: [{ role: "system", content: system }, { role: "user", content: JSON.stringify({ owner_instructions: instructions, quoted_messages: selected }) }],
         response_format: { type: "json_schema", json_schema: { type: "object", properties: { body_text: { type: "string" } }, required: ["body_text"], additionalProperties: false } },
-        temperature: 0.2, max_tokens: 1600, stream: false,
+        temperature: 0.2, stream: false,
       }, { gateway: { id: "default", collectLog: false, skipCache: true } }),
       new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("draft_suggestion_unavailable")), 25_000); }),
     ]);

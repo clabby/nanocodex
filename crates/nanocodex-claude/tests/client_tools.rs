@@ -61,7 +61,7 @@ async fn client_tool_search_then_nested_web_search_then_compaction() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .client_tool_search()
         .message_diagnostics()
         .nested_web_search(true)
@@ -181,7 +181,7 @@ async fn optional_context_profile_and_invalid_web_filters_are_bounded() {
         format!("http://{addr}/v1/messages"),
         "synthetic",
     );
-    let (agent,_)=Nanocodex::builder(Claude::new(client,"test"))
+    let (agent,_)=Nanocodex::builder(Claude::new(client,"test")).max_tokens(128_000)
         .nested_web_search(false).adaptive_thinking().keep_thinking().cache_one_hour()
         .system_blocks(vec![json!({"type":"text","text":"Authorized system","cache_control":{"type":"ephemeral","ttl":"1h"}})])
         .build().unwrap();
@@ -238,7 +238,7 @@ async fn failed_nested_search_yields_one_error_result_without_retrying_it() {
         format!("http://{addr}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .nested_web_search(false)
         .build()
         .unwrap();
@@ -323,7 +323,7 @@ async fn assert_approved_fetch(prompt: &str, answer: String) {
         format!("http://{addr}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .web_fetch_with_source(Arc::new(FixtureSource(calls.clone())), false)
         .build()
         .unwrap();
@@ -416,7 +416,7 @@ async fn rejected_discovery_options_do_not_activate_a_deferred_tool() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .client_tool_search()
         .tool(
             nanocodex_claude::ToolDefinition {
@@ -481,7 +481,7 @@ async fn nested_web_search_long_answer_and_title_keep_source_urls() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .nested_web_search(false)
         .build()
         .unwrap();
@@ -555,7 +555,7 @@ async fn mixed_discovery_reuses_server_references_until_compaction_then_client_s
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .client_tool_search()
         .server_tool(ServerToolDefinition::tool_search_bm25())
         .tool(
@@ -662,7 +662,7 @@ async fn nested_search_preserves_sources_across_pause_and_bounds_the_combined_an
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .nested_web_search(false)
         .build()
         .unwrap();
@@ -756,7 +756,7 @@ async fn failed_tool_search_post_hook_does_not_authorize_deferred_effect() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .client_tool_search()
         .tool_hooks(Arc::new(RejectDiscovery))
         .tool(

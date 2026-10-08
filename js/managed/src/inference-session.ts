@@ -37,7 +37,6 @@ export const INFERENCE_KEY_ID_HEADER = "x-inference-key-id";
 export const INFERENCE_MAX_OUTPUT_TOKENS_HEADER = "x-inference-max-output-tokens";
 export const INFERENCE_MAX_BODY_BYTES = 8 * 1024 * 1024;
 export const INFERENCE_MAX_INPUT_BYTES = 32 * 1024;
-export const INFERENCE_MAX_OUTPUT_TOKENS = 4096;
 export const INFERENCE_TIMEOUT_MS = 120_000;
 export const INFERENCE_PROBE_TIMEOUT_MS = 250;
 const STORAGE_KEY = "inference_session_v1";
@@ -85,7 +84,7 @@ const tool = z.union([
 const requestSchema = z.object({
   model: z.string().min(1).max(256).default("auto"), input: z.union([z.string().min(1), z.array(historyItem).min(1).max(1024)]),
   instructions: z.string().optional(), stream: z.boolean().default(false),
-  max_output_tokens: z.number().int().min(1).max(INFERENCE_MAX_OUTPUT_TOKENS).optional(),
+  max_output_tokens: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(),
   reasoning: z.object({ effort: z.enum(["low", "medium", "high"]) }).strict().optional(),
   tools: z.array(tool).max(128).optional(),
   tool_choice: z.union([z.enum(["auto", "none", "required"]),
@@ -110,8 +109,8 @@ export class InferenceRequestError extends Error {
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 
 /** Validate before consuming a routing decision or making any provider call. */
-export function validateInferenceRequest(value: unknown, tokenLimit = INFERENCE_MAX_OUTPUT_TOKENS): InferenceRequest {
-  if (!Number.isInteger(tokenLimit) || tokenLimit < 1 || tokenLimit > INFERENCE_MAX_OUTPUT_TOKENS)
+export function validateInferenceRequest(value: unknown, tokenLimit?: number): InferenceRequest {
+  if (tokenLimit !== undefined && (!Number.isSafeInteger(tokenLimit) || tokenLimit < 1))
     throw new InferenceRequestError("invalid_key_token_limit", 403);
   if (bytes(value) > INFERENCE_MAX_BODY_BYTES) throw new InferenceRequestError("request_too_large", 413);
   const parsed = requestSchema.safeParse(value);
@@ -123,7 +122,7 @@ export function validateInferenceRequest(value: unknown, tokenLimit = INFERENCE_
   if (textBytes + bytes(body.instructions ?? "") > INFERENCE_MAX_INPUT_BYTES)
     throw new InferenceRequestError("input_too_large", 413);
   body.max_output_tokens ??= tokenLimit;
-  if (body.max_output_tokens > tokenLimit) throw new InferenceRequestError("max_output_tokens_exceeds_key_limit");
+  if (tokenLimit !== undefined && body.max_output_tokens !== undefined && body.max_output_tokens > tokenLimit) throw new InferenceRequestError("max_output_tokens_exceeds_key_limit");
   const definitions = new Map((body.tools ?? []).map(t => [t.name, t.type]));
   if (definitions.size !== (body.tools?.length ?? 0)) throw new InferenceRequestError("duplicate_tool_name");
   if (typeof body.tool_choice === "object" && definitions.get(body.tool_choice.name) !== body.tool_choice.type)
@@ -332,7 +331,7 @@ function inferenceErrorResponse(error: unknown, signal: AbortSignal): Response {
 
 /** Standard Responses request: no storage, retained transcript, or account context. */
 export async function executeStatelessInferenceResponse(env: InferenceSessionEnv, rawBody: unknown,
-  maxOutputTokens: number, signal: AbortSignal, origin: InferenceOrigin = unknownOrigin, context: InferenceExecutionContext = { waitUntil }): Promise<Response> {
+  maxOutputTokens: number | undefined, signal: AbortSignal, origin: InferenceOrigin = unknownOrigin, context: InferenceExecutionContext = { waitUntil }): Promise<Response> {
   const controller = new AbortController();
   const abort = () => controller.abort(signal.reason);
   signal.addEventListener("abort", abort, { once: true });
@@ -439,7 +438,7 @@ export class InferenceSessionRuntime {
       return new Response(null, { status: 204 });
     }
     const limitHeader = request.headers.get(INFERENCE_MAX_OUTPUT_TOKENS_HEADER);
-    const limit = limitHeader === null ? INFERENCE_MAX_OUTPUT_TOKENS : /^\d+$/.test(limitHeader) ? Number(limitHeader) : NaN;
+    const limit = limitHeader === null ? undefined : /^\d+$/.test(limitHeader) ? Number(limitHeader) : NaN;
     const input = validateInferenceRequest(await boundedJson(request, signal), limit);
     if (retained.route) assertPinnedRequest(retained.route, input);
     signal.throwIfAborted();

@@ -619,3 +619,17 @@ test("cell completion stops guest timers before a delayed durable store acknowle
   const read = JSON.parse(await runtime.executeCode('text(load("value"));', "delayed-store", "read"));
   assert.ok(JSON.stringify(read.output).includes('"text":"1"'));
 });
+
+test("unbudgeted exec and wait preserve large text and mixed media", async () => {
+  const runtime = createCodeRuntime({});
+  const expected = "世界".repeat(40_000);
+  try {
+    const direct = JSON.parse(await runtime.executeCodeObserved(`text(${JSON.stringify(expected)});`, "large", "exec-large"));
+    assert.ok(outputText(direct.output).includes(expected));
+    const first = JSON.parse(await runtime.executeCodeObserved(`yield_control(); await new Promise(resolve => setTimeout(resolve, 20)); text(${JSON.stringify(expected)}); image({ type: "image", data: "AAAA", mimeType: "image/png" });`, "large", "exec-mixed"));
+    const cellId = outputText(first.output).match(/cell ID ([^\s]+)/)[1];
+    const last = JSON.parse(await runtime.waitCodeObserved(JSON.stringify({ cell_id: cellId }), "large", "wait-large"));
+    assert.ok(outputText(last.output).includes(expected));
+    assert.ok(last.output.some(item => item.type === "input_image"));
+  } finally { runtime.reset(); }
+});

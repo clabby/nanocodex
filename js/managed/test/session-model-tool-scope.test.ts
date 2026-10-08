@@ -58,7 +58,7 @@ describe("managed web search and image tools use the private Session model path"
       expect(request.headers.has("x-nanocodex-model-region")).toBe(false);
     }
     expect(await b.model[0]!.json()).toMatchObject({ id: "s", commands: { search_query: [{ q: "fixture" }] },
-      settings: { allowed_callers: ["direct"], external_web_access: true }, max_output_tokens: 10_000 });
+      settings: { allowed_callers: ["direct"], external_web_access: true } });
   });
 
   it("re-reads ownership per request: owner rotation applies immediately and deletion fails closed without fallback", async () => {

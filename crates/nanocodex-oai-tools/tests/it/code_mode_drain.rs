@@ -201,3 +201,59 @@ async fn cancellation_does_not_require_polling_a_parked_observation() {
         .unwrap();
     }
 }
+
+#[tokio::test]
+async fn output_budgets_are_opt_in_and_large_explicit_budgets_are_preserved() {
+    let _serial = super::TOOL_RUNTIME_TEST_LOCK.lock().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = Tools::builder().build().unwrap();
+    let runtime = ToolRuntime::new_with_tools(workspace.path(), None, None, &tools);
+    let context = ToolContext::new(
+        "fixture",
+        "output-budgets",
+        "output",
+        &[],
+        DEFAULT_TOOL_OUTPUT_TOKENS,
+    );
+    for (pragma, expected_full) in [
+        ("", true),
+        ("// @exec: {\"max_output_tokens\": 400000}\n", true),
+        ("// @exec: {\"max_output_tokens\": 2}\n", false),
+    ] {
+        let result = runtime
+            .execute_code(&format!("{pragma}text('x'.repeat(1200000));"), context)
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result.output).unwrap();
+        assert_eq!(text.contains(&"x".repeat(1200000)), expected_full);
+        assert_eq!(text.contains("tokens truncated"), !expected_full);
+    }
+    for budget in [None, Some(400000), Some(2), Some(0)] {
+        let mut input = json!({"cmd":"head -c 1200000 /dev/zero | tr '\\0' x", "login":false,"yield_time_ms":10000});
+        if let Some(budget) = budget {
+            input["max_output_tokens"] = json!(budget);
+        }
+        let result = runtime
+            .execute_tool(
+                "exec_command",
+                ToolInput::Function(serde_json::value::to_raw_value(&input).unwrap()),
+                context,
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        let value = result.structured_result();
+        let text = value["output"].as_str().unwrap();
+        assert_eq!(
+            text.contains(&"x".repeat(1200000)),
+            budget.is_none() || budget == Some(400000)
+        );
+        assert_eq!(
+            text.contains("tokens truncated"),
+            budget == Some(2) || budget == Some(0)
+        );
+    }
+    eprintln!(
+        "JOURNEY: Code Mode and shell preserve 1,200,000 output bytes with omitted/400,000-token budgets; explicit 2-token and zero-token shell budgets truncate with markers."
+    );
+}

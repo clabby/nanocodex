@@ -710,7 +710,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       const cell = {
         id: `${cellGeneration}:${nextCellId++}`, sessionId, parentCallId, controller: new AbortController(),
         startedAt: performance.now(), content: [], updates: [], completedCalls: [], notifications: [], turn: turns.get(sessionId) ?? 0,
-        budget: options.max_output_tokens ?? 10_000, result: undefined, observing: false,
+        budget: options.max_output_tokens, result: undefined, observing: false,
       };
       cells.set(cell.id, cell);
       if (extras.effectJournal?.observations) {
@@ -778,7 +778,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           const recovered = await observationJournal(() => extras.effectJournal.observations.recover(sessionId, options.cell_id));
           if (recovered !== null) {
             const result = JSON.parse(recovered);
-            result.output = limitCodeOutput(result.output, options.max_tokens ?? 10_000);
+            result.output = limitCodeOutput(result.output, options.max_tokens);
             return JSON.stringify(result);
           }
         }
@@ -803,7 +803,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         cell.terminated = true;
         cell.controller.abort(new Error(CANCELLATION_MESSAGE));
       }
-      return observeCell(cell, observation, options.yield_time_ms ?? 10_000, options.max_tokens ?? 10_000);
+      return observeCell(cell, observation, options.yield_time_ms ?? 10_000, options.max_tokens);
     });
   }
 

@@ -116,7 +116,7 @@ export async function createNodeProcessTools({
   const read = async (record, input, signal, maximumWait = 30_000) => {
     const started = performance.now();
     const wait = integer(input.yield_time_ms, 1_000, 0, maximumWait);
-    const maxBytes = integer(input.max_output_tokens, 10_000, 1, Number.MAX_SAFE_INTEGER) * 4;
+    const maxBytes = integer(input.max_output_tokens, Infinity, 1, Number.MAX_SAFE_INTEGER) * 4;
     if (record.reading)
       throw new Error("A read is already pending for this process.");
     record.reading = true;
@@ -168,7 +168,7 @@ export async function createNodeProcessTools({
       if (input.sandbox_permissions === "require_escalated")
         throw new Error("This Hand does not provide privilege escalation.");
       integer(input.yield_time_ms, 1_000, 0, 30_000);
-      integer(input.max_output_tokens, 10_000, 1, Number.MAX_SAFE_INTEGER);
+      integer(input.max_output_tokens, Infinity, 1, Number.MAX_SAFE_INTEGER);
       if (input.workdir !== undefined && typeof input.workdir !== "string")
         throw new TypeError("workdir must be text");
       collect();
@@ -288,7 +288,7 @@ export async function createNodeProcessTools({
         throw new TypeError("chars must be text");
       const maximumWait = input.chars ? 30_000 : 600_000;
       integer(input.yield_time_ms, 1_000, 0, maximumWait);
-      integer(input.max_output_tokens, 10_000, 1, Number.MAX_SAFE_INTEGER);
+      integer(input.max_output_tokens, Infinity, 1, Number.MAX_SAFE_INTEGER);
       if (record.reading)
         throw new Error("A read is already pending for this process.");
       context.signal?.throwIfAborted();

@@ -7,16 +7,12 @@ use tokio::{
 
 use super::CapturedOutput;
 
-const DEFAULT_MAX_OUTPUT_TOKENS: usize = 10_000;
-const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const BYTES_PER_TOKEN: usize = 4;
 const READ_BUFFER_LENGTH: usize = 8 * 1024;
 const REDACTION: &str = "[REDACTED]";
 
 pub(super) fn effective_token_limit(requested: Option<usize>) -> usize {
-    requested.map_or(DEFAULT_MAX_OUTPUT_TOKENS * BYTES_PER_TOKEN, |value| {
-        value.saturating_mul(BYTES_PER_TOKEN).min(MAX_OUTPUT_BYTES)
-    })
+    requested.map_or(usize::MAX, |value| value.saturating_mul(BYTES_PER_TOKEN))
 }
 
 pub(super) async fn drain(

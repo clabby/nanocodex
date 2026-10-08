@@ -14,8 +14,10 @@ pub use crate::responses::ToolDefinition;
 
 use crate::{ImageDetail, ResponseItem};
 
-/// Default maximum model-visible output budget for one tool call.
-pub const DEFAULT_TOOL_OUTPUT_TOKENS: usize = 10_000;
+/// Unbounded tool output when the caller has not requested a token budget.
+/// `usize::MAX` preserves the existing numeric context API; wire adapters must
+/// omit optional limits for this sentinel.
+pub const DEFAULT_TOOL_OUTPUT_TOKENS: usize = usize::MAX;
 
 /// Model-visible body returned by a tool.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -469,7 +471,8 @@ impl<'a> ToolContext<'a> {
         self.history
     }
 
-    /// Returns the maximum model-visible tool-output budget.
+    /// Returns the requested model-visible tool-output budget, or `usize::MAX`
+    /// when no budget was requested.
     #[must_use]
     pub const fn output_token_budget(self) -> usize {
         self.output_token_budget

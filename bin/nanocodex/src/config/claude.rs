@@ -670,7 +670,6 @@ fn configured_claude_builder(
                 ),
             )
         })
-        .max_tokens(16_384)
         .parallel_tools(false)
         .tool_hooks(profile_guard.clone())
         .tool_hooks(interaction)

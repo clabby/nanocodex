@@ -111,8 +111,12 @@ function searchBody(value: unknown): Record<string, unknown> {
     || !input.commands || typeof input.commands !== "object" || Array.isArray(input.commands)) throw new Error("invalid request");
   const model = input.model ?? "gpt-6.1-sol";
   if (typeof model !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(model)) throw new Error("invalid model");
+  const maxOutputTokens = input.max_output_tokens;
+  if (maxOutputTokens !== undefined && (typeof maxOutputTokens !== "number"
+    || !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 0)) throw new Error("invalid output token budget");
   return { id: input.session_id, model, commands: input.commands,
-    settings: { allowed_callers: ["direct"], external_web_access: true }, max_output_tokens: 10_000 };
+    settings: { allowed_callers: ["direct"], external_web_access: true },
+    ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }) };
 }
 
 async function boundedText(response: Request | Response, limit: number): Promise<string> {

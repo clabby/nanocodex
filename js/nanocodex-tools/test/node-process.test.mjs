@@ -250,7 +250,8 @@ test("large unread output survives completion and drains without truncation or b
     let output = result.output;
     await completed;
     while (result.session_id !== undefined) {
-      result = await runtime.tools[1].handler({ session_id: result.session_id, yield_time_ms: 0, max_output_tokens: 32_000 }, context);
+      result = await runtime.tools[1].handler({ session_id: result.session_id, yield_time_ms: 0 }, context);
+      assert.ok(result.output.length > 40_000, "unbudgeted poll drains beyond the former default");
       output += result.output;
     }
     assert.equal(result.exit_code, 0);
@@ -356,7 +357,7 @@ test("invalid long waits do not write input or consume a retained process", { ti
     await assert.rejects(exec.handler({ cmd: "touch forbidden", yield_time_ms: 30_001 }, context), /integer/);
     await assert.rejects(access(join(workspace, "forbidden")), { code: "ENOENT" });
     const started = await exec.handler({ cmd: 'read value; printf "%s" "$value"', yield_time_ms: 0 }, context);
-    await assert.rejects(stdin.handler({ session_id: started.session_id, yield_time_ms: 300_001 }, context), /integer/);
+    await assert.rejects(stdin.handler({ session_id: started.session_id, yield_time_ms: 600_001 }, context), /integer/);
     await assert.rejects(stdin.handler({ session_id: started.session_id, chars: "forbidden\n", yield_time_ms: 30_001 }, context), /integer/);
     const finished = await stdin.handler({ session_id: started.session_id, chars: "accepted\n", yield_time_ms: 1_000 }, context);
     assert.equal(finished.output, "accepted");
@@ -388,4 +389,16 @@ test("a cancelled long poll promptly releases its timer and process", { timeout:
     await runtime.close();
     await rm(workspace, { recursive: true });
   }
+});
+
+test("unbudgeted native exec returns output beyond the former default", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "nanocodex-unbudgeted-"));
+  const runtime = await createNodeProcessTools({ workspace });
+  const expected = "x".repeat(200_000);
+  await writeFile(join(workspace, "output.txt"), expected);
+  try {
+    const result = await runtime.tools[0].handler({ cmd: "cat output.txt", yield_time_ms: 1_000 }, { sessionId: "owner" });
+    assert.equal(result.output, expected);
+    assert.equal(result.exit_code, 0);
+  } finally { await runtime.close(); await rm(workspace, { recursive: true }); }
 });

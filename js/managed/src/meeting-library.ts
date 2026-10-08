@@ -172,9 +172,9 @@ export async function routeMeetingLibrary(request: Request, env: MeetingLibraryE
       for (const [index, chunk] of chunks.entries()) {
         signal.throwIfAborted();
         const response = await executeStatelessInferenceResponse({ ...env, AI: env.AI }, {
-          model: `${OSS_MODEL}:low`, stream: false, max_output_tokens: 600, instructions,
+          model: `${OSS_MODEL}:low`, stream: false, instructions,
           input: `Source chunk ${index + 1} of ${chunks.length} (all source chunks are processed in order).\nPrior recap:\n${result}\nNext source chunk:\n${chunk}`,
-        }, 600, signal);
+        }, undefined, signal);
         if (!response.ok) throw new Error("inference_unavailable");
         const value = await response.json() as { status?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
         const next = value.output?.flatMap(o => o.content ?? []).filter(c => c.type === "output_text").map(c => c.text ?? "").join("\n").trim();

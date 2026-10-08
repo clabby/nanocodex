@@ -26,12 +26,12 @@ export interface ProviderProbeAiBinding {
   run(model: string, input: {
     messages: { role: "user"; content: string }[];
     stream: true;
-    max_completion_tokens: number;
+    max_completion_tokens?: number;
     reasoning_effort?: string;
   } | {
     input: string;
     stream: true;
-    max_output_tokens: number;
+    max_output_tokens?: number;
     reasoning?: { effort: string };
   }, options?: { signal?: AbortSignal }): Promise<unknown>;
 }
@@ -232,9 +232,9 @@ export async function runProviderProbes(options: ProviderProbeOptions): Promise<
   if (options.enabled !== true || !integerInRange(options.dailyRequestLimit, 1, 4096)) return 0;
   const maxTargets = options.maxTargetsPerRun ?? 8;
   const startIndex = options.startIndex ?? 0;
-  const maxTokens = options.maxCompletionTokens ?? 128;
+  const maxTokens = options.maxCompletionTokens;
   if (!integerInRange(maxTargets, 1, 45) || !integerInRange(startIndex, 0, Number.MAX_SAFE_INTEGER)
-    || !integerInRange(maxTokens, 16, 2048)) return 0;
+    || (maxTokens !== undefined && !integerInRange(maxTokens, 1, Number.MAX_SAFE_INTEGER))) return 0;
   const targets = options.targets.filter(target => runnable(target, options.ai));
   const wallNow = options.now ?? Date.now;
   const monotonicNow = options.monotonicNow ?? (() => performance.now());
@@ -271,11 +271,11 @@ export async function runProviderProbes(options: ProviderProbeOptions): Promise<
       const messages: { role: "user"; content: string }[] = [{ role: "user",
         content: `${crypto.randomUUID()} ${PROVIDER_PROBE_PROMPT_VERSION}. Reply with only OK.` }];
       let body: ReadableStream<Uint8Array>;
-      const responsesPayload = { input: messages[0].content, stream: true as const, max_output_tokens: maxTokens,
+      const responsesPayload = { input: messages[0].content, stream: true as const, ...(maxTokens === undefined ? {} : { max_output_tokens: maxTokens }),
         ...(target.effort === null ? {} : { reasoning: { effort: target.effort } }) };
       if (target.backend === "workers_ai" || (target.backend === "cloudflare" && target.accountId === undefined)) {
         const payload = target.backend === "cloudflare" ? responsesPayload
-          : { messages, stream: true as const, max_completion_tokens: maxTokens,
+          : { messages, stream: true as const, ...(maxTokens === undefined ? {} : { max_completion_tokens: maxTokens }),
             ...(target.effort === null ? {} : { reasoning_effort: target.effort }) };
         const request = options.ai!.run(target.model, payload, { signal: controller.signal });
         // A binding may ignore abort while obtaining a stream. Cancel late arrivals.
@@ -290,9 +290,9 @@ export async function runProviderProbes(options: ProviderProbeOptions): Promise<
         const payload = target.backend === "cloudflare" ? { model: target.model, ...responsesPayload }
           : { model: target.model, messages, stream: true,
           ...(target.backend === "openrouter"
-            ? { max_tokens: maxTokens, provider: { require_parameters: true },
+            ? { ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }), provider: { require_parameters: true },
               ...(target.effort === null ? {} : { reasoning: { effort: target.effort, exclude: false } }) }
-            : { max_completion_tokens: maxTokens,
+            : { ...(maxTokens === undefined ? {} : { max_completion_tokens: maxTokens }),
               ...(target.effort === null ? {} : { reasoning_effort: target.effort }) }) };
         const endpoint = target.backend === "cloudflare"
           ? `https://api.cloudflare.com/client/v4/accounts/${target.accountId}/ai/v1/responses`

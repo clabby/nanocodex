@@ -255,6 +255,24 @@ impl BuilderBackend for Claude {
     }
 }
 
+// Messages requires max_tokens. Use the documented standard Messages maxima,
+// not application response-length policy. Unknown/custom models require a caller
+// budget rather than guessing a protocol limit. See:
+// https://platform.claude.com/docs/en/models/overview
+// https://platform.claude.com/docs/en/models/sonnet-4-6/overview
+// https://platform.claude.com/docs/en/models/haiku-4-5/overview
+fn model_max_tokens(model: &str) -> Option<u32> {
+    match model {
+        "claude-opus-5-5" | "claude-fable-5-1" | "claude-sonnet-5-5"
+        | "claude-haiku-5-5" | "claude-opus-5" | "claude-sonnet-5"
+        | "claude-opus-4-6" | "claude-sonnet-4-6" => Some(128_000),
+        "claude-haiku-4-5" | "claude-haiku-4-5-20251001"
+        | "claude-sonnet-4-5" | "claude-sonnet-4-5-20250929"
+        | "claude-opus-4-5" | "claude-opus-4-5-20251101" => Some(64_000),
+        _ => None,
+    }
+}
+
 type WorkspaceResolver = Arc<dyn Fn(&str) -> String + Send + Sync>;
 type SubagentTypeResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type ChildWorkspaceInit = Arc<dyn Fn(&str, &str) -> Result<()> + Send + Sync>;
@@ -266,7 +284,7 @@ pub struct ClaudeBuilder {
     subagent_type_resolver: Option<SubagentTypeResolver>,
     claude: Claude,
     session_id: Option<String>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     effort: Option<crate::Effort>,
     automatic_cache: bool,
     cache_one_hour: bool,
@@ -311,7 +329,7 @@ impl ClaudeBuilder {
             subagent_type_resolver: None,
             claude,
             session_id: None,
-            max_tokens: 4096,
+            max_tokens: None,
             effort: None,
             automatic_cache: false,
             cache_one_hour: false,
@@ -435,7 +453,7 @@ impl ClaudeBuilder {
         if stored.version != 1
             || stored.model.parse::<HarnessModel>().ok() != Some(model)
             || !model.supports_thinking(thinking)
-            || stored.max_tokens == 0
+            || stored.max_tokens == Some(0)
             || stored.context_window_tokens == 0
         {
             return Err(unsupported("invalid Claude native checkpoint policy"));
@@ -469,7 +487,7 @@ impl ClaudeBuilder {
     }
     /// Sets the Messages output-token limit.
     pub const fn max_tokens(mut self, max_tokens: u32) -> Self {
-        self.max_tokens = max_tokens;
+        self.max_tokens = Some(max_tokens);
         self
     }
     /// Sets the model's adaptive-thinking effort using output_config.effort.
@@ -835,6 +853,7 @@ impl ClaudeBuilder {
     pub fn nested_web_search(mut self, deferred: bool) -> Self {
         let client = self.claude.client.clone();
         let model = self.claude.model.clone();
+        let max_tokens = self.max_tokens;
         let definition = ToolDefinition {
             name: "WebSearch".into(),
             description: "Search public web sources and return attributed results.".into(),
@@ -849,7 +868,7 @@ impl ClaudeBuilder {
         self = self.tool(definition, move |input| {
             let client = client.clone();
             let model = model.clone();
-            async move { nested_web_search(&client, &model, input).await }
+            async move { nested_web_search(&client, &model, max_tokens, input).await }
         });
         self
     }
@@ -901,11 +920,14 @@ impl ClaudeBuilder {
         }
 
         if self.claude.model.trim().is_empty()
-            || self.max_tokens == 0
+            || self.max_tokens == Some(0)
             || self.context_window_tokens == 0
             || self.auto_compact_window_tokens == Some(0)
         {
             return Err(unsupported("Claude model and max_tokens must be nonempty"));
+        }
+        if self.max_tokens.is_none() && model_max_tokens(&self.claude.model).is_none() {
+            return Err(unsupported("Unknown Claude model: configure max_tokens explicitly"));
         }
         if self.system_blocks.as_ref().is_some_and(|blocks| {
             blocks.is_empty()
@@ -1198,6 +1220,7 @@ fn host_reply(
 async fn nested_web_search(
     client: &ClaudeClient,
     model: &str,
+    max_tokens: Option<u32>,
     input: Value,
 ) -> std::result::Result<String, String> {
     const MAX_OUTPUT: usize = 32 * 1024;
@@ -1289,7 +1312,8 @@ async fn nested_web_search(
     // without fabricating client tool_result messages.
     for _ in 0..4 {
         let mut request = MessagesRequest {
-            model: model.into(), max_tokens: 4096, cache_control: None,
+            model: model.into(), max_tokens: max_tokens.or_else(|| model_max_tokens(model))
+                .ok_or("Unknown Claude model: configure max_tokens explicitly")?, cache_control: None,
             output_config: None, speed: None,
             thinking: None, context_management: None, diagnostics: None,
             tool_choice: Some(json!({"type":"auto"})),
@@ -1435,7 +1459,7 @@ async fn web_fetch_with_source<P: nanocodex_claude_tools::web::ApprovedWebFetchS
     // Retrieved content is data, never authorization for actions or credentials.
     let mut request = MessagesRequest {
         model: "claude-haiku-4-5-20251001".into(),
-        max_tokens: 4096,
+        max_tokens: model_max_tokens("claude-haiku-4-5-20251001").expect("known model"),
         cache_control: None,
         output_config: None,
         speed: None,
@@ -1771,7 +1795,7 @@ const fn thinking_effort(thinking: Thinking) -> Option<crate::Effort> {
 struct NativeChildState {
     version: u32,
     model: String,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     effort: Option<crate::Effort>,
     adaptive_thinking: bool,
     automatic_cache: bool,
@@ -2011,7 +2035,7 @@ struct State {
     session_id: String,
     client: ClaudeClient,
     model: std::sync::RwLock<String>,
-    max_tokens: u32,
+    max_tokens: Option<u32>,
     effort: std::sync::RwLock<Option<crate::Effort>>,
     automatic_cache: bool,
     cache_one_hour: bool,
@@ -2301,7 +2325,9 @@ impl State {
     fn request_template(&self, speed: Option<crate::Speed>) -> MessagesRequest {
         MessagesRequest {
             model: self.model(),
-            max_tokens: self.max_tokens,
+            max_tokens: self.max_tokens.unwrap_or_else(|| {
+                model_max_tokens(&self.model()).expect("model validated by builder")
+            }),
             cache_control: self.automatic_cache.then(|| crate::CacheControl {
                 kind: crate::CacheType::Ephemeral,
                 ttl: self.cache_one_hour.then_some(crate::CacheTtl::OneHour),
@@ -2883,9 +2909,8 @@ impl State {
         let mut template = cursor.template.clone();
         if matches!(mode, CompactionMode::ContextRecovery) {
             // Exhaustion leaves only the earlier prefix available to summarize.
-            // Reserve a bounded text answer independently of the task's output
-            // and thinking budgets; rejection leaves the original state intact.
-            template.max_tokens = template.max_tokens.min(4096);
+            // Preserve the caller's output budget (or model maximum); rejection
+            // leaves the original state intact.
             // Some current models reject `disabled`; keep their lowest
             // documented thinking setting instead. Older and unknown models
             // retain the text-only request.
@@ -4891,6 +4916,7 @@ mod session_identity_tests {
             "synthetic-test-model",
         );
         let (agent, _events) = Nanocodex::builder(backend.clone())
+            .max_tokens(128_000)
             .session_id("host-session")
             .build()
             .expect("explicit identity");

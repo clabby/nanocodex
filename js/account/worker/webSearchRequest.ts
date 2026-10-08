@@ -15,13 +15,13 @@ export function webSearchRequest(decoded: Record<string, unknown>): Record<strin
   if (decoded.input !== undefined && !Array.isArray(decoded.input)) {
     throw new Error("input must be an array");
   }
-  const maxOutputTokens = decoded.max_output_tokens ?? 10_000;
-  if (typeof maxOutputTokens !== "number" || !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 0) {
+  const maxOutputTokens = decoded.max_output_tokens;
+  if (maxOutputTokens !== undefined && (typeof maxOutputTokens !== "number" || !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 0)) {
     throw new Error("invalid output token budget");
   }
   return {
     id: sessionId, model, input: decoded.input, commands,
     settings: { allowed_callers: ["direct"], external_web_access: true },
-    max_output_tokens: maxOutputTokens,
+    ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }),
   };
 }

@@ -43,7 +43,6 @@ describe("Cloudflare sandbox tools", () => {
     await expect(tools.exec_command!.handler({
       cmd: command,
       yield_time_ms: 120_001,
-      max_output_tokens: 100_001,
     }, context)).resolves.toMatchObject({
       output,
       exit_code: 0,

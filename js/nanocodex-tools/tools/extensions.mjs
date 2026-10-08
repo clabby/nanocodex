@@ -116,8 +116,8 @@ export function fileMemoriesBackend(store) {
         }
       }
       const selected = original.slice(start, end);
-      const content = truncateMemoryText(selected, 20000);
-      return { path: input.path, start_line_number: startLine, content, truncated: end < original.length || selected !== content };
+      const content = selected;
+      return { path: input.path, start_line_number: startLine, content, truncated: end < original.length };
     },
     async search(input) {
       validateExtensionInput('memories__search', input);

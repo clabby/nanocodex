@@ -97,7 +97,7 @@ async fn calls_outside_the_catalog_get_paired_errors_and_the_turn_continues() {
     let (agent, _) = Nanocodex::builder(Claude::new(
         ClaudeClient::new(reqwest::Client::new(), endpoint, "synthetic"),
         "test",
-    ))
+    )).max_tokens(128_000)
     .tool(
         ToolDefinition {
             name: "exec".into(),
@@ -445,7 +445,7 @@ async fn failed_compaction_and_cancelled_turn_keep_previous_context() {
         format!("http://{addr}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .build()
         .unwrap();
     agent.prompt("first").await.unwrap().result().await.unwrap();
@@ -528,7 +528,7 @@ async fn auto_compacts_at_usage_threshold_before_next_prompt() {
         format!("http://{addr}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .context_window_tokens(10)
         .build()
         .unwrap();
@@ -687,7 +687,7 @@ async fn independent_tools_can_execute_concurrently_but_results_remain_one_order
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .parallel_tools(true) // caller asserts the registered tool invocations are independent
         .tool(
             ToolDefinition {
@@ -813,7 +813,7 @@ async fn claude_client_tool_can_return_multimodal_blocks_without_codex_result_sh
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent,_)=Nanocodex::builder(Claude::new(client,"test"))
+    let (agent,_)=Nanocodex::builder(Claude::new(client,"test")).max_tokens(128_000)
         .tool_blocks(ToolDefinition { name:"ReadImage".into(), description:"Test image".into(), input_schema:json!({"type":"object"}),strict:None,defer_loading:false }, |_| async {
             Ok(vec![json!({"type":"text","text":"image follows"}),json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":png(1, 1)}})])
         }).build().unwrap();
@@ -901,7 +901,7 @@ async fn tool_images_fit_many_image_limit_before_history_crosses_twenty() {
         defer_loading: false,
     };
     let image = |data: String| json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":data}});
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .tool_blocks(capture, move |input| {
             let blocks = if input["batch"] == 1 {
                 vec![
@@ -1029,7 +1029,7 @@ async fn cancelled_tool_batch_retains_completed_and_unknown_results(parallel: bo
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .parallel_tools(parallel)
         .tool(
             ToolDefinition {
@@ -1393,7 +1393,7 @@ async fn cancellation_at_completed_handler_boundary(parallel: bool) {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .parallel_tools(parallel)
         .tool(
             ToolDefinition {
@@ -1516,7 +1516,7 @@ async fn queued_ephemeral_cancellation_retires_without_aborting_active_model_or_
             format!("http://{address}/v1/messages"),
             "synthetic",
         );
-        let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+        let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
             .tool(
                 ToolDefinition {
                     name: "effect".into(),
@@ -1716,7 +1716,7 @@ async fn response_usage_arrives_before_tool_completion_and_excludes_summary() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .tool(
             ToolDefinition {
                 name: "hold".into(),
@@ -1876,7 +1876,7 @@ async fn steering_acknowledges_consumption_at_tool_and_terminal_boundaries() {
             format!("http://{address}/v1/messages"),
             "synthetic",
         );
-        let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+        let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
             .tool(
                 ToolDefinition {
                     name: "hold".into(),
@@ -2009,7 +2009,7 @@ async fn streamed_text_and_final_message_share_one_response_identity() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .tool(
             ToolDefinition {
                 name: "lookup".into(),
@@ -2459,7 +2459,7 @@ async fn truncated_complete_tool_block_is_never_dispatched_or_finalized() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, mut events) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .tool(
             ToolDefinition {
                 name: "mutate".into(),
@@ -2607,7 +2607,7 @@ async fn parallel_safe_tools_overlap_only_in_runs_and_unsafe_calls_stay_ordered(
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .parallel_safe_tools(["read"])
         .tool_with_context(definition("read"), handler("read"))
         .tool_with_context(definition("write"), handler("write"))

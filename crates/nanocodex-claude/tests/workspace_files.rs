@@ -52,7 +52,7 @@ async fn explicitly_opted_in_claude_tools_never_expose_codex_catalog() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .workspace_files(files)
         .build()
         .unwrap();
@@ -114,7 +114,7 @@ async fn completed_file_write_survives_rejected_followup_in_session() {
         format!("http://{addr}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .workspace_files(files)
         .build()
         .unwrap();
@@ -189,7 +189,7 @@ async fn opt_in_tasks_notebook_and_sandbox_bash_route_without_host_shell() {
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .tasks(tasks)
         .notebook(notebook)
         .sandbox_bash(bash)
@@ -281,7 +281,7 @@ async fn native_workspace_read_media_and_scoped_context_reach_messages_transport
         format!("http://{address}/v1/messages"),
         "synthetic",
     );
-    let (agent, _) = Nanocodex::builder(Claude::new(client, "test"))
+    let (agent, _) = Nanocodex::builder(Claude::new(client, "test")).max_tokens(128_000)
         .workspace_files(Arc::new(ClaudeWorkspaceFiles::new(dir.path()).unwrap()))
         .build()
         .unwrap();
