@@ -68,10 +68,15 @@ export const tiers = [
 // typecheck; Wrangler bundles its source directly.
 export const bundleOnly = {
   '@nanocodex/connect-api': null,
-  '@nanocodex/connect-dialog': ['--filter', '@nanocodex/connect-dialog', 'exec', 'vite', 'build'],
-  '@nanocodex/connect-playground': ['--filter', '@nanocodex/connect-playground', 'exec', 'vite', 'build'],
-  'nanocodex-web': ['--filter', 'nanocodex-web', 'exec', 'vite', 'build'],
+  '@nanocodex/connect-dialog': 'js/connect-dialog',
+  '@nanocodex/connect-playground': 'js/connect-playground',
+  'nanocodex-web': 'js/account',
 };
+// Invoke tool binaries directly. `pnpm exec`/`pnpm --filter exec` first verifies
+// dependencies, re-installs against the whole workspace and checks every
+// lockfile entry against the registry (~17s per deploy).
+export const turboBuild = targets => ['node_modules/.bin/turbo', ['run','build','--only',...targets.flatMap(name=>['--filter',name])]];
+export const viteBuild = directory => [`${directory}/node_modules/.bin/vite`, ['build', directory]];
 export function buildSelected(plan, run=execFileSync, completedTargets=new Set()) {
   const targets=[...new Set(plan.selected.flatMap(name=>workerSpecs[name].buildTargets ?? []))];
   for (const [index, tier] of tiers.entries()) {
@@ -79,12 +84,12 @@ export function buildSelected(plan, run=execFileSync, completedTargets=new Set()
     if (!selected.length) continue;
     if (index === tiers.length - 1) {
       for (const name of selected) {
-        if (bundleOnly[name]) run('pnpm', bundleOnly[name], {stdio:'inherit'});
+        if (bundleOnly[name]) run(...viteBuild(bundleOnly[name]), {stdio:'inherit'});
         completedTargets.add(name);
       }
       continue;
     }
-    run('pnpm', ['exec','turbo','run','build','--only',...selected.flatMap(name=>['--filter',name])], {stdio:'inherit'});
+    run(...turboBuild(selected), {stdio:'inherit'});
     for (const name of selected) completedTargets.add(name);
   }
   if(plan.selected.includes('managed')){
@@ -114,10 +119,10 @@ export function startBuilds(plan, {cwd=process.cwd(), env=process.env, launch=sp
     if(!selected.length)continue;
     const after=previous;
     if(index===tiers.length-1){
-      for(const name of selected)ready.set(name,after.then(()=>bundleOnly[name]&&run('pnpm',bundleOnly[name])).then(()=>completedTargets.add(name)));
+      for(const name of selected)ready.set(name,after.then(()=>bundleOnly[name]&&run(...viteBuild(bundleOnly[name]))).then(()=>completedTargets.add(name)));
       continue;
     }
-    previous=after.then(()=>run('pnpm',['exec','turbo','run','build','--only',...selected.flatMap(name=>['--filter',name])]))
+    previous=after.then(()=>run(...turboBuild(selected)))
       .then(()=>{for(const name of selected)completedTargets.add(name);});
     for(const name of selected)ready.set(name,previous);
   }

@@ -36,10 +36,14 @@ test('release phases reuse successfully completed targets and never cache failed
   for (const selected of [['egress'], ['managed'], ['account']]) {
     buildSelected({ selected }, (command, args) => calls.push([command, args]), completed);
   }
-  const filters = calls.filter(([command]) => command === 'pnpm')
+  const filters = calls.filter(([command]) => command === 'node_modules/.bin/turbo')
     .flatMap(([, args]) => args.filter((_, i) => args[i - 1] === '--filter'));
   assert.equal(new Set(filters).size, filters.length);
-  assert.ok(filters.indexOf('nanocodex') < filters.indexOf('nanocodex-web'));
+  // Leaf apps bundle with their own vite binary after the library tiers.
+  const wasmTier = calls.findIndex(([, args]) => args.includes('nanocodex'));
+  const web = calls.findIndex(([command, args]) => command === 'js/account/node_modules/.bin/vite' && args.join(' ') === 'build js/account');
+  assert.ok(wasmTier >= 0 && wasmTier < web);
+  assert.ok(!calls.some(([command]) => command === 'pnpm'), 'builds never go through pnpm');
   assert.deepEqual(calls.filter(([, args]) => args[0]?.startsWith('js/managed/scripts/')), [
     [process.execPath, ['js/managed/scripts/prepare-code-evaluator.mjs']],
     [process.execPath, ['js/managed/scripts/prepare-just-bash-lazy.mjs']],
@@ -91,8 +95,8 @@ test('background builds let early phases deploy while leaf apps bundle, and surf
   assert.ok(completed.has('nanocodex') && !completed.has('nanocodex-web'));
   await finish('nanocodex-connect-ui');
   // Leaf apps only bundle: no typecheck or turbo build script.
-  assert.ok(started.some(args => args === '--filter nanocodex-web exec vite build'));
-  await finish('nanocodex-web', 1);
+  assert.ok(started.some(args => args === 'build js/account'));
+  await finish('js/account', 1);
   await assert.rejects(account, /Build step failed/);
   assert.ok(!completed.has('nanocodex-web'));
 });

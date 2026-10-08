@@ -195,7 +195,7 @@ test('managed uploads before unrelated Astra and account builds without duplicat
     ...options,
     run(command, args) {
       f.events.push(['build', args.join(' ')]);
-      if (command === 'pnpm') targets.push(...args.filter((_, i) => args[i - 1] === '--filter'));
+      if (command === 'node_modules/.bin/turbo') targets.push(...args.filter((_, i) => args[i - 1] === '--filter'));
     },
     managed: async () => f.events.push(['config', 'managed']),
     account: async () => f.events.push(['config', 'account']),
@@ -204,7 +204,7 @@ test('managed uploads before unrelated Astra and account builds without duplicat
   const managed = f.events.findIndex(row => row[0] === 'success' && row[1] === 'managed');
   const astraInstall = f.events.findIndex(row => row[0] === 'build' && row[1].startsWith('ci --prefix examples/astra-mpp-trial'));
   const astra = f.events.findIndex(row => row[0] === 'build' && row[1].includes('build:client'));
-  const account = f.events.findIndex(row => row[0] === 'build' && row[1].includes('nanocodex-web'));
+  const account = f.events.findIndex(row => row[0] === 'build' && row[1] === 'build js/account');
   assert.ok(managed >= 0 && managed < astraInstall && astraInstall < astra && astra < account);
   assert.ok(account < f.events.findIndex(row => row[0] === 'config' && row[1] === 'account'));
   assert.equal(new Set(targets).size, targets.length);
@@ -253,7 +253,7 @@ test('phase builds strip deployment-only secrets and configure images after thei
       for (const key of ['ASTRA_MANAGED_API_KEY', 'ASTRA_MPP_SECRET', 'TEMPO_API_KEY']) assert.ok(!Object.hasOwn(options.env, key));
     },
     managed: async options => { assert.equal(options.requireCurrent, true); configs.push('managed'); },
-    account: async () => { assert.ok(calls.some(([, args]) => args.includes('nanocodex-web'))); configs.push('account'); },
+    account: async () => { assert.ok(calls.some(([, args]) => args.includes('js/account'))); configs.push('account'); },
   });
   assert.deepEqual(configs, ['managed', 'account']);
   assert.equal(env.ASTRA_MANAGED_API_KEY, 'synthetic-api');
