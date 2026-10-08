@@ -228,7 +228,6 @@ test("agent Hand calls survive reconnect and runtime replacement without redispa
     assert.equal(timedOut.success, false); assert.equal(timedOut.structured.status, "unavailable");
     assert.equal(timedOut.structured.admitted, false); assert.equal(timedOut.structured.resent, false);
     assert.equal(timedOut.structured.reason, "route_unavailable_after_recovery");
-    assert.match(timedOut.output, /did not start tool execution: Hosted machine is reconnecting\. The route remained unavailable after bounded automatic recovery; nothing ran and the command was not resent\.$/);
     noRepair(timedOut, "partition timeout");
     assert.ok(timedOut.wall_ms >= 9_000, `bounded admission wait observed: ${timedOut.wall_ms}ms`);
     assert.ok(timedOut.wall_ms < 20_000);

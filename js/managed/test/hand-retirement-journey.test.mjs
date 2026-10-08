@@ -27,7 +27,7 @@ const team = "00000000-0000-7000-8000-000000000074";
 const machine = "synthetic-account-hand";
 const legacyMachine = "synthetic-legacy-workspace-hand";
 const command = "pnpm --filter nanocodex-managed-service test:hand-retirement";
-const baselineRef = process.env.NANOCODEX_RETIREMENT_BASELINE ?? "f8a2b451dabba74cff003d6ec54d32cb06fd113bf";
+const baselineRef = process.env.NANOCODEX_RETIREMENT_BASELINE ?? "f8a2b451dabba74cff003d6ec54d32cb06fd113b";
 const scripts = {
   START: `
     const started=await tools.exec_command({cmd:"while [ ! -f legacy.go ]; do sleep 0.05; done; printf LEGACY_PINNED_DONE",workdir:"/${legacyMachine}",shell:"/bin/sh",login:false,yield_time_ms:1});

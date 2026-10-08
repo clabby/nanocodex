@@ -38,7 +38,9 @@ const scripts = {
     text(await tools.mcp__cua_repl__js({workdir:"/${machine}",code:"UPSTREAM_OK"}));
     text(await tools.mcp__cua_repl__js_reset({workdir:"/${machine}"}));`,
   PREFERRED: `${discovery} text(await tools.mcp__cua_repl__js({workdir:"/${machine}",code:"PREFERRED_OK"}));`,
-  PINNED_UPSTREAM: `${discovery} await new Promise(resolve=>setTimeout(resolve,3000)); ${discovery}
+  // Keep this synthetic model turn open through the bounded reconnect wait.
+  PINNED_UPSTREAM: `// @exec: {"yield_time_ms": 20000}
+${discovery} await new Promise(resolve=>setTimeout(resolve,3000)); ${discovery}
     try { text(await tools.mcp__cua_repl__js({workdir:"/${machine}",code:"MUST_NOT_RETARGET"})); } catch(error) { text({error:error.message}); }`,
   SCREEN: `${discovery} text(await tools.mcp__cua_repl__js({workdir:"/${machine}",action:"observe"}));`,
   BAD_SCROLL: `try { text(await tools.mcp__cua_repl__js({workdir:"/${machine}",action:"scroll",deltaY:120})); } catch(error) { text({error:error.message}); }`,
@@ -183,12 +185,12 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
       const id = `00000000-0000-7000-8000-${String(turnNumber++).padStart(12, "0")}`;
       const accepted = await request(`/v1/agents/${thread}/turns`, { method: "POST", headers: extraHeaders, body: JSON.stringify({ id, input: `CUA_${scenario}` }) });
       assert.equal(accepted.status, 202, JSON.stringify(accepted));
-      return async () => waitFor(async () => {
+      return async (completionTimeout = 10_000) => waitFor(async () => {
         const turn = await request(`/v1/agents/${thread}/turns/${accepted.value.turn_id}`);
         assert.equal(turn.status, 200, JSON.stringify(turn));
         assert.ok(!["failed", "cancelled"].includes(turn.value.state), JSON.stringify(turn));
         return turn.value.state === "completed" ? turn.value : undefined;
-      }, `${scenario} turn completion`);
+      }, `${scenario} turn completion`, completionTimeout);
     };
     const runTurn = async (scenario, extraHeaders) => (await startTurn(scenario, extraHeaders))();
     const callFrames = () => wire.filter(row => row.direction === "broker" && row.frame.type === "call" && !(row.frame.name === "mcp__cua_repl__js" && Object.keys(row.frame.input).length === 0));
@@ -344,7 +346,9 @@ test("managed CUA cells prefer live upstream, pin routes, and recover screen fal
     await waitFor(async () => (await snapshot()).machines.find(entry => entry.machine.id === machine)?.online === false,
       "upstream disconnect visible in account catalog");
     assert.equal(stages("PINNED_UPSTREAM", "namespace.route").length, 1, "disconnect must precede the old cell's second discovery");
-    const pinned = await pinnedDone();
+    // The fixed action waits at most 10s for its exact runtime to reconnect,
+    // after the scenario's 3s pause; it must never move to the fallback screen.
+    const pinned = await pinnedDone(16_000);
     assert.deepEqual(stages("PINNED_UPSTREAM", "namespace.invoke").map(row => [row.call_id, row.outcome]), [
       ["call_cua_PINNED_UPSTREAM/code-1", "ok"],
       ["call_cua_PINNED_UPSTREAM/code-2", "ok"],

@@ -37,7 +37,7 @@ scripts.MIXED = `
 scripts.RECONNECT = `
   text(await tools.exec_command({cmd:"printf PINNED_LOCAL",workdir:"/${localMachine}",shell:"/bin/sh",login:false}));
   text(await tools.exec_command({cmd:"printf DISCOVERED_ACCOUNT",workdir:"/${machine}",shell:"/bin/sh",login:false}));
-  try { const result=await tools.exec_command({cmd:"printf WRONG_GENERATION",workdir:"/${localMachine}",shell:"/bin/sh",login:false}); text(result); }
+  try { const result=await tools.exec_command({cmd:"printf REFRESHED_COMMAND",workdir:"/${localMachine}",shell:"/bin/sh",login:false}); text(result); }
   catch(error) { text({stale_route:error.message}); }
 `;
 scripts.RECOVER = scripts.LOCAL;
@@ -247,8 +247,13 @@ test("fresh shipped Code Mode cells prepare selected routes without changing dis
     await localAttachment.close();localAttachment=connectLocal();assert.equal((await localAttachment.connect()).connected,true);
     assert.equal((await request("/account-tools/__fixture",{method:"POST",body:JSON.stringify({delay_ms:0})})).status,204);
     const reconnected=await reconnectTurn;
-    assert.match(JSON.stringify(reconnected.turn),/stale_route/);
-    assert.doesNotMatch(JSON.stringify(reconnected.turn),/WRONG_GENERATION/);
+    // This later command was never admitted on the old runtime. Recovery may
+    // refresh the same physical Hand, while admitted commands/processes stay pinned.
+    assert.match(JSON.stringify(reconnected.turn),/REFRESHED_COMMAND/);
+    assert.doesNotMatch(JSON.stringify(reconnected.turn),/stale_route/);
+    assert.equal(wire.filter(row=>row.direction==='local-broker' && row.frame.type==='call'
+      && row.frame.input?.cmd==='printf REFRESHED_COMMAND').length,1,
+      'a fresh command through a stale cell executes exactly once on the same Hand');
     const recovered=await runTurn("RECOVER");assert.match(JSON.stringify(recovered.turn),/LOCAL_INDEPENDENT/);
     }
     const excluded=await runTurn("EXCLUDED");
