@@ -2725,8 +2725,14 @@ async function hasRequestPayload(request: Request): Promise<boolean> {
 // the credential cache window; public catalog reads stay live and refresh it.
 const CLAUDE_MODELS_CACHE_HEADER = "x-nanocodex-catalog-cache";
 async function handleClaudeModels(env: EgressEnv, userId: string, allowCached: boolean): Promise<Response> {
-  const cached = allowCached ? cacheGet(caches(env).claudeModels, userId) : undefined;
-  if (cached) return json({ models: cached, has_more: false }, 200);
+  if (allowCached) {
+    const cached = cacheGet(caches(env).claudeModels, userId)
+      ?? await userBroker(env, userId).readClaudeModels().catch(() => null) ?? undefined;
+    if (cached) {
+      cachePut(caches(env).claudeModels, userId, cached, CREDENTIAL_CACHE_MS);
+      return json({ models: cached, has_more: false }, 200);
+    }
+  }
   try {
     let result = await resolvePlainClaudeCredential(env, userId);
     if (result.status !== 200 || !result.credential) return jsonError(409, "claude_login_required");
@@ -2780,6 +2786,7 @@ async function handleClaudeModels(env: EgressEnv, userId: string, allowCached: b
           if (secrets.some(secret => secret && model.display_name.includes(secret))) model.display_name = model.id;
         }
         cachePut(caches(env).claudeModels, userId, rows, CREDENTIAL_CACHE_MS);
+        await userBroker(env, userId).storeClaudeModels(rows, CREDENTIAL_CACHE_MS).catch(() => undefined);
         return json({ models: rows, has_more: false }, 200);
       }
       const last = value.data[value.data.length - 1];

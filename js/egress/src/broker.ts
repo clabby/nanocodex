@@ -558,6 +558,19 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     }
   }
 
+  // Memory-only Claude model listing (IDs/names, no secrets). Egress requests
+  // fan out across isolates; this per-user object is the shared cache point.
+  #claudeModels: { rows: Array<{ id: string; display_name: string }>; until: number } | undefined;
+  /** Private RPC: last successful Claude model listing, if still fresh. */
+  readClaudeModels(): Array<{ id: string; display_name: string }> | null {
+    return this.#claudeModels && this.#claudeModels.until > Date.now() ? this.#claudeModels.rows : null;
+  }
+  /** Private RPC: retain a successful listing for a bounded window. */
+  storeClaudeModels(rows: Array<{ id: string; display_name: string }>, ttlMs: number): void {
+    if (!Array.isArray(rows) || rows.length > 1000 || !(ttlMs > 0 && ttlMs <= 10 * 60_000)) return;
+    this.#claudeModels = { rows, until: Date.now() + ttlMs };
+  }
+
   /** Private service-binding RPC only: never expose this credential to account clients. */
   resolveClaudeCredential(recover = false, rejectedRevision?: string): Promise<{
     status: number; credential: ClaudeCredential | null;
@@ -794,6 +807,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       if (url.pathname === "/v1/claude/login/start" && request.method === "POST") {
         if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
         this.#claudeCredential = undefined;
+        this.#claudeModels = undefined;
         return json({ state: "pending", ...await (await this.#claudeSubscription()).startLogin() }, 200);
       }
       if (url.pathname === "/v1/claude/login/status" && request.method === "GET") {
@@ -805,6 +819,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
           || body.code.length === 0 || body.code.length > 8192) return jsonError(400, "invalid_claude_code");
         try {
           this.#claudeCredential = undefined;
+        this.#claudeModels = undefined;
           return json(await (await this.#claudeSubscription()).completeLogin(body.code), 200);
         } catch {
           // Never reflect a provider response or private completion material.
@@ -814,6 +829,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       }
       if (url.pathname === "/v1/claude" && request.method === "DELETE") {
         this.#claudeCredential = undefined;
+        this.#claudeModels = undefined;
         await (await this.#claudeSubscription()).logout();
         return json(await this.#claudePublicStatus(), 200);
       }
