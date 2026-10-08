@@ -245,6 +245,19 @@ pub(crate) struct AgentArgs {
     )]
     image_generation: Option<bool>,
 
+    /// Whether the local command, patch, plan, and file tools are exposed.
+    ///
+    /// Set false when every workspace effect must go through MCP tools, for
+    /// example when a remote sandbox is the workspace. Local computer-use
+    /// tools are disabled with them.
+    #[arg(
+        long,
+        env = "NANOCODEX_WORKSPACE_TOOLS",
+        default_value_t = true,
+        action = ArgAction::Set
+    )]
+    workspace_tools: bool,
+
     /// Whether clean, reusable Tact-style subagents are exposed in Code Mode.
     #[arg(
         long,
@@ -435,6 +448,11 @@ impl AgentArgs {
             || self.model.is_some()
             || std::env::var_os("OPENAI_MODEL").is_some()
             || std::env::var_os("ANTHROPIC_MODEL").is_some()
+    }
+
+    /// The workspace requested with `--cwd`, if any.
+    pub(crate) fn requested_workspace(&self) -> Option<&std::path::Path> {
+        self.cwd.as_deref()
     }
 
     /// Resume uses the store owning the thread unless the family was chosen explicitly.
@@ -687,7 +705,7 @@ impl AgentArgs {
         let configured_vm = vm.start(vm_egress).await?;
         let mut tools = match configured_vm.as_ref() {
             Some(vm) => vm.tools_builder().await?,
-            None => Tools::builder(),
+            None => Tools::builder().workspace(self.workspace_tools),
         }
         .web_search(web_search)
         .image_generation(self.image_generation.unwrap_or(true));
@@ -710,7 +728,7 @@ impl AgentArgs {
             }
             tools = tools.remote_http_client(mpp_adapter.tool_http_client()?);
         }
-        if configured_vm.is_none() {
+        if configured_vm.is_none() && self.workspace_tools {
             let _timing = crate::startup_timing::Stage::new("computer_discovery");
             if let Some(computer) = crate::computer::connect_for_startup()
                 .await
