@@ -85,6 +85,11 @@ runs:
       if: steps.plan.outputs.any == 'true'
       shell: bash
       env:
+        # The cached node_modules is authoritative. Nested `pnpm run` calls (the
+        # WASM package build) otherwise re-install the whole workspace and check
+        # the lockfile against the registry first (~17s).
+        npm_config_verify_deps_before_run: "false"
+        pnpm_config_verify_deps_before_run: "false"
         RELEASE_ONLY: ${{ inputs.component }}
         ASTRA_MANAGED_API_KEY: ${{ inputs.astra-api-key }}
         ASTRA_MPP_SECRET: ${{ inputs.astra-mpp-secret }}
