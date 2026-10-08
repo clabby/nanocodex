@@ -2454,6 +2454,13 @@ async function managedFetchRoute(
       let creationConfiguration: AgentConfiguration = {};
       let modelCatalog: Awaited<ReturnType<typeof availableManagedModels>> | undefined;
       let modelCatalogMs: number | undefined;
+      // New Durable Objects take ~0.7-1.4s to first activate (platform cost,
+      // measured by /v1/agents/activation-probe). Start that activation now,
+      // after authentication, so it overlaps body/model validation. warm() is
+      // a stateless no-op; a rejected request leaves no object state.
+      const agentIdReady = requestKey === null ? Promise.resolve(uuidV7())
+        : idempotentAgentId(principal.userId, requestKey);
+      ctx.waitUntil(agentIdReady.then(id => env.NANOCODEX_SESSIONS.getByName(id).warm()).catch(() => undefined));
       try {
         const body = parseAgentCreateBody(await request.text());
         if (body.scope?.type === "team") {
@@ -2566,9 +2573,7 @@ async function managedFetchRoute(
           message: "managed durability imports require Idempotency-Key",
         }, { status: 400 });
       }
-      const agentId = requestKey === null
-        ? uuidV7()
-        : await idempotentAgentId(principal.userId, requestKey);
+      const agentId = await agentIdReady;
       const subject = env.NANOCODEX_SESSIONS.idFromName(agentId).toString();
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
@@ -4512,6 +4517,9 @@ export class DurableAgentSession extends DurableComputerObject {
       initialization_ms: roundMilliseconds(performance.now() - constructorStartedAt),
       schema_ms: this.#constructorSqlMs });
   }
+
+  /** Stateless no-op: lets creation start first activation early. */
+  warm(): void {}
 
   #activationProbed = false;
   /** No user state: compare first activation of a named and a unique ID. */
