@@ -116,3 +116,11 @@ Only external tool responses and model transport are synthetic. Per-run bundles,
 database files and request/event traces are retained under
 output/code-observation-workerd/. This local workerd/Rust integration does not
 claim a deployed Cloudflare platform restart or production thread recovery.
+
+The standalone workerd command prepares the pinned QuickJS WASM before running.
+The CI-selected hand-retirement-journey.test.mjs lifecycle entry point also
+imports these two restart journeys; they therefore run in the bindings job's
+Exercise single-Hand upgrade and routing step even while broad tests are
+paused. That step already prepares the evaluator and downloads the current
+WASM build. The existing Hand-retirement journey additionally requires its
+historical baseline commit to be available in the checkout.
