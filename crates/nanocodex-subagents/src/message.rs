@@ -9,7 +9,7 @@ use super::model::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
-pub(super) const MAX_MESSAGE_BYTES: usize = 2 * 1024;
+pub(super) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_RETAINED_MESSAGES: usize = 256;
 
 #[derive(Default)]

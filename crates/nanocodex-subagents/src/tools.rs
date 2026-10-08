@@ -29,7 +29,7 @@ use std::{
 use tokio::sync::oneshot;
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+const MAX_WAIT_TIMEOUT: Duration = Duration::from_secs(3600);
 const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 const SUBMIT_RESULT_TOOL: &str = "submit_result";
 const SEND_AGENT_MESSAGE_TOOL: &str = "send_agent_message";
@@ -810,7 +810,7 @@ impl Tool for SendAgentMessage {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": MAX_MESSAGE_BYTES,
-                        "description": "The focused message body. The runtime enforces a 2048-byte UTF-8 limit."
+                        "description": "The focused message body. The runtime enforces a 64 KiB UTF-8 limit."
                     },
                     "priority": {
                         "type": "string",
@@ -951,7 +951,7 @@ impl Tool for WaitAgent {
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 300000,
+                        "maximum": 3600000,
                         "description": "Bounded wait in milliseconds. Defaults to 30000."
                     }
                 },
