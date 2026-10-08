@@ -84,6 +84,7 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
   await mkdir(output, { recursive: true });
   const trace = [], wire = [], logs = [], provenance = [], upstream = [], submissions = [];
   const jobs = new Map();
+  const unbounded = { sent: 0, cancelled: false };
   // Synthetic OpenRouter: the managed Worker's only external network boundary.
   async function openrouter(request) {
     const url = new URL(request.url), auth = request.headers.get("authorization");
@@ -102,14 +103,27 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
       if (body.prompt?.includes("LOSE_REPLY")) return new Response("upstream reset", { status: 502 });
       if (body.prompt?.includes("NO_CREDITS")) return Response.json({ error: { code: 402, message: "Insufficient credits" } }, { status: 402 });
       const id = `gen-vid-1789000000-${String(jobs.size + 1).padStart(20, "A")}`;
-      jobs.set(id, { polls: 0 });
+      jobs.set(id, { polls: 0, prompt: body.prompt ?? "" });
       return Response.json({ id, polling_url: `/api/v1/videos/${id}`, status: "pending" }, { status: 202 });
     }
     const content = /^\/api\/v1\/videos\/([^/]+)\/content$/.exec(url.pathname);
-    if (content && jobs.has(content[1])) return new Response(null, { status: 302, headers: { location: "https://cdn.video.test/clip.mp4" } });
+    if (content && jobs.has(content[1])) {
+      const { prompt } = jobs.get(content[1]);
+      // Bodies without content-length: a small clip, and an oversized stream that must be abandoned at the cap.
+      if (prompt.includes("STREAM_SMALL")) return new Response(new Blob([clip]).stream(), { headers: { "content-type": "video/mp4" } });
+      if (prompt.includes("UNBOUNDED")) {
+        const chunk = new Uint8Array(1024 * 1024);
+        return new Response(new ReadableStream({ pull(controller) {
+          if (unbounded.sent >= 200) return controller.close();
+          unbounded.sent++; controller.enqueue(chunk);
+        }, cancel() { unbounded.cancelled = true; } }, { highWaterMark: 0 }), { headers: { "content-type": "video/mp4" } });
+      }
+      return new Response(null, { status: 302, headers: { location: "https://cdn.video.test/clip.mp4" } });
+    }
     const poll = /^\/api\/v1\/videos\/([^/]+)$/.exec(url.pathname);
     if (poll && jobs.has(poll[1])) {
       const job = jobs.get(poll[1]); job.polls++;
+      if (job.prompt.includes("FLAKY_STATUS") && job.polls === 1) return new Response("status backend unavailable", { status: 503 });
       return Response.json(job.polls === 1 ? { id: poll[1], polling_url: url.pathname, status: "in_progress" }
         : { id: poll[1], polling_url: url.pathname, status: "completed", generation_id: "gen-synthetic",
           unsigned_urls: [`https://openrouter.ai/api/v1/videos/${poll[1]}/content?index=0`], usage: { cost: 0.42, is_byok: false } });
@@ -217,10 +231,11 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
     assert.deepEqual(submitted, { operation_id: shot, model: "bytedance/seedance-2.0", state: "submitted", status: "pending" });
     assert.deepEqual(replay, { ...submitted, replayed: true });
     assert.equal(conflict.error, "invalid_request"); assert.match(conflict.message, /different arguments/);
-    assert.equal(running.status, "in_progress");
-    assert.deepEqual(completed, { operation_id: shot, model: "bytedance/seedance-2.0", state: "submitted", status: "completed", outputs: 1, cost_usd: 0.42 });
+    assert.equal(running.status, "in_progress"); assert.equal(running.status_source, "provider");
+    assert.deepEqual(completed, { operation_id: shot, model: "bytedance/seedance-2.0", state: "submitted", status: "completed", outputs: 1, cost_usd: 0.42, status_source: "provider" });
     const path = `/brain/outputs/videos/${shot}.mp4`;
-    assert.deepEqual(downloaded, { ...completed, path, bytes: clip.byteLength, content_type: "video/mp4" });
+    const { status_source: _source, ...completedReceipt } = completed;
+    assert.deepEqual(downloaded, { ...completedReceipt, path, bytes: clip.byteLength, content_type: "video/mp4" });
     assert.equal(unknown.state, "outcome_unknown"); assert.equal(unknownReplay.state, "outcome_unknown"); assert.equal(unknownReplay.replayed, true);
     assert.equal(rejected.state, "rejected"); assert.match(rejected.error, /^openrouter_402: Insufficient credits/);
     // Exactly one paid POST per distinct operation; invalid, replayed and conflicting calls never reach OpenRouter.
@@ -242,10 +257,36 @@ test("OpenRouter video jobs are account-owned, catalog-validated, idempotent and
     for (const result of foreignResults) assert.deepEqual(result, { error: "invalid_request", message: "unknown operation_id for this account" });
     assert.equal(openrouterCalls(), before, "foreign reads never contact OpenRouter");
     await call(`/v1/agents/${aliceAgent}/files?${new URLSearchParams({ path })}`, { token: bob.token, expected: 404 });
-    const rows = await db.prepare("SELECT owner_id, operation_id, state, job_status FROM openrouter_video_jobs ORDER BY created_at").all();
-    assert.deepEqual(rows.results.map(row => [row.owner_id, row.state]), [[owner, "submitted"], [owner, "outcome_unknown"], [owner, "rejected"]]);
+    // Status freshness is explicit when the provider poll fails, and unknown-length bodies are bounded while streaming.
+    const flaky = "33333333-3333-4333-8333-333333333333", huge = "44444444-4444-4444-8444-444444444444", small = "55555555-5555-4555-8555-555555555555";
+    const robustness = await turn(alice.token, aliceAgent, [
+      { ...request, operation_id: flaky, prompt: "FLAKY_STATUS shot" },
+      { operation: "status", operation_id: flaky },
+      { operation: "status", operation_id: flaky },
+      { operation: "status", operation_id: flaky },
+      { ...request, operation_id: huge, prompt: "UNBOUNDED shot" },
+      { operation: "status", operation_id: huge },
+      { operation: "download", operation_id: huge },
+      { ...request, operation_id: small, prompt: "STREAM_SMALL shot" },
+      { operation: "status", operation_id: small },
+      { operation: "download", operation_id: small },
+    ], "robustness");
+    const [, staleStatus, freshStatus, terminalStatus, , , hugeDownload, , , smallDownload] = robustness;
+    assert.equal(staleStatus.stale, true); assert.equal(staleStatus.status_source, "stale_receipt");
+    assert.equal(staleStatus.refresh_error, "openrouter_status_503"); assert.equal(staleStatus.status, "pending"); assert.equal(typeof staleStatus.status_as_of, "number");
+    assert.equal(freshStatus.status, "completed"); assert.equal(freshStatus.status_source, "provider"); assert.equal(freshStatus.stale, undefined);
+    assert.equal(terminalStatus.status_source, "durable_terminal");
+    assert.match(hugeDownload.error, /without content-length exceeds 96 MiB/); assert.equal(hugeDownload.path, undefined);
+    // Miniflare's Node outbound bridge drains the synthetic body itself; the Worker-side bound is the error above and the absent file below.
+    assert.equal(smallDownload.bytes, clip.byteLength); assert.equal(smallDownload.path, `/brain/outputs/videos/${small}.mp4`);
+    assert.deepEqual(await call(`/v1/agents/${aliceAgent}/files?${new URLSearchParams({ path: smallDownload.path })}`, { raw: true }), clip);
+    await call(`/v1/agents/${aliceAgent}/files?${new URLSearchParams({ path: `/brain/outputs/videos/${huge}.mp4` })}`, { expected: 404 });
+    trace.push({ case: "robustness", unbounded, results: robustness });
+    const rows = await db.prepare("SELECT owner_id, operation_id, state, job_status FROM openrouter_video_jobs ORDER BY created_at, operation_id").all();
+    assert.deepEqual(rows.results.map(row => [row.owner_id, row.state]).sort(), [[owner, "outcome_unknown"], [owner, "rejected"],
+      [owner, "submitted"], [owner, "submitted"], [owner, "submitted"], [owner, "submitted"]]);
     trace.push({ case: "d1_receipts", rows: rows.results });
-    console.log(JSON.stringify({ evidence: output, paid_submissions: submissions.length, replays_without_upstream: 2, foreign_reads_blocked: 3,
+    console.log(JSON.stringify({ evidence: output, paid_submissions: submissions.length, unbounded_mib_sent: unbounded.sent, unbounded_cancelled: unbounded.cancelled, replays_without_upstream: 2, foreign_reads_blocked: 3,
       downloaded_bytes: clip.byteLength, redirect_without_credential: upstream.some(call => call.origin === "https://cdn.video.test" && call.credential === "none") }));
   } finally {
     for (const socket of sockets) socket.terminate();

@@ -181,6 +181,28 @@ async function fingerprint(value: unknown): Promise<string> {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+type Freshness = { status_source: "provider" | "durable_terminal" | "durable_receipt" | "stale_receipt"; stale?: true; refresh_error?: string; status_as_of?: number };
+
+export const UNKNOWN_LENGTH_MAX_BYTES = 96 * 1024 * 1024;
+
+/** Reads a stream into memory, cancelling and returning undefined once more than `limit` bytes arrive. */
+export async function readBounded(stream: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array | undefined> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) { await reader.cancel().catch(() => undefined); return undefined; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
+  return out;
+}
+
 function receipt(row: JobRow) {
   const state = row.state === "submitting" ? "outcome_unknown" : row.state;
   return {
@@ -224,12 +246,19 @@ export function createOpenRouterVideoTool(options: OpenRouterVideoOptions): Name
     return found!;
   }
 
-  async function refresh(job: JobRow, signal: AbortSignal): Promise<JobRow> {
-    if (!job.job_id || (job.job_status && TERMINAL.has(job.job_status))) return job;
+  // Returns the durable row plus explicit freshness: a failed provider poll never masquerades as current status.
+  async function refresh(job: JobRow, signal: AbortSignal): Promise<{ job: JobRow; freshness: Freshness }> {
+    if (!job.job_id) return { job, freshness: { status_source: "durable_receipt" } };
+    if (job.job_status && TERMINAL.has(job.job_status)) return { job, freshness: { status_source: "durable_terminal" } };
+    const stale = (reason: string): { job: JobRow; freshness: Freshness } => ({ job, freshness: { status_source: "stale_receipt", stale: true, refresh_error: reason, status_as_of: job.updated_at } });
     let response: Response;
-    try { response = await api(`/videos/${encodeURIComponent(job.job_id)}`, {}, signal); } catch { return job; }
+    try { response = await api(`/videos/${encodeURIComponent(job.job_id)}`, {}, signal); } catch (error) {
+      if (signal.aborted) throw error;
+      return stale("openrouter_status_unreachable");
+    }
     const data = await readJson(response).catch(() => undefined) as Record<string, unknown> | undefined;
-    if (!response.ok || !data || typeof data.status !== "string") return job;
+    if (!response.ok) return stale(`openrouter_status_${response.status}`);
+    if (!data || typeof data.status !== "string") return stale("openrouter_status_malformed");
     const urls = Array.isArray(data.unsigned_urls) ? data.unsigned_urls.length : 0;
     const usage = data.usage as { cost?: unknown } | undefined;
     const updated: JobRow = { ...job, job_status: data.status.slice(0, 32), outputs: urls,
@@ -237,7 +266,7 @@ export function createOpenRouterVideoTool(options: OpenRouterVideoOptions): Name
       error: typeof data.error === "string" ? data.error.split(options.apiKey).join("[redacted]").slice(0, 500) : job.error, updated_at: now() };
     await db.prepare("UPDATE openrouter_video_jobs SET job_status=?,outputs=?,cost=?,error=?,updated_at=? WHERE owner_id=? AND operation_id=?")
       .bind(updated.job_status, updated.outputs, updated.cost, updated.error, updated.updated_at, options.owner, job.operation_id).run();
-    return updated;
+    return { job: updated, freshness: { status_source: "provider" } };
   }
 
   async function submit(input: Record<string, unknown>, signal: AbortSignal) {
@@ -293,8 +322,8 @@ export function createOpenRouterVideoTool(options: OpenRouterVideoOptions): Name
 
   async function download(input: Record<string, unknown>, signal: AbortSignal) {
     const id = operationId(input.operation_id);
-    const job = await refresh(await owned(id), signal);
-    if (!job.job_id || job.job_status !== "completed") return { ...receipt(job), error: job.error ?? "video is not completed" };
+    const { job, freshness } = await refresh(await owned(id), signal);
+    if (!job.job_id || job.job_status !== "completed") return { ...receipt(job), ...freshness, error: freshness.refresh_error ?? job.error ?? "video is not completed" };
     const index = input.index === undefined ? 0 : input.index;
     if (!Number.isInteger(index) || (index as number) < 0 || (job.outputs > 0 && (index as number) >= job.outputs)) fail("index is outside the generated outputs");
     const path = input.path === undefined ? `/brain/outputs/videos/${id}${index ? `-${index}` : ""}.mp4` : input.path;
@@ -320,8 +349,10 @@ export function createOpenRouterVideoTool(options: OpenRouterVideoOptions): Name
       void response.body.pipeTo(fixed.writable).catch(() => undefined);
       body = fixed.readable; size = length;
     } else {
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > 96 * 1024 * 1024 || bytes.byteLength === 0) return { ...receipt(job), error: "video body length unavailable" };
+      // Without a declared length, buffer at most UNKNOWN_LENGTH_MAX_BYTES and abort as soon as the cap is crossed.
+      const bytes = await readBounded(response.body, UNKNOWN_LENGTH_MAX_BYTES);
+      if (!bytes) return { ...receipt(job), error: `video without content-length exceeds ${UNKNOWN_LENGTH_MAX_BYTES / (1024 * 1024)} MiB` };
+      if (bytes.byteLength === 0) return { ...receipt(job), error: "video body is empty" };
       body = new Blob([bytes]).stream(); size = bytes.byteLength;
     }
     await options.writeBrainFile(path as string, body, size, contentType === "application/octet-stream" ? "video/mp4" : contentType);
@@ -367,7 +398,10 @@ export function createOpenRouterVideoTool(options: OpenRouterVideoOptions): Name
             const { operation: _operation, ...rest } = value;
             return await submit(rest, signal);
           }
-          case "status": return receipt(await refresh(await owned(operationId(value.operation_id)), signal));
+          case "status": {
+            const { job, freshness } = await refresh(await owned(operationId(value.operation_id)), signal);
+            return { ...receipt(job), ...freshness };
+          }
           case "download": return await download(value, signal);
           default: return fail("operation must be models, submit, status or download");
         }
