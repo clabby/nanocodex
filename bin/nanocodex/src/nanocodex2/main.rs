@@ -49,11 +49,11 @@ mod observation_providers;
 mod reload;
 mod screen_audio;
 mod screen_broadcast;
-mod screen_hls;
 #[cfg(target_os = "linux")]
 mod screen_gamepad;
 #[cfg(target_os = "linux")]
 mod screen_helpers;
+mod screen_hls;
 #[cfg(target_os = "linux")]
 mod screen_host;
 mod screen_ice;
@@ -241,24 +241,16 @@ enum Command {
 
 #[derive(Args)]
 struct Attach {
-    /// Agent ID, account URL, or shared /share/ URL. Shared tokens stay in memory.
-    #[arg(value_name = "AGENT_URL_OR_ID", value_parser = parse_agent_reference)]
-    agent: Option<AgentReference>,
+    /// Agent ID, owner URL, or full shared-thread URL. Choose from a list when omitted.
+    // Validate after Clap so errors never echo a bearer URL.
+    #[arg(value_name = "AGENT_URL_OR_ID")]
+    agent: Option<String>,
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentReference {
     agent_id: String,
     managed_origin: Option<String>,
-    shared_url: Option<String>,
-}
-
-impl std::fmt::Debug for AgentReference {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AgentReference")
-            .field("agent_id", &self.agent_id)
-            .finish_non_exhaustive()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -700,21 +692,11 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
             .await
             .map_err(|_| ManagedError::Configuration("local recording control failed".into()));
     }
-    if let Some(Command::Attach(Attach { agent: Some(agent) })) = &cli.command
-        && let Some(url) = &agent.shared_url
-    {
-        if cli.managed2 {
-            return Err(ManagedError::Configuration(
-                "Shared threads use the standard managed service".into(),
-            ));
-        }
-        return tui::run_shared(url).await;
-    }
     if cli.managed2 {
         return match cli.command {
             None => tui::run_managed2(None).await,
-            Some(Command::Attach(Attach { agent: Some(agent) })) if agent.managed_origin.is_none() => {
-                tui::run_managed2(Some(agent.agent_id)).await
+            Some(Command::Attach(Attach { agent: Some(agent) })) if valid_managed_agent_id(&agent) => {
+                tui::run_managed2(Some(agent)).await
             }
             Some(Command::Run(command)) if !command.settings.is_explicit() => {
                 managed2::run(command.agent, Some(command.prompt), command.idempotency_key).await
@@ -724,6 +706,17 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
             )),
         };
     }
+    // Shared links carry their own narrowly scoped authority. Never load an
+    // account credential or start a local Hand for a guest attachment.
+    let attach_reference = match &cli.command {
+        Some(Command::Attach(Attach { agent: Some(value) })) => {
+            if value.contains("/share/") || value.contains("#token=") {
+                return tui::run_shared(value).await;
+            }
+            Some(parse_agent_reference(value).map_err(ManagedError::Configuration)?)
+        }
+        _ => None,
+    };
     let command = match cli.command {
         Some(Command::Tui(command)) => {
             return command
@@ -817,10 +810,9 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         }
         command => command,
     };
-    let managed_origin = match &command {
-        Some(Command::Attach(Attach { agent: Some(agent) })) => agent.managed_origin.as_deref(),
-        _ => None,
-    };
+    let managed_origin = attach_reference
+        .as_ref()
+        .and_then(|agent| agent.managed_origin.as_deref());
     let client = {
         let _timing = startup_timing::Stage::new("managed_client");
         client_from_environment(managed_origin)?
@@ -846,8 +838,8 @@ async fn run(cli: Cli) -> Result<(), ManagedError> {
         Some(Command::Connectors(command)) => command.run(&client).await,
         Some(Command::HandShare(command)) => command.run(&client).await,
         Some(Command::Voice(command)) => voice::run(&client, command).await,
-        Some(Command::Attach(command)) => {
-            attach_tui(&client, command.agent.map(|agent| agent.agent_id)).await
+        Some(Command::Attach(_)) => {
+            attach_tui(&client, attach_reference.map(|agent| agent.agent_id)).await
         }
         Some(Command::ContinueAttach(_)) => unreachable!("handled before managed client setup"),
         Some(Command::Computer(_)) => unreachable!("handled before managed client setup"),
@@ -1110,18 +1102,10 @@ fn managed_url_from_environment(fallback: Option<&str>) -> Result<String, Manage
 }
 
 fn parse_agent_reference(value: &str) -> Result<AgentReference, String> {
-    if Url::parse(value).is_ok_and(|url| url.path().starts_with("/share/")) {
-        return Ok(AgentReference {
-            agent_id: String::new(),
-            managed_origin: None,
-            shared_url: Some(value.to_owned()),
-        });
-    }
     if valid_managed_agent_id(value) {
         return Ok(AgentReference {
             agent_id: value.to_owned(),
             managed_origin: None,
-            shared_url: None,
         });
     }
     let url = Url::parse(value).map_err(|_| {
@@ -1149,7 +1133,6 @@ fn parse_agent_reference(value: &str) -> Result<AgentReference, String> {
     Ok(AgentReference {
         agent_id: agent_id.into_owned(),
         managed_origin: Some(url.origin().ascii_serialization()),
-        shared_url: None,
     })
 }
 
@@ -1529,13 +1512,16 @@ mod tests {
             panic!("attach command parsed into the wrong variant");
         };
         assert_eq!(
-            agent,
+            agent
+                .as_deref()
+                .map(parse_agent_reference)
+                .transpose()
+                .unwrap(),
             Some(AgentReference {
                 agent_id: "77777777-7777-4777-8777-777777777777".to_owned(),
                 managed_origin: Some(
                     "https://named-workspace-fabric.nanocodex.localhost:2443".to_owned()
                 ),
-                shared_url: None,
             })
         );
     }
@@ -1547,7 +1533,6 @@ mod tests {
             AgentReference {
                 agent_id: "agent:v1_test-id".to_owned(),
                 managed_origin: None,
-                shared_url: None,
             }
         );
         let picker = Cli::try_parse_from(["nanocodex2", "attach"])

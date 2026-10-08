@@ -19,6 +19,7 @@ mod native_secure_input;
 mod phone_services;
 mod private_input;
 mod share;
+mod shared;
 mod sse;
 mod types;
 mod vault;
@@ -59,6 +60,10 @@ pub use private_input::{
     private_input_output_text,
 };
 pub use share::{CreatedShareLink, ShareLink, SharePermission};
+pub use shared::{
+    SharedEventStream, SharedHistoryPage, SharedThreadClient, SharedThreadMetadata,
+    SharedTurnReceipt,
+};
 pub use sse::{
     EventCursor, ManagedEventFuture, ManagedEventSource, ManagedEventStream, ManagedEvents,
 };
