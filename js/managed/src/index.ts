@@ -2977,6 +2977,20 @@ async function managedFetchRoute(
     sessionHeaders.delete("x-nanocodex-vm-renewal");
     forwardPrincipalAssertions(sessionHeaders, principal);
     const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
+    if (resource === "restart") {
+      // Owner-only recovery drill: discard the isolate exactly as an eviction
+      // or deploy would, so durable turn and subagent recovery can be verified.
+      if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (url.search) return json({ error: "invalid_request" }, { status: 400 });
+      if ((principal.kind !== "account_session" && principal.kind !== "api_key") || principal.connectGrant
+        || !principal.capabilities.includes("agents:write"))
+        return json({ error: "forbidden" }, { status: 403 });
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      return stub.fetch("https://session.internal/restart", {
+        method: "POST", headers: sessionHeaders, signal: request.signal,
+      });
+    }
     if (resource === "done") {
       if (request.method !== "PUT") return json({ error: "method_not_allowed" }, { status: 405 });
       if (url.search) return json({ error: "invalid_request" }, { status: 400 });
@@ -4886,6 +4900,19 @@ export class DurableAgentSession extends DurableComputerObject {
       try { await this.#requireContextMembership(); }
       catch { return json({ error: "team_membership_required" }, { status: 403 }); }
       turnAuthorization = asserted.authorization;
+    }
+    if (url.pathname === "/restart") {
+      if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (!ownerAssertion || !turnAuthorization.capabilities.includes("agents:write"))
+        return json({ error: "forbidden" }, { status: 403 });
+      const session = this.#session();
+      if (!session || session.runtime_profile !== "managed" || this.#deleting || this.#deleted)
+        return json({ error: "not_found" }, { status: 404 });
+      // The persisted alarm is the only wakeup a discarded isolate keeps.
+      await this.ctx.storage.setAlarm(Date.now() + 1_000);
+      console.warn({ type: "managed.operator_restart", session_id: session.session_id });
+      setTimeout(() => this.ctx.abort("operator requested runtime restart"), 100);
+      return json({ restarting: true }, { status: 202, headers: { "cache-control": "no-store" } });
     }
     if (url.pathname === "/done") {
       if (request.method !== "PUT") return json({ error: "method_not_allowed" }, { status: 405 });
