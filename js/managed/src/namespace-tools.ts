@@ -167,6 +167,12 @@ export function createNamespaceExecutionRuntime(
   // Discovery selects a backend once for this exact captured Hand. Never retry
   // a failed probe or retarget an action after publication changes.
   const dynamicComputers = new WeakMap<MountedHand, Promise<MountedHand>>();
+  // Remember the contract the model has read, not a previous cell's handlers.
+  // Each new cell probes its captured route before accepting continued input.
+  const discoveredContracts = new Map<string, string>();
+  const computerContract = (hand: MountedHand): string => JSON.stringify([
+    hand.cuaBackend, hand.cua?.definition, hand.cuaReset?.definition,
+  ]);
   const discoverDynamicComputer = async (hand: MountedHand, context: ToolContext): Promise<MountedHand> => {
     const result = await hand.cua!.handler({}, context);
     context.signal.throwIfAborted();
@@ -216,6 +222,9 @@ export function createNamespaceExecutionRuntime(
     for (const key of cells.keys()) {
       if (key.startsWith(cellPrefix)) cells.delete(key);
     }
+    for (const key of discoveredContracts.keys()) {
+      if (key.startsWith(cellPrefix)) discoveredContracts.delete(key);
+    }
     for (const [sessionId, binding] of sessions) {
       if (binding.ownerSessionId === ownerSessionId) sessions.delete(sessionId);
     }
@@ -223,6 +232,7 @@ export function createNamespaceExecutionRuntime(
   const dispose = (): void => {
     cells.clear();
     sessions.clear();
+    discoveredContracts.clear();
   };
 
   const computerParameters = {
@@ -250,18 +260,25 @@ export function createNamespaceExecutionRuntime(
     }
     let hand = binding.hands.get(route.mount.mountId);
     const providerInput = without(value, "workdir");
+    const contractKey = `${context.sessionId}\u0000${JSON.stringify([binding.authorizationKey, hand?.machineId, hand?.root])}`;
+    const discovering = name === CUA_JS_NAME && Object.keys(providerInput).length === 0;
     if (hand?.cua?.definition?.description?.startsWith("NANOCODEX_DYNAMIC_CUA_V1.")) {
       let pending = dynamicComputers.get(hand);
       if (!pending) {
-        if (name !== CUA_JS_NAME || Object.keys(providerInput).length !== 0)
+        if (!discovering && !discoveredContracts.has(contractKey))
           throw new Error("Discover this Hand with only workdir before sending dynamic CUA input");
         context.signal.throwIfAborted();
-        pending = discoverDynamicComputer(hand, context);
+        // The read-only probe and the requested action are distinct durable
+        // calls; sharing an ID would conflict with the action's input receipt.
+        pending = discoverDynamicComputer(hand, discovering ? context
+          : { ...context, callId: `${context.callId}/cua-discovery` });
         dynamicComputers.set(hand, pending);
       }
       hand = await pending;
       // Recheck the captured cell's authority after the remote discovery await.
       cell(context);
+      if (!discovering && discoveredContracts.get(contractKey) !== computerContract(hand))
+        throw new Error("This Hand's CUA contract changed; discover with only workdir before sending input");
     }
     if (!hand?.cua || !hand.cuaReset) {
       observeHandCall("namespace.invoke", name, routeStarted, "unavailable", context.callId, correlation(context));
@@ -281,6 +298,7 @@ export function createNamespaceExecutionRuntime(
         return { ...definition, name: toolName };
       });
       observeHandCall("namespace.invoke", name, routeStarted, "ok", context.callId, correlation(context));
+      discoveredContracts.set(contractKey, computerContract(hand));
       return { workdir: hand.root, machine_id: hand.machineId,
         backend: hand.cuaBackend, tools: [CUA_JS_NAME, CUA_RESET_NAME], definitions,
         browser_interaction: BACKGROUND_BROWSER_INSTRUCTIONS,
