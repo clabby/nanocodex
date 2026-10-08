@@ -322,9 +322,12 @@ impl nanocodex_subagents::SpawnRouter for JavaScriptSpawnRouter {
         }
         let promise = host_route_subagent(self.host_definition_id, &request.to_string())
             .map_err(|_| std::io::Error::other("subagent routing host rejected request"))?;
-        let value = JsFuture::from(promise)
-            .await
-            .map_err(|_| std::io::Error::other("subagent routing failed or was not authorized"))?;
+        let value = JsFuture::from(promise).await.map_err(|error| {
+            std::io::Error::other(format!(
+                "subagent routing failed or was not authorized: {}",
+                host_error_message(&error)
+            ))
+        })?;
         let route: JavaScriptSpawnRoute = serde_json::from_str(
             &value
                 .as_string()
