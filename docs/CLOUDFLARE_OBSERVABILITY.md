@@ -179,3 +179,28 @@ cost. Discovery, credential preparation, storage commit, and provider setup may
 overlap: their durations are not necessarily additive. Confirm overlap with
 causal span relationships and controlled runtime journeys, then measure actual
 fresh-client startup on the deployed revision.
+
+## Managed recovery inspection
+
+The guarded administrator `admin_threads` diagnostics response includes a
+`recovery` snapshot of retained turn safety counters and Code Mode effect
+metadata. The request's `limit` bounds each collection (maximum 100), ordered
+by newest insertion; `has_more` explicitly marks omitted older rows. This
+snapshot does not include archived turns or parse the root runtime head.
+
+Compare `abrupt_attempts` with the ordinary `attempt_count`: they measure
+separate recovery paths. Missing safety rows remain null. Effect receipt
+inspection returns chunk counts and byte sizes, never receipt contents, inputs,
+source, hashes or credentials. Receipt scans stop at 257 chunks; `truncated`
+means the reported count and size are lower bounds, not verified integrity.
+Unavailable tables or snapshots are explicit. Reads do not acquire runtime
+ownership, settle operations or replenish recovery budgets. Ordinary owner
+and Connect diagnostics do not expose this administrator snapshot.
+
+`stopped_root_effects` additionally selects up to ten stopped operations from
+the newest 100 safety rows. Each operation returns at most ten effects (or the
+smaller requested limit), ordered by descending model ordinal and parent call.
+Lookups use the retained root runtime session ID and original operation ID, so
+newer child activity cannot hide these root effects. Missing root identity makes
+this collection explicitly unavailable; it never guesses a session ID. Collection
+and per-operation truncation are explicit. No runtime-head payload is loaded.

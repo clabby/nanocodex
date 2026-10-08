@@ -22,10 +22,33 @@ const bob = "11111111-1111-4111-8111-111111111103";
 const caps = ["agents:read", "agents:write", "history:read", "tools:use"];
 const source = `
 import { DurableObject } from 'cloudflare:workers';
-import worker, { DurableAgentSession, AccountHostedTools } from './src/index.ts';
+import worker, { DurableAgentSession as BaseSession, AccountHostedTools } from './src/index.ts';
 import { UserAccount, Organization, ApiKeyRecord, NonceStorage, ensureAccount, createApiKey, authenticate } from './src/account-auth.ts';
 import { Kv } from 'accounts/server';
-export { DurableAgentSession, AccountHostedTools, UserAccount, Organization, ApiKeyRecord, NonceStorage };
+export class DurableAgentSession extends BaseSession {
+  async recoveryFixture(seed) {
+    const sql = this.ctx.storage.sql;
+    if (seed === true) {
+      const id = sql.exec('SELECT id FROM managed_turns ORDER BY rowid DESC LIMIT 1').one().id;
+      sql.exec('UPDATE managed_recovery_safety SET armed=1,abrupt_attempts=4,stopped=1 WHERE turn_id=?',id);
+      for (let i=0;i<3;i++) {
+        const key='snapshot-effect-'+i;
+        sql.exec("INSERT INTO managed_code_effects(effect_key,session_id,turn_id,parent_call_id,call_id,name,input_hash,generation,state,receipt_chunks,created_at,operation_id,model_call_index,scope_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          key,sql.exec('SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton=1').one().session_id,id,'parent-'+i,'nested-'+i,'exec_command','PRIVATE_INPUT_SENTINEL','PRIVATE_GENERATION_SENTINEL',i===2?'pending':'completed',i===2?null:i===1?300:1,Date.now(),id,7,2);
+        if(i!==2) for(let chunk=0;chunk<(i===1?300:1);chunk++) sql.exec('INSERT INTO managed_code_effect_receipt_chunks VALUES(?,?,?)',key,chunk,'PRIVATE_RECEIPT_SENTINEL');
+      }
+    }
+    if(seed === 'noise') {
+      const id=sql.exec('SELECT id FROM managed_turns ORDER BY rowid DESC LIMIT 1').one().id;
+      for(let i=0;i<120;i++) sql.exec("INSERT INTO managed_code_effects(effect_key,session_id,turn_id,parent_call_id,call_id,name,input_hash,generation,state,created_at,operation_id,model_call_index,scope_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        'child-noise-'+i,'child-session',id,'noise-parent','noise-'+i,'exec_command','PRIVATE_INPUT_SENTINEL','PRIVATE_GENERATION_SENTINEL','pending',Date.now(),id,8,2);
+    }
+    const values=['managed_turns','managed_recovery_safety','managed_code_effects','managed_code_effect_receipt_chunks','nanocodex_durable_states','nanocodex_durable_owners'].map(table=>sql.exec('SELECT * FROM '+table+' ORDER BY rowid').toArray());
+    const digest=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(values)));
+    return Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('');
+  }
+}
+export { AccountHostedTools, UserAccount, Organization, ApiKeyRecord, NonceStorage };
 const info = console.info.bind(console);
 console.info = (record, ...rest) => info(record && typeof record === 'object' ? JSON.stringify(record) : record, ...rest);
 export class FixtureSandbox extends DurableObject {
@@ -56,6 +79,9 @@ export class FixtureModel extends DurableObject {
   }
 }
 export default { async fetch(request, env, ctx) {
+  if (new URL(request.url).pathname === '/__fixture/recovery') {
+    const b=await request.json(); return Response.json(await env.NANOCODEX_SESSIONS.getByName(b.id).recoveryFixture(b.seed));
+  }
   if (new URL(request.url).pathname === '/__fixture/legacy') {
     await Kv.durableObject(env.NANOCODEX_AUTH,{name:'sms-otp'}).set('identity:synthetic-phone-digest', {userId:'${bob}'});
     await Kv.durableObject(env.NANOCODEX_AUTH,{name:'admin-directory'}).delete('admin-account:${bob}');
@@ -145,6 +171,7 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     const create = async () => (await call("/v1/agents", "POST", { settings: { model: "gpt-6.1-sol", thinking: "low", reasoning_mode: "standard", fast_mode: false } }, 201)).agent_id;
     if (!configured) {
       await inspect("accounts", {}, 403);
+      await inspect("diagnostics", {thread_id:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}, 403);
       return;
     }
     principal = alice;
@@ -190,6 +217,7 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     await inspect("accounts", {}, 403);
     await inspect("read", { thread_id: aliceThreads[0] }, 403);
     await inspect("performance", { thread_id: aliceThreads[0] }, 403);
+    await inspect("diagnostics", { thread_id: aliceThreads[0] }, 403);
     await call(`/v1/agents/${aliceThreads[0]}/events/history`, "GET", undefined, 404);
     principal = admin;
     const connectHeaders = { authorization: "", "x-nanocodex-connect-user": admin,
@@ -246,8 +274,40 @@ for (const configured of [true, false]) test(`admin thread journey (configured=$
     const following = await inspect("read", { thread_id: aliceThreads[0], after: after.next_after, limit: 1 });
     assert.equal(following.data.length, 1);
     assert.notDeepEqual(following.data, after.data);
+    await call("/__connect/v1/admin/threads?operation=diagnostics&thread_id="+aliceThreads[0], "GET", undefined, 403, connectHeaders);
+    const recoveryFixture = async seed => (await backend.fetch("https://fixture.test/__fixture/recovery", {method:"POST",body:JSON.stringify({id:aliceThreads[0],seed})})).json();
+    const recoveryBefore = await recoveryFixture(true);
     const diagnostics = await inspect("diagnostics", { thread_id: aliceThreads[0], limit: 1 });
     assert.equal(diagnostics.thread_id, aliceThreads[0]);
+    assert.equal(diagnostics.recovery.available,true);
+    assert.equal(diagnostics.recovery.turns.data[0].abrupt_attempts,4);
+    assert.equal(diagnostics.recovery.turns.data[0].stopped,1);
+    assert.equal(diagnostics.recovery.effects.data.length,1);
+    assert.equal(diagnostics.recovery.effects.has_more,true);
+    assert.equal(diagnostics.recovery.effects.data[0].state,"pending");
+    const expanded = await inspect("diagnostics",{thread_id:aliceThreads[0],limit:100});
+    assert.equal(expanded.recovery.effects.data.length,3);
+    assert.equal(expanded.recovery.effects.data[1].receipt.observed_chunks,257);
+    assert.equal(expanded.recovery.effects.data[1].receipt.truncated,true);
+    assert.equal(expanded.recovery.effects.data[2].receipt.observed_chunks,1);
+    assert.equal(expanded.recovery.effects.data[2].receipt.observed_bytes,24);
+    assert.doesNotMatch(JSON.stringify(expanded.recovery),/PRIVATE_|input_hash|generation|receipt_json|effect_key/);
+    assert.equal(await recoveryFixture(false),recoveryBefore,"inspection must preserve safety, effects, turns, durable heads and owners");
+    const noiseBefore=await recoveryFixture('noise');
+    const busy=await inspect("diagnostics",{thread_id:aliceThreads[0],limit:100});
+    assert.equal(busy.recovery.effects.data.length,100);
+    assert.ok(busy.recovery.effects.data.every(effect=>effect.session_id==='child-session'));
+    assert.equal(busy.recovery.stopped_root_effects.available,true);
+    assert.equal(busy.recovery.stopped_root_effects.data.length,1);
+    assert.equal(busy.recovery.stopped_root_effects.data[0].data.length,3);
+    assert.ok(busy.recovery.stopped_root_effects.data[0].data.every(effect=>effect.session_id!=='child-session'));
+    assert.equal(await recoveryFixture(false),noiseBefore);
+    assert.doesNotMatch(JSON.stringify(busy.recovery),/PRIVATE_|input_hash|generation|receipt_json|effect_key/);
+    principal=alice;
+    const ownerDiagnostics=await call(`/v1/agents/${aliceThreads[0]}/diagnostics`);
+    assert.equal(ownerDiagnostics.recovery,undefined,"recovery snapshot remains admin-only");
+    principal=admin;
+    trace.push({case:"recovery_snapshot_after_child_noise",before:noiseBefore,after:await recoveryFixture(false),snapshot:busy.recovery});
     assert.ok(Array.isArray(diagnostics.services));
     assert.ok(diagnostics.services.some(service => service.events.length > 0));
     const offsets = Object.fromEntries(diagnostics.services.map(service => [service.service, service.next_after]));

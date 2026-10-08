@@ -1,3 +1,4 @@
+import { adminRecoverySnapshot } from "./admin-recovery-snapshot";
 import { resolveCompanyTeam } from "./company-teams";
 import { routeHandSharing, handShareAPIPath, handShareDocumentPath, handShareDocument } from "./hand-sharing-http";
 import { idempotentAgentId } from "nanocodex/cloudflare/managed-live";
@@ -4800,7 +4801,10 @@ export class DurableAgentSession extends DurableComputerObject {
       || this.#durabilityImportState === "pending" || session.runtime_profile !== "managed") return reply(404, { error: "not_found" });
     console.info({ type: "managed.admin_threads.target", operator_id: operatorId, owner_id: session.owner_id,
       thread_id: session.session_id, operation: input.operation, at: Date.now() });
-    if (input.operation === "diagnostics") return reply(200, await this.#threadDiagnostics(session, input.after_managed ?? 0, input.after_hand ?? 0, input.limit));
+    if (input.operation === "diagnostics") return reply(200, {
+      ...await this.#threadDiagnostics(session, input.after_managed ?? 0, input.after_hand ?? 0, input.limit),
+      recovery: adminRecoverySnapshot(this.ctx.storage, input.limit),
+    });
     if (input.operation === "performance") {
       const observedAt = Date.now(), route = this.#threadRoute();
       let capacity: unknown;
@@ -4828,7 +4832,7 @@ export class DurableAgentSession extends DurableComputerObject {
     } catch { return reply(503, { error: "event_archive_unavailable" }); }
   }
 
-  async #threadDiagnostics(session: SessionRow, managedAfter: number, handAfter: number, limit: number, signal?: AbortSignal): Promise<unknown> {
+  async #threadDiagnostics(session: SessionRow, managedAfter: number, handAfter: number, limit: number, signal?: AbortSignal) {
     const managed = this.#diagnostics.page(session.session_id, managedAfter, limit, true);
     let hand: unknown = { service: "hand.broker", available: false, events: [], next_after: handAfter, history_truncated: true };
     try {
