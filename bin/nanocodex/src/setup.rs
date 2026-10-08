@@ -39,9 +39,11 @@ impl Setup {
                     );
                     eprintln!("  Progress: {}", log.display());
                     eprintln!("  Run `nanocodex computer setup` to wait for completion or retry.");
-                    eprintln!(
-                        "  macOS may request Screen Recording and Accessibility on first Computer Use."
-                    );
+                    if cfg!(target_os = "macos") {
+                        eprintln!(
+                            "  The optional Computer Use app is a separate macOS app; macOS asks for its own permissions when it is first used."
+                        );
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => eprintln!(
@@ -59,30 +61,31 @@ impl Setup {
             }
         }
 
+        // The Hand's own macOS permissions are requested as soon as it connects.
+        let mut permissions_ready = true;
         if !self.skip_hand {
             if cfg!(any(target_os = "macos", target_os = "linux")) {
-                if let Some(login) = login {
+                permissions_ready = if let Some(login) = login {
                     crate::hand_setup::connect_saved_login(
                         login.account_file,
                         login.origin,
                         login.credentials_changed,
                     )
-                    .await?;
-                    eprintln!("✓ This machine's Hand is connected");
+                    .await?
                 } else if nanocodex_cli_auth::has_default_login() {
                     crate::hand_setup::connect_saved_login(
                         nanocodex_cli_auth::saved_enrollment_account_file()?,
                         nanocodex_cli_auth::managed_url_from_environment(None)?,
                         false,
                     )
-                    .await?;
-                    eprintln!("✓ This machine's Hand is connected");
+                    .await?
                 } else {
                     println!(
                         "Hand is installed. Run `nanocodex account login` or `nanocodex2 login` to sign in and connect it automatically."
                     );
                     return Ok(());
-                }
+                };
+                eprintln!("✓ This machine's Hand is connected");
             } else {
                 if !nanocodex_cli_auth::has_default_login() {
                     bail!(
@@ -90,13 +93,20 @@ impl Setup {
                     );
                 }
                 eprintln!("Installing or repairing the Hand on this machine…");
-                crate::hand_setup::install_default(None, None, None, None).await?;
+                permissions_ready =
+                    crate::hand_setup::install_default(None, None, None, None).await?;
                 eprintln!("✓ This machine's Hand is connected");
             }
         }
-        println!(
-            "Nanocodex setup complete. Run `nanocodex setup` again any time to repair or resume it."
-        );
+        if permissions_ready {
+            println!(
+                "Nanocodex setup complete. Run `nanocodex setup` again any time to repair or resume it."
+            );
+        } else {
+            println!(
+                "Nanocodex is set up, but the Hand is waiting for the macOS permissions above. Live screen and input start after you allow them and run `nanocodex hand restart`."
+            );
+        }
         Ok(())
     }
 }

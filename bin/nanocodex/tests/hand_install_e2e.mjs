@@ -1,6 +1,9 @@
 // Opt-in native macOS journey against an already connected launchd owner.
 // Never installs a fixture service or requests a restart. No account API calls
 // or credentials are needed: the real owner's published catalog is the input.
+// Installation asks that exact owner for its macOS permissions. Run it only on
+// a Hand that already has both: macOS then skips the request and no dialog or
+// privacy database change occurs. A fresh, ungranted user needs a manual OS gate.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -54,9 +57,20 @@ try {
   const definition = readFileSync(plist);
   transcript.push(`native input: connected owner pid=${before.pid}; screen=${catalog.screen?.status ?? 'absent'}; no service-manager fixtures; synthetic invalid account override`);
 
+  // The owner's own report; asking again for granted access shows no dialog.
+  const consent = run(['hand', 'permissions']).stdout;
+  assert.match(consent, new RegExp(`running Hand service \\(PID ${before.pid}, `));
+  assert.match(consent, /Screen & System Audio Recording \(live screen\): already allowed/);
+  assert.match(consent, /Accessibility \(mouse and keyboard control\): already allowed/,
+    'Run this journey only on a Hand macOS already allows; it must not trigger consent dialogs.');
+
   for (const options of [[], ['--executable', executable]]) {
     const installed = run(['hand', 'install', ...options]);
     assert.match(installed.stderr, /installed and connected/);
+    // Installation itself requests both permissions from the connected owner.
+    assert.match(installed.stderr, new RegExp(
+      `macOS allows the Hand \\([^)]*PID ${before.pid}\\) Screen & System Audio Recording and Accessibility`));
+    assert.doesNotMatch(installed.stderr, /Action needed|could not be requested/);
     if (catalog.screen?.status !== 'ready' || catalog.screen?.transport !== 'webrtc') {
       assert.match(installed.stderr, /screen sharing is unavailable or still starting/);
     }
@@ -71,7 +85,7 @@ try {
   assert.deepEqual(status(), before);
   assert.deepEqual(readFileSync(plist), definition);
   assert.deepEqual(JSON.parse(readFileSync(account, 'utf8')), { fixture: true });
-  transcript.push('Observed: repeated installs complete without restarting the real connected owner, unavailable screen is warned about, candidate errors preserve the owner and configuration. Fresh install, account rejection and version-handover acceptance require a disposable desktop user.');
+  transcript.push('Observed: repeated installs request Screen Recording and Accessibility from the exact connected owner PID (already allowed, so no dialog) without restarting it, unavailable screen is warned about, candidate errors preserve the owner and configuration. Fresh install with consent dialogs, denied/pending consent, account rejection and version-handover acceptance require a disposable desktop user.');
   verdict = 'PASS';
 } finally {
   transcript.push(verdict);

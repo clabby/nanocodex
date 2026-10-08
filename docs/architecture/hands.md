@@ -152,13 +152,28 @@ sudo python3 scripts/install-hand-service.py --user "$USER" --binary /path/to/na
 
 The installer creates one machine-wide launchd service on macOS or systemd service on Linux, running as that non-root user. It uses the user's saved account login and existing `vm.json` configuration. It neither copies credentials into the service definition nor requires a terminal or app to stay open. Host tools work without a GUI; desktop capture needs the platform's GUI session and permissions.
 
-On macOS, `nanocodex hand permissions` asks the running Hand service to request
-Screen & System Audio Recording and Accessibility access. The request runs in
-the capturing process, with its PID verified against launchd and the local socket
-peer. macOS grants access only after user consent; the command reports pending
-and granted permissions separately. `--open-settings` opens the matching privacy
-panes. Restart the Hand after granting access. Unsigned or ad-hoc signed local
-builds can require consent again when their executable identity changes.
+On macOS the Hand needs Screen & System Audio Recording (live screen) and
+Accessibility (mouse and keyboard input). Installation requests both together as
+soon as the activated owner is verified connected, instead of at first screen or
+input use: `nanocodex hand install`, `nanocodex setup`, `nanocodex hand connect`
+(also run after a successful CLI/TUI login), and the first-launch
+`hand install --if-missing` that activates a new owner. A dormant
+`hand install --prepare` service has no running process and asks nothing until a
+login activates it. An existing owner returned by `--if-missing`, ordinary
+daemon startup, status and workspace attachment never request consent.
+
+The request runs in the capturing process, with its PID verified against launchd
+and the local socket peer; macOS shows its own dialogs and grants access only
+after user consent. Already-allowed permissions are not requested again. A
+pending or failed request never undoes the installed, connected service: setup
+reports that it is waiting for permissions rather than complete, with the
+recovery command. `nanocodex hand permissions` repeats the request and reports
+pending and granted permissions separately; `--open-settings` opens the matching
+privacy panes. Restart the Hand after granting access. Unsigned or ad-hoc signed
+local builds can require consent again when their executable identity changes.
+`nanocodex setup --skip-computer` skips only the optional upstream Computer Use
+app, which is a separately signed macOS app with its own consent on first use;
+the Hand's own permissions are still requested. `--skip-hand` requests none.
 
 
 For a custom login, pass `--managed-url https://your-server` and `--account-file /absolute/path/to/nanocodex-account.json` to the installer. These select the existing login without copying its secret.
