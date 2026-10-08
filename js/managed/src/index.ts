@@ -2657,6 +2657,9 @@ async function managedFetchRoute(
           session_after_constructor_ms: afterConstructorMs,
           session_handler_ms: handlerMs,
           session_return_ms: returnMs,
+          session_storage_sync_ms: phases.storage_sync_ms,
+          first_turn_admit_wall_ms: hasBoundaryTimes && Number.isFinite(phases.first_turn_admitted_at_ms)
+            ? phases.first_turn_admitted_at_ms - phases.response_ready_at_ms : undefined,
           session_prepare_ms: phases.prepare_ms,
           session_initialize_ms: phases.initialize_ms, session_commit_ms: phases.commit_ms,
           session_commit_attach_ms: phases.commit_attach_ms,
@@ -2691,6 +2694,8 @@ async function managedFetchRoute(
         if (firstTurn && !streaming && phases.first_turn_settings) response.headers.set("x-nanocodex-settings", JSON.stringify(phases.first_turn_settings));
         response.headers.append("server-timing", `managed_create;dur=${createMs}, managed_session_create;dur=${sessionCreateMs}`);
         if (firstTurn && Number.isFinite(phases.first_turn_admit_ms)) response.headers.append("server-timing", `managed_first_turn_admit;dur=${phases.first_turn_admit_ms}`);
+        if (firstTurn && Number.isFinite(phases.storage_sync_ms)) response.headers.append("server-timing", `managed_session_storage_sync;dur=${phases.storage_sync_ms}`);
+        if (firstTurn && hasBoundaryTimes && Number.isFinite(phases.first_turn_admitted_at_ms)) response.headers.append("server-timing", `managed_first_turn_admit_wall;dur=${phases.first_turn_admitted_at_ms - phases.response_ready_at_ms}`);
         if (preHandlerMs !== undefined) response.headers.append("server-timing", `managed_session_pre_handler;dur=${preHandlerMs}`);
         if (beforeConstructorMs !== undefined) response.headers.append("server-timing", `managed_session_before_constructor;dur=${beforeConstructorMs}`);
         if (Number.isFinite(phases.constructor_ms)) response.headers.append("server-timing", `managed_session_constructor;dur=${phases.constructor_ms}`);
@@ -6448,6 +6453,12 @@ export class DurableAgentSession extends DurableComputerObject {
     try { summary = JSON.parse(admitted.headers.get("x-nanocodex-turn-summary") ?? "null"); }
     catch { /* Best effort summary, never part of turn admission. */ }
     const admissionMs = roundMilliseconds(performance.now() - admitStartedAt);
+    // Date.now() advances only across I/O, so measure the output-gated commit
+    // explicitly: this is the durable write the response would wait on anyway.
+    const admittedAt = Date.now();
+    await this.ctx.storage.sync();
+    phases.first_turn_admitted_at_ms = admittedAt;
+    phases.storage_sync_ms = Date.now() - admittedAt;
     if (stream) {
       const events = await this.#streamHttpTurn(request, turnReceipt, turn.key);
       if (!events.ok) return events;
