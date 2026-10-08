@@ -4113,6 +4113,12 @@ export class DurableAgentSession extends DurableComputerObject {
     if (this.#storageInitialized) return;
     const ctx = this.ctx;
     const constructorStartedAt = performance.now();
+    // Decide before any DDL: absence of a session row alone does not prove
+    // freshness after interrupted initialization/import. Any prior schema or
+    // KV entry (including lifecycle fences) keeps the full restoration path.
+    const pristine = ctx.storage.sql.exec(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1",
+    ).toArray().length === 0 && Array.from(ctx.storage.kv.list({ limit: 1 })).length === 0;
     this.#diagnostics = new DiagnosticJournal(ctx.storage, "managed");
     this.#recoverySafety = new ManagedRecoverySafety(ctx.storage);
     initializeTurnInputs(ctx.storage, "managed_history_projection_chunks");
@@ -4356,7 +4362,7 @@ export class DurableAgentSession extends DurableComputerObject {
       // Re-admission or deletion may load external resources, so neither sits
       // on the object's request-readiness boundary.
       if (this.#deleting) this.#scheduleDeletion();
-      else {
+      else if (!pristine) {
         if (!this.#deleted && !this.#durabilityExported && this.#durabilityImportState !== "pending")
           retireSessionProjects(this.ctx.storage, id => { this.#markCancelling(id); });
         this.#scheduleRecovery();
@@ -4366,6 +4372,7 @@ export class DurableAgentSession extends DurableComputerObject {
     });
     this.#storageInitialized = true;
     console.info({ type: "managed.session.storage_initialized", fresh: !retainedSession,
+      restore_skipped: pristine,
       initialization_ms: roundMilliseconds(performance.now() - constructorStartedAt),
       schema_ms: this.#constructorSqlMs });
   }
