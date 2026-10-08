@@ -631,12 +631,12 @@ export function ProfileConnectors({
     return (
       <div className="account-connection-groups" ref={groupsRef}>
         <section className="account-connection-group" aria-labelledby="models-heading">
-          <h2 id="models-heading">Models</h2>
+          <header className="account-connection-group-heading"><h2 id="models-heading">Models</h2><p>Subscriptions and keys your agents run on.</p></header>
           <AccountConnectionGrid>{children}</AccountConnectionGrid>
           {after}
         </section>
         <section className="account-connection-group" aria-labelledby="services-heading">
-          <h2 id="services-heading">Services</h2>
+          <header className="account-connection-group-heading"><h2 id="services-heading">Services</h2><p>Accounts your agents can act on. Tokens stay in the broker.</p></header>
           <AccountConnectionGrid>
           <WhatsAppConnection key={accountId} accountId={accountId} />
       <CloudflareConnection key={`cloudflare:${accountId}`} accountId={accountId} requiresLogin={requiresLogin} />
@@ -668,7 +668,7 @@ export function ProfileConnectors({
           {connectorsQuery.error ? <div className="account-failure" role="alert"><p>Couldn’t load services.</p><button type="button" onClick={() => void load()}>Retry</button></div> : null}
         </section>
         <section className="account-connection-group" aria-labelledby="mcp-heading" data-provider="mcp">
-          <h2 id="mcp-heading">Custom MCP</h2>
+          <header className="account-connection-group-heading"><h2 id="mcp-heading">Custom MCP</h2><p>Any remote MCP server, authorized with its own OAuth.</p></header>
           <AccountConnectionGrid>
           {mcpError && !mcpConnections ? <AccountConnectionCard
             action="Retry"

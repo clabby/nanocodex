@@ -122,19 +122,173 @@
 .account-hub [data-provider="cloudflare"] .connector-logo svg { fill: none; }
 @media (max-width: 540px) { .cloudflare-connection-form :is(input, select) { font-size: 16px; } }
 
-/* Connections overview: scannable two-column cards with clear status. */
-.account-hub .account-inline .account-connection-group > h2 { display: flex; align-items: center; gap: 10px; color: var(--workspace-muted); font-size: 12px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; }
-.account-hub .account-inline .account-connection-group > h2::after { content: ""; flex: 1; height: 1px; background: var(--workspace-line); }
-.account-hub .account-inline :is(.wizard-connector-card, .account-service-row, .whatsapp-connection, .mcp-connector-row) { transition: border-color .15s ease, box-shadow .15s ease; }
-.account-hub .account-inline :is(.wizard-connector-card, .account-service-row, .whatsapp-connection, .mcp-connector-row):hover { border-color: var(--border-strong); box-shadow: 0 1px 3px color-mix(in srgb, var(--text) 7%, transparent); }
-.account-hub .account-inline .account-service-summary .connector-logo,
-.account-hub .account-inline .connection-card .connector-logo { display: inline-grid; place-items: center; width: 34px; height: 34px; flex: 0 0 34px; padding: 6px; border-radius: 9px; background: var(--workspace-soft); box-sizing: border-box; }
-.account-hub .account-inline .account-service-row[data-connected] .account-service-copy > span { display: inline-flex; align-items: center; gap: 6px; color: var(--text); }
-.account-hub .account-inline .account-service-row[data-connected] .account-service-copy > span::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #5fae7f; flex-shrink: 0; }
-.account-hub .account-inline .account-service-identity { padding-left: 60px; }
-@media (min-width: 900px) {
-  .account-hub .account-inline .account-connection-group .wizard-connectors { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; }
+/* Connections: homepage palette (--home-*), grouped hairline panels, dense rows. */
+.account-hub .account-inline .account-connection-groups { --row-bg: var(--surface); display: grid; gap: 36px; }
+.account-hub .account-inline .account-connection-group { position: relative; min-width: 0; counter-reset: connected; }
+.account-hub .account-inline .account-connection-group-heading { display: grid; gap: 3px; margin: 0 0 12px; padding-right: 96px; }
+.account-hub .account-inline .account-connection-group-heading h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 500; letter-spacing: -.02em; text-transform: none; }
+.account-hub .account-inline .account-connection-group-heading p { color: var(--home-muted); font-size: 13px; }
+.account-hub .account-inline .account-connection-groups .wizard-connectors {
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; align-items: stretch;
+  border: 1px solid var(--home-line); border-radius: 16px; background: var(--surface); overflow: hidden;
 }
+.account-hub .account-inline .account-connection-groups .wizard-connectors:not(:has(> *)) { display: none; }
+.account-hub .account-inline .account-connection-groups .wizard-connectors::after {
+  content: counter(connected) " connected"; position: absolute; top: 2px; right: 0;
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--home-line); border-radius: 999px;
+  color: var(--home-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; line-height: 1.4;
+}
+.account-hub .account-inline .account-connection-groups .wizard-connectors > * + * { border-top: 1px solid var(--home-line); }
+.account-hub .account-inline .account-connection-groups :is(.wizard-connector-card, .account-service-row, .whatsapp-connection, .mcp-connector-row) {
+  min-width: 0; margin: 0; border: 0; border-radius: 0; box-shadow: none; background: var(--row-bg); overflow: visible; transition: background-color .15s ease;
+}
+.account-hub .account-inline .account-connection-groups #openai-connection > .wizard-connector-card { border: 0; }
+.account-hub .account-inline .account-connection-groups :is(.wizard-connector-card, .account-service-row, .whatsapp-connection, .mcp-connector-row):hover { border-color: transparent; box-shadow: none; }
+.account-hub .account-inline .account-connection-groups :is(.wizard-connector-card, .whatsapp-connection):has(> .connection-card:not(:disabled):hover),
+.account-hub .account-inline .account-connection-groups :is(.account-service-row, .mcp-connector-row):hover { --row-bg: var(--home-soft); }
+.account-hub .account-inline .account-connection-groups .is-connected,
+.account-hub .account-inline .account-connection-groups .account-service-row[data-connected] { counter-increment: connected; }
+.account-hub .account-inline .account-connection-groups .is-highlighted { outline: 0; box-shadow: inset 3px 0 0 var(--home-accent); --row-bg: var(--home-soft); }
+.account-hub .account-inline .account-connection-groups :is(.connection-card, .account-service-summary) {
+  display: flex; align-items: center; gap: 14px; width: 100%; min-width: 0; min-height: 64px; padding: 12px 16px;
+  border: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; box-shadow: none;
+}
+.account-hub .account-inline .account-connection-groups #claude-connection > .connection-card { display: flex; min-height: 64px; padding: 12px 16px; gap: 14px; border: 0; border-radius: 0; }
+.account-hub .account-inline .account-connection-groups .connection-card:disabled { opacity: 1; }
+.account-hub .account-inline .account-connection-groups .connection-card:disabled > :not(.connection-card-action) { opacity: .6; }
+.account-hub .account-inline .account-connection-groups .connection-card:focus-visible { outline: 2px solid var(--text); outline-offset: -2px; }
+.account-hub .account-inline .account-connection-groups :is(.connection-card, .account-service-summary) > .connector-logo {
+  position: relative; display: inline-grid; place-items: center; box-sizing: border-box; width: 36px; height: 36px; flex: 0 0 36px; padding: 0;
+  border: 1px solid var(--home-line); border-radius: 10px; background: var(--home-soft); color: var(--text); font-size: 15px; font-weight: 600; line-height: 1;
+}
+.account-hub .account-inline .account-connection-groups .connector-logo svg { width: 18px; height: 18px; }
+.account-hub .account-inline .account-connection-groups :is(#claude-connection, #whatsapp-connection, [data-provider="cloudflare"]) .connector-logo svg { fill: none; stroke-width: 1.7; }
+.account-hub .account-inline .account-connection-groups :is(.is-connected, [data-connected]) .connector-logo::after {
+  content: ""; position: absolute; right: -3px; bottom: -3px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--home-accent); box-shadow: 0 0 0 2px var(--row-bg);
+}
+.account-hub .account-inline .account-connection-groups :is(.connection-card-copy, .account-service-copy) { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.account-hub .account-inline .account-connection-groups :is(.connection-card-copy, .account-service-copy) strong { color: var(--text); font-size: 14px; font-weight: 500; letter-spacing: -.01em; }
+.account-hub .account-inline .account-connection-groups :is(.connection-card-copy, .account-service-copy) > span,
+.account-hub .account-inline .account-connection-groups #claude-connection .connection-card-copy > span {
+  display: block; color: var(--home-muted); font-size: 12.5px; line-height: 1.45; white-space: normal; overflow-wrap: anywhere;
+}
+/* AccountConnectionCard keeps its detail screen-reader-only elsewhere; show it here. */
+.account-hub .account-inline .account-connection-groups .connection-card-copy > .sr-only {
+  position: static; width: auto; height: auto; margin: 0; padding: 0; overflow: visible; clip: auto; white-space: normal;
+}
+.account-hub .account-inline .account-connection-groups .account-service-row[data-connected] .account-service-copy > span { display: block; color: var(--text); }
+.account-hub .account-inline .account-connection-groups .account-service-row[data-connected] .account-service-copy > span::before { content: none; }
+/* Actions: homepage pill buttons. Connect reads as primary text; connected rows stay quiet. */
+.account-hub .account-inline .account-connection-groups .connection-card-action,
+.account-hub .account-inline .account-connection-groups button:not(.connection-card),
+.account-hub .account-inline .account-connection-group > .connection-setup button {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; align-self: center; box-sizing: border-box;
+  min-height: 32px; margin: 0; padding: 0 14px; border: 1px solid var(--home-line); border-radius: 999px;
+  background: var(--surface); color: var(--text); font: 500 12.5px/1 var(--font-sans); letter-spacing: 0; text-transform: none; white-space: nowrap;
+  transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+.account-hub .account-inline .account-connection-groups .connection-card:not(:disabled):hover .connection-card-action,
+.account-hub .account-inline .account-connection-groups button:not(.connection-card):hover:not(:disabled) { background: var(--home-soft); border-color: color-mix(in srgb, var(--text) 22%, transparent); }
+.account-hub .account-inline .account-connection-groups :is(.connection-card.is-connected .connection-card-action, .account-service-row[data-connected] .account-service-summary > button) { color: var(--home-muted); }
+.account-hub .account-inline .account-connection-groups :is(.account-service-identity, .chatgpt-account-details) button:hover:not(:disabled) {
+  color: var(--negative); border-color: color-mix(in srgb, var(--negative) 35%, transparent); background: color-mix(in srgb, var(--negative) 6%, var(--surface));
+}
+.account-hub .account-inline .account-connection-groups button:not(.connection-card):disabled { opacity: .5; }
+.account-hub .account-inline .account-connection-groups .mcp-connection-actions { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+/* Connected identities: inset rows that echo the homepage command rows. */
+.account-hub .account-inline .account-connection-groups .account-service-identity {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -2px 16px 8px 66px; padding: 7px 7px 7px 12px;
+  border: 1px solid var(--home-line); border-radius: 12px; background: var(--home-soft); font-size: 12.5px;
+}
+.account-hub .account-inline .account-connection-groups .account-service-row > .account-service-identity:last-child { margin-bottom: 14px; }
+.account-hub .account-inline .account-connection-groups .account-service-identity > div { display: grid; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
+.account-hub .account-inline .account-connection-groups .account-service-identity strong { font-weight: 500; }
+.account-hub .account-inline .account-connection-groups .account-service-identity span { color: var(--home-muted); font-size: 12px; }
+.account-hub .account-inline .account-connection-groups p.account-service-identity { display: block; color: var(--home-muted); }
+.account-hub .account-inline .account-connection-groups .account-service-identity button { min-height: 28px; padding: 0 12px; font-size: 12px; }
+/* Expanded setup and details: one inset surface under the owning row. */
+.account-hub .account-inline .account-connection-groups :is(.chatgpt-account-details, .whatsapp-pairing, .cloudflare-connection-form),
+.account-hub .account-inline .account-connection-group > .connection-setup {
+  display: grid; gap: 12px; margin: -2px 16px 14px 66px; padding: 14px; border: 1px solid var(--home-line); border-radius: 12px;
+  background: var(--home-soft); color: var(--text); font-size: 13px;
+}
+.account-hub .account-inline .account-connection-group > .connection-setup { margin: 10px 0 0; border-radius: 16px; }
+.account-hub .account-inline .account-connection-groups :is(.chatgpt-account-details, .whatsapp-pairing, .cloudflare-connection-form) :is(p, span, small, label) { color: var(--home-muted); font-size: 12.5px; }
+.account-hub .account-inline .account-connection-groups .cloudflare-connection-form label { color: var(--text); font-size: 12.5px; font-weight: 500; }
+.account-hub .account-inline .account-connection-groups :is(.chatgpt-account-details, .whatsapp-pairing, .cloudflare-connection-form) > button { justify-self: start; }
+.account-hub .account-inline .account-connection-groups .chatgpt-account-details ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.account-hub .account-inline .account-connection-groups .chatgpt-account-details li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--home-line); }
+.account-hub .account-inline .account-connection-groups .chatgpt-account-details li:first-child { border-top: 0; padding-top: 0; }
+.account-hub .account-inline .account-connection-groups .chatgpt-account-details code { color: var(--text); font: 12px/1.5 var(--font-mono, ui-monospace, monospace); }
+.account-hub .account-inline .account-connection-groups .chatgpt-login code { font-size: 20px; letter-spacing: .1em; }
+.account-hub .account-inline .account-connection-groups .chatgpt-login strong { font-weight: 500; }
+.account-hub .account-inline .account-connection-groups .chatgpt-login a,
+.account-hub .account-inline .account-connection-groups .cloudflare-connection-form a { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
+.account-hub .account-inline .account-connection-groups :is(input, select),
+.account-hub .account-inline .account-connection-group > .connection-setup input {
+  box-sizing: border-box; min-width: 0; min-height: 36px; padding: 7px 12px; border: 1px solid var(--home-line); border-radius: 10px;
+  background: var(--surface); color: var(--text); font: 13px/1.4 var(--font-sans);
+}
+.account-hub .account-inline .account-connection-groups :is(input, select):focus { border-color: color-mix(in srgb, var(--text) 40%, transparent); outline: none; }
+.account-hub .account-inline .account-connection-groups :is(input, select):focus-visible { outline: 2px solid color-mix(in srgb, var(--home-accent) 55%, transparent); outline-offset: 1px; }
+.account-hub .account-inline .account-connection-group > .connection-setup > div { display: flex; gap: 8px; }
+.account-hub .account-inline .account-connection-group > .connection-setup label { color: var(--home-muted); font-size: 12.5px; }
+/* MCP add row: a form inside the row, never a nested card. */
+.account-hub .account-inline .account-connection-groups .mcp-connection-add { align-items: flex-start; }
+.account-hub .account-inline .account-connection-groups .mcp-connection-add-form { gap: 2px; }
+.account-hub .account-inline .account-connection-groups .mcp-connection-add-form label strong { font-size: 14px; font-weight: 500; }
+.account-hub .account-inline .account-connection-groups .mcp-connection-add-form .mcp-connection-actions { margin-top: 8px; }
+.account-hub .account-inline .account-connection-groups .mcp-connection-add-form input { flex: 1; width: 0; min-height: 36px !important; font-size: 13px !important; }
+.account-hub .account-inline .account-connection-groups :is(.mcp-connection-add-form small, .mcp-connection-error) { color: var(--negative); font-size: 12px; }
+/* Loading: a skeleton row in place of the list. */
+.account-hub .account-inline .account-connection-groups :is(.wizard-connectors, .account-connection-group) > p[role="status"] {
+  display: flex; align-items: center; gap: 14px; min-height: 64px; margin: 0; padding: 12px 16px; color: var(--home-muted); font-size: 13px;
+}
+.account-hub .account-inline .account-connection-groups .account-connection-group > p[role="status"] { border: 1px solid var(--home-line); border-radius: 16px; }
+.account-hub .account-inline .account-connection-groups :is(.wizard-connectors, .account-connection-group) > p[role="status"]::before {
+  content: ""; flex: 0 0 36px; height: 36px; border-radius: 10px;
+  background: linear-gradient(90deg, var(--home-soft) 20%, color-mix(in srgb, var(--text) 9%, var(--surface)) 50%, var(--home-soft) 80%) 0 0 / 300% 100%;
+  animation: account-connection-shimmer 1.4s linear infinite;
+}
+@keyframes account-connection-shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+/* Result and failure banners. */
+.account-hub .account-inline .account-connection-groups .connector-result {
+  display: flex; align-items: center; gap: 10px; margin: -16px 0 0; padding: 11px 14px; border: 1px solid var(--home-line); border-radius: 12px;
+  background: var(--home-soft); font-size: 13px;
+}
+.account-hub .account-inline .account-connection-groups .connector-result::before { content: ""; flex: 0 0 8px; height: 8px; border-radius: 50%; background: var(--home-accent); }
+.account-hub .account-inline .account-connection-groups .connector-result--failed { border-color: color-mix(in srgb, var(--negative) 30%, transparent); color: var(--negative); background: color-mix(in srgb, var(--negative) 6%, var(--surface)); }
+.account-hub .account-inline .account-connection-groups .connector-result--failed::before { background: var(--negative); }
+.account-hub .account-inline :is(.account-connections-content, .account-connection-groups, .account-connection-group) > .account-failure,
+.account-hub .account-inline .account-connection-groups .cloudflare-connection-form[role="alert"],
+.account-hub .account-inline .account-connection-groups .claude-connection-failure {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 0 0 16px; padding: 10px 10px 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--negative) 30%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--negative) 6%, var(--surface)); color: var(--negative); font-size: 13px;
+}
+.account-hub .account-inline .account-connection-group > .account-failure { margin: 10px 0 0; }
+.account-hub .account-inline .account-connection-groups .cloudflare-connection-form[role="alert"],
+.account-hub .account-inline .account-connection-groups .claude-connection-failure { margin: -2px 16px 14px 66px; }
+.account-hub .account-inline .account-connection-groups :is(.cloudflare-connection-form[role="alert"], .claude-connection-failure) p { color: inherit; margin: 0; }
+.account-hub .account-inline .account-failure p { margin: 0; }
 @media (max-width: 540px) {
-  .account-hub .account-inline .account-service-identity { padding-left: 12px; }
+  .account-hub .account-inline .account-connection-groups { gap: 30px; }
+  .account-hub .account-inline .account-connection-group-heading { padding-right: 88px; }
+  .account-hub .account-inline .account-connection-groups .wizard-connectors { border-radius: 14px; }
+  .account-hub .account-inline .account-connection-groups :is(.connection-card, .account-service-summary),
+  .account-hub .account-inline .account-connection-groups #claude-connection > .connection-card { gap: 12px; min-height: 60px; padding: 12px; }
+  .account-hub .account-inline .account-connection-groups :is(.connection-card, .account-service-summary) > .connector-logo { width: 32px; height: 32px; flex-basis: 32px; border-radius: 9px; }
+  .account-hub .account-inline .account-connection-groups .connection-card-action,
+  .account-hub .account-inline .account-connection-groups button:not(.connection-card) { min-height: 36px; padding: 0 12px; }
+  .account-hub .account-inline .account-connection-groups .account-service-identity button { min-height: 32px; }
+  .account-hub .account-inline .account-connection-groups :is(.account-service-identity, .chatgpt-account-details, .whatsapp-pairing, .cloudflare-connection-form, .cloudflare-connection-form[role="alert"], .claude-connection-failure) { margin-left: 12px; margin-right: 12px; }
+  .account-hub .account-inline .account-connection-groups :is(input, select),
+  .account-hub .account-inline .account-connection-groups .mcp-connection-add-form input { font-size: 16px !important; }
+  .account-hub .account-inline .account-connection-groups .mcp-connection-add-form .mcp-connection-actions { flex-wrap: wrap; }
+  .account-hub .account-inline .account-connection-groups .mcp-connection-add-form input { flex-basis: 100%; width: 100%; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .account-hub .account-inline .account-connection-groups :is(.wizard-connectors, .account-connection-group) > p[role="status"]::before { animation: none; }
+}
+.account-hub .account-inline .account-connection-groups #claude-connection .connection-card-action { color: var(--text); }
+.account-hub .account-inline .account-connection-groups #claude-connection .connection-card.is-connected .connection-card-action { color: var(--home-muted); }

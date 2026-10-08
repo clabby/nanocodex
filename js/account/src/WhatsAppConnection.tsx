@@ -212,7 +212,7 @@ function WhatsAppConnectionContent({ requiresLogin = false, accountId = "" }: Wh
   return <section className="whatsapp-connection" id="whatsapp-connection" aria-label="WhatsApp connection">
     <button className={`connection-card connector-row${status?.connected ? " is-connected" : ""}`} type="button"
       disabled={requiresLogin} aria-expanded={expanded} aria-controls="whatsapp-pairing" onClick={() => setExpanded(value => !value)}>
-      <MessageCircle aria-hidden="true" />
+      <span className="connector-logo" aria-hidden="true"><MessageCircle /></span>
       <span className="connection-card-copy"><strong>WhatsApp</strong><span>{status?.connected ? status.label ?? "Connected" : "Link your WhatsApp on this phone"}</span></span>
       <span className="connection-card-action">{status?.connected ? "Manage" : "Connect"}</span>
     </button>

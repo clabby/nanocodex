@@ -69,7 +69,7 @@ export function CloudflareConnection({ accountId, requiresLogin = false }: { acc
     } catch { setError("Couldn’t load Cloudflare or Vault. Try checking again."); }
   }
 
-  return <div className="account-service-row" data-provider="cloudflare" role="listitem">
+  return <div className="account-service-row" data-provider="cloudflare" data-connected={connections.query.data?.length ? "true" : undefined} role="listitem">
     <div className="account-service-summary">
       <span className="connector-logo"><Cloud aria-hidden="true" /></span>
       <div className="account-service-copy"><strong>Cloudflare</strong><span>{connections.query.data?.length ? "Connected" : "Workers, storage, and account services"}</span></div>
