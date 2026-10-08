@@ -74,6 +74,16 @@ let plist;
 let plistBefore;
 let linuxOwner;
 try {
+  const missingPath = run(runner, ['hand', 'restart', '--executable'], 1);
+  assert.match(missingPath.stderr, /value/);
+  if (process.platform === 'darwin') {
+    const journal = join(store, 'update-transaction.json');
+    writeFileSync(journal, 'interrupted development fixture');
+    const refused = run(runner, ['hand', 'restart', '--executable', '/nonexistent/development-build'], 1);
+    assert.match(refused.stderr, /hand recover/);
+    assert.equal(readFileSync(journal, 'utf8'), 'interrupted development fixture');
+    rmSync(journal);
+  }
   const cliVersion = run(cli, ['--version']).stdout;
   const handVersion = run(hand, ['--version']).stdout;
   const revision = cliVersion.match(/^Commit SHA: ([0-9a-f]{40})$/im)?.[1].toLowerCase();

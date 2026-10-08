@@ -190,11 +190,8 @@ its automatic download. Custom external MCP commands continue to use
 `NANOCODEX_COMPUTER_TRANSPORT=mcp`. No versions are spoofed and no provider binaries
 are committed to this repository or redistributed in Nanocodex release assets.
 
-The older `scripts/install-upstream-cua.py` copy-only launcher is retired and
-fails before touching files. It did not provide the no-Codex lifecycle/policy
-host or attestation context. Use the shared native provisioning command on
-macOS, or the separate Linux Sky installer; Windows upstream support is currently
-unavailable.
+Use the shared native provisioning command on macOS, or the separate Linux
+Sky installer; Windows upstream support is currently unavailable.
 
 ## Provider permissions and validation
 

@@ -163,14 +163,11 @@ silently restarts an installed Hand. An explicit `hand restart` activates a stag
 pair; `hand start` may activate it when the owner is not already loaded. Windows background runs also refresh the verified upstream
 CUA payload.
 
-The older machine-wide helper remains available for explicitly managed macOS or
-Linux deployments. First run `nanocodex2 login` as the machine owner, then:
-
-```sh
-sudo python3 scripts/install-hand-service.py --user "$USER" --binary /path/to/nanocodex2
-```
-
-The installer creates one machine-wide launchd service on macOS or systemd service on Linux, running as that non-root user. It uses the user's saved account login and existing `vm.json` configuration. It neither copies credentials into the service definition nor requires a terminal or app to stay open. Host tools work without a GUI; desktop capture needs the platform's GUI session and permissions.
+Use `nanocodex hand install` to install the native Hand owner on macOS or Linux.
+Existing machine-wide owners require explicit migration before installing a
+different owner topology; installation does not automatically remove those
+services. Legacy service start and recovery remain available for existing
+installations.
 
 On macOS the Hand needs Screen & System Audio Recording (live screen) and
 Accessibility (mouse and keyboard input). Installation requests both together as
@@ -460,3 +457,35 @@ requirements. Managed desktop/server images retain their explicitly provisioned,
 architecture-specific helper executables via `NANOCODEX_WAYMOTE`/`NANOCODEX_GRIM`.
 Those build-owned overrides are not a missing-bundle or capture-failure fallback.
 Runtime performs no downloads, package installation or sudo.
+
+### Local macOS development
+
+1. Build both binaries with `cargo build -p nanocodex-bin -p nanocodex2-bin`.
+   Run the CLI at `./target/debug/nanocodex` directly. For release builds add
+   `--release` and substitute `target/release` in the commands below.
+2. Select a real signing certificate explicitly and sign each rebuilt Hand:
+
+   ```sh
+   security find-identity -v -p codesigning
+   export NANOCODEX_CODESIGN_IDENTITY='<selected certificate SHA-1>'
+   codesign --force --sign "$NANOCODEX_CODESIGN_IDENTITY" --identifier com.nanocodex.hand --entitlements nanocodex-vm.entitlements ./target/debug/nanocodex2
+   codesign --verify --strict ./target/debug/nanocodex2
+   codesign --display --requirements - ./target/debug/nanocodex2
+   ```
+
+3. Disable automatic release updates with
+   `./target/debug/nanocodex update --auto disable`.
+4. Restart the existing owner with
+   `./target/debug/nanocodex hand restart --executable ./target/debug/nanocodex2`.
+
+The explicit executable preserves service configuration and identity, uses the
+update lock, and verifies a fresh connected publisher. Pending version updates
+must be applied with ordinary `hand restart` first; interrupted updates require
+`hand recover`. No-flag restart retains its existing behavior.
+
+Keep the certificate and identifier stable; do not use ad hoc signing or a
+custom designated requirement. Migration from ad hoc signing may require a new
+permission grant. Signing alone does not restart the Hand. Rebuilding the same
+active target path overwrites the previous executable: rollback restores service
+configuration, not overwritten build bytes. Keep a known-good build separately
+if executable rollback is needed, and avoid rebuilding during restart.

@@ -207,6 +207,11 @@ process protocol that applications must adopt. See
 [`bin/nanocodex`](bin/nanocodex), the [examples index](examples/README.md), and
 the [release switcher documentation](bin/nanocodex/src/update.rs).
 
+For local checkout development, build with `cargo build -p nanocodex-bin -p nanocodex2-bin`
+and run `./target/debug/nanocodex`. See [local macOS development](docs/architecture/hands.md#local-macos-development)
+for signing and restarting the existing Hand directly from `target/debug` or
+`target/release`.
+
 To install a branch or an open pull request from source, run
 `nanocodex update --branch master` or `nanocodex update --pr 123`. Both commands fetch the selected
 revision and compile the CLI and Hand locally with Cargo. PR selection also

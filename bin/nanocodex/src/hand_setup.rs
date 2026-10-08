@@ -69,7 +69,11 @@ enum HandCommand {
     /// Stop the local Hand service.
     Stop,
     /// Restart the local Hand service.
-    Restart,
+    Restart {
+        /// Restart the existing macOS owner with a local development binary.
+        #[arg(long)]
+        executable: Option<PathBuf>,
+    },
     /// Recover an interrupted coordinated CLI and device Hand update.
     Recover,
     /// Ask the running macOS Hand service to request Screen Recording and
@@ -569,7 +573,10 @@ impl Hand {
                     crate::hand_service::stop().await
                 }
             }
-            HandCommand::Restart => crate::update::restart_hand().await,
+            HandCommand::Restart { executable } => match executable {
+                Some(path) => crate::update::restart_hand_with_executable(&path).await,
+                None => crate::update::restart_hand().await,
+            },
             HandCommand::Recover => crate::update::recover_hand_update().await,
             HandCommand::Permissions {
                 check: true, json, ..

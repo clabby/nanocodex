@@ -841,6 +841,42 @@ pub(crate) async fn start_hand() -> Result<()> {
     platform_hand_action(false).await
 }
 
+/// Caller holds the shared update/service lock. Never changes CLI selection.
+pub(crate) async fn restart_hand_with_executable(path: &Path) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("hand restart --executable requires macOS");
+    }
+    let store = VersionStore::discover()?;
+    if store.root().join("update-transaction.json").exists() {
+        bail!("An interrupted update needs recovery; run nanocodex hand recover first");
+    }
+    if store.pending()?.is_some() {
+        bail!(
+            "A version update is pending; apply it with nanocodex hand restart before selecting a development executable"
+        );
+    }
+    crate::hand_service::refuse_system_service().await?;
+    let state = crate::hand_service::status().await?;
+    if !state.installed {
+        bail!("No installed Hand owner; run nanocodex hand install first");
+    }
+    if crate::hand_service::is_pending().await? {
+        bail!("Hand enrollment is pending; connect the existing owner before restarting a development executable");
+    }
+    let mut service = crate::hand_service::prepare_update(path, true)
+        .await?
+        .ok_or_else(|| eyre!("No installed Hand owner; run nanocodex hand install first"))?;
+    if let Err(error) = service.apply().await {
+        if let Err(rollback) = service.rollback().await {
+            bail!(
+                "Development restart failed: {error:#}; rollback failed: {rollback:#}; run nanocodex hand recover"
+            );
+        }
+        return Err(error);
+    }
+    service.commit().await
+}
+
 pub(crate) async fn restart_hand() -> Result<()> {
     let store = VersionStore::discover()?;
     if let Some(key) = store.pending()? {
