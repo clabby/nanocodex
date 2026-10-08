@@ -3266,6 +3266,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn running_children_journal_mid_turn_progress_but_settled_turns_keep_their_boundary() {
+        let store = crate::MemorySubagentStore::new();
+        let (registry, _control, _updates) = super::channel(4);
+        registry.set_store(Arc::new(store));
+        let (id, _session_id) =
+            insert_pending_runtime_session(&registry, "root", None, Arc::new(Notify::new())).await;
+        let key = ("root".to_owned(), id);
+        let has_checkpoint = || registry.checkpoints.lock().unwrap().contains_key(&key);
+        timeout(Duration::from_secs(5), async {
+            while !has_checkpoint() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let set_status = |status: AgentStatus| {
+            let registry = Arc::clone(&registry);
+            async move {
+                let mut state = registry.state.lock().await;
+                let session = state
+                    .scopes
+                    .get_mut("root")
+                    .unwrap()
+                    .sessions
+                    .get_mut(&id)
+                    .unwrap();
+                session.status = status;
+            }
+        };
+        // A running turn records each committed step, not only its boundaries.
+        set_status(AgentStatus::Running).await;
+        registry.checkpoints.lock().unwrap().remove(&key);
+        registry.capture_progress("root", id);
+        registry.capture_progress("root", id);
+        timeout(Duration::from_secs(5), async {
+            while !has_checkpoint() || registry.progress_captures.lock().unwrap().contains_key(&key)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Once the turn settled, a late progress capture must not overwrite
+        // the final turn boundary journaled by completion.
+        set_status(AgentStatus::Completed {
+            output: serde_json::json!({}),
+        })
+        .await;
+        registry.checkpoints.lock().unwrap().remove(&key);
+        registry.capture_progress("root", id);
+        timeout(Duration::from_secs(5), async {
+            while registry.progress_captures.lock().unwrap().contains_key(&key) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!has_checkpoint());
+    }
+
+    #[tokio::test]
     async fn reconstructed_child_announces_host_binding_once_before_execution() {
         let (registry, _, mut updates) = super::channel(4);
         let factory_registry = registry.clone();
