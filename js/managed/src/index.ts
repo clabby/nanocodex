@@ -75,7 +75,8 @@ import { threadSharingTools, redactSharedLinkTokens, sharedTextStream } from "./
 import { initializeTurnInputs, inputChunks, lazyTurnInput, readTurnInput, storeTurnInput } from "./managed-turn-input";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ArchiveMaintenance } from "./archive-maintenance";
-import { managedCredentialSubject, scopedManagedModelEgress, scopedSessionToolEgress, sessionCredentialOwner } from "./session-credential-ownership";
+import { PreparedModelUpgrade } from "./prepared-model-upgrade";
+import { sessionModelRelayRegion, managedCredentialSubject, scopedManagedModelEgress, scopedSessionToolEgress, sessionCredentialOwner } from "./session-credential-ownership";
 import { remoteICE } from "./hand-remote-ice";
 import { REMOTE_VM_ASSERTION, type RemoteVMPublisher } from "./hand-remote";
 import { serverHandTool } from "./ssh-hand-setup";
@@ -4105,6 +4106,7 @@ export class DurableAgentSession extends DurableComputerObject {
     this.#constructorMs = roundMilliseconds(performance.now() - constructorStartedAt);
   }
 
+  #preparedModelUpgrade?: PreparedModelUpgrade;
   #storageInitialized = false;
   #initializeStorage(): void {
     if (this.#storageInitialized) return;
@@ -5135,6 +5137,7 @@ export class DurableAgentSession extends DurableComputerObject {
         ).one().count > 0) {
         return json({ error: "agent_busy" }, { status: 409 });
       }
+      this.#preparedModelUpgrade?.dispose("exported");
       this.#durabilityExported = true;
       // Fence socket-owned mutation synchronously with the admission flag.
       // No request may cross an await between observing active admission and
@@ -6042,6 +6045,7 @@ export class DurableAgentSession extends DurableComputerObject {
         await transaction.setAlarm(prepared.cleanup_at);
       });
       this.#credentialBinding = prepared;
+      this.#preparedModelUpgrade?.dispose("imported");
       this.#durabilityImportState = requestedImport ? "pending" : undefined;
     } else if (current.state === "preparing") {
       const refreshed = {
@@ -6509,35 +6513,72 @@ export class DurableAgentSession extends DurableComputerObject {
         this.#accountCatalog.vault(this.env.NANOCODEX, asserted.ownerId, authorityKey),
       ]).then(() => {}));
     }
-    this.#initializeStorage();
-    const credentialBinding: CredentialBindingOwnership = {
-      cleanup_at: Date.now(),
-      owner_id: asserted.ownerId,
-      session_id: sessionId,
-      state: "active",
-      subject: this.ctx.id.toString(),
-      ...(this.env.MANAGED_AGENT_DIRECT_CREDENTIALS === "true" ? { strategy: "session_v1" as const } : {}),
-    };
-    // Keep ownership and initialization in the same synchronous write batch.
-    // The SQLite output gate still confirms both before the upgrade, registry
-    // publication, or provider traffic can leave this object.
-    this.ctx.storage.kv.put(CREDENTIAL_BINDING_KEY, credentialBinding);
-    this.#credentialBinding = credentialBinding;
-    const initialized = this.#initializeSession({
-      session_id: sessionId,
-      owner_id: asserted.ownerId,
-      organization_id: asserted.organizationId,
-      team_id: asserted.teamId,
-      authorization_epoch: asserted.authorizationEpoch,
-      public_origin: publicOrigin,
-      settings,
-    }, normalizeProviderColo(request.headers.get(MANAGED_INGRESS_COLO)));
-    if (!initialized.ok) return initialized;
+    // Header contract: nanocodex/cloudflare/egress.mjs openBrokeredWebSocket;
+    // covered against the real SDK by prepared-model-upgrade-journey.test.mjs.
+    // Reserve the exact SDK transport identity before storage opens its output
+    // gate. This handshake has no prompt and never accepts/sends socket frames.
+    const earlyRuntimeId = prepare && !this.#storageInitialized
+      && !asserted.authorization.connectGrant && !asserted.authorization.guestShareLinkId
+      && this.env.MANAGED_AGENT_DIRECT_CREDENTIALS === "true"
+      && this.env.NANOCODEX_SESSION_MODEL_EGRESS && !settings.model.startsWith("claude-")
+      ? uuidV7() : undefined;
+    if (earlyRuntimeId) {
+      const headers = new Headers({
+        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL", upgrade: "websocket",
+        "openai-beta": "responses_websockets=2026-02-06",
+        "session-id": earlyRuntimeId, "thread-id": earlyRuntimeId, "x-client-request-id": earlyRuntimeId,
+        "x-openai-internal-codex-responses-lite": "true", "x-responsesapi-include-timing-metrics": "true",
+        "user-agent": "nanocodex-js/cloudflare",
+        "x-nanocodex-subject": managedCredentialSubject(this.ctx.id.toString()),
+        "x-nanocodex-session-model-owner": asserted.ownerId,
+      });
+      const region = sessionModelRelayRegion(normalizeProviderColo(request.headers.get(MANAGED_INGRESS_COLO)));
+      if (region) headers.set("x-nanocodex-model-region", region);
+      this.#preparedModelUpgrade = new PreparedModelUpgrade(
+        new Request("https://nanocodex.internal/v1/responses", { headers }), this.env.NANOCODEX_SESSION_MODEL_EGRESS!);
+    }
+    try {
+      this.#initializeStorage();
+      if (earlyRuntimeId) {
+        // Same schema/identity consumed by Cloudflare Agent durableIdentity.
+        // Persist in the initial ownership batch; never replace an existing ID.
+        this.ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_agent (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1), session_id TEXT NOT NULL UNIQUE)`);
+        this.ctx.storage.sql.exec("INSERT INTO nanocodex_cloudflare_agent(singleton,session_id) VALUES(1,?)", earlyRuntimeId);
+      }
+      const credentialBinding: CredentialBindingOwnership = {
+        cleanup_at: Date.now(),
+        owner_id: asserted.ownerId,
+        session_id: sessionId,
+        state: "active",
+        subject: this.ctx.id.toString(),
+        ...(this.env.MANAGED_AGENT_DIRECT_CREDENTIALS === "true" ? { strategy: "session_v1" as const } : {}),
+      };
+      // Keep ownership and initialization in the same synchronous write batch.
+      // The SQLite output gate still confirms both before the upgrade, registry
+      // publication, or provider inference frames can leave this object.
+      // The auth-only upgrade fetch was invoked before this batch.
+      this.ctx.storage.kv.put(CREDENTIAL_BINDING_KEY, credentialBinding);
+      this.#credentialBinding = credentialBinding;
+      const initialized = this.#initializeSession({
+        session_id: sessionId,
+        owner_id: asserted.ownerId,
+        organization_id: asserted.organizationId,
+        team_id: asserted.teamId,
+        authorization_epoch: asserted.authorizationEpoch,
+        public_origin: publicOrigin,
+        settings,
+      }, normalizeProviderColo(request.headers.get(MANAGED_INGRESS_COLO)));
+      if (!initialized.ok) { this.#preparedModelUpgrade?.dispose("admission_failed"); return initialized; }
 
-    this.#publishLiveRegistration(asserted.ownerId, sessionId);
-    const response = this.#upgrade(asserted.authorization, null, callerContext(request.headers), prepare);
-    performanceCommit(this.ctx, "session.create.commit");
-    return response;
+      this.#publishLiveRegistration(asserted.ownerId, sessionId);
+      const response = this.#upgrade(asserted.authorization, null, callerContext(request.headers), prepare);
+      performanceCommit(this.ctx, "session.create.commit");
+      return response;
+    } catch (error) {
+      this.#preparedModelUpgrade?.dispose("admission_failed");
+      throw error;
+    }
   }
 
   #publishLiveRegistration(ownerId: string, sessionId: string, preparedRegistry = false): void {
@@ -9322,6 +9363,7 @@ export class DurableAgentSession extends DurableComputerObject {
     // Fence reconstruction first. A crash after this transaction is recovered
     // by the retained marker/alarm even if the local SQL tombstone has not yet
     // been written. The reverse order can strand external ownership forever.
+    this.#preparedModelUpgrade?.dispose("deleted");
     this.#deleting = true;
     this.#hostedTools.shutdown("managed agent is being deleted");
     let markerCommitted = false;
@@ -9364,6 +9406,7 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   async #performOwnedSessionDeletion(generation: number): Promise<void> {
+    this.#preparedModelUpgrade?.dispose("deleted");
     this.#deleting = true;
     // Reconstruction can enter here from a marker committed just before a
     // crash. Reassert the permanent local tombstone before any cleanup await.
@@ -12845,7 +12888,16 @@ export class DurableAgentSession extends DurableComputerObject {
     return scopedManagedModelEgress(
       this.env.NANOCODEX, this.ctx.id.toString(), this.#credentialSubject(),
       this.#credentialBinding?.strategy !== "session_v1" || this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
-        binding: this.env.NANOCODEX_SESSION_MODEL_EGRESS,
+        binding: {
+          fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+            const request = new Request(input, init);
+            const prepared = this.#preparedModelUpgrade;
+            const response = await prepared?.take(request, () => this.ctx.storage.sync(),
+              () => this.#preparedModelUpgrade === prepared && !this.#deleting && !this.#deleted
+                && !this.#durabilityExported && this.#durabilityImportState !== "pending");
+            return response ?? this.env.NANOCODEX_SESSION_MODEL_EGRESS!.fetch(request);
+          },
+        } as Fetcher,
         clientIngressColo: () => this.#routingOrigin().clientIngressColo,
         owner: () => sessionCredentialOwner({
           subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
@@ -13221,6 +13273,8 @@ export class DurableAgentSession extends DurableComputerObject {
     strict = false,
     options: { preserveAccountDiscovery?: boolean } = {},
   ): Promise<void> {
+    this.#preparedModelUpgrade?.dispose("retired");
+    this.#preparedModelUpgrade = undefined;
     // Idle retirement leaves account authority and the original discovery TTL
     // intact. Other lifecycle transitions still invalidate discovery, including
     // settings changes, deletion, and credential recovery.

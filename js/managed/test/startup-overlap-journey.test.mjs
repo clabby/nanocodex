@@ -157,7 +157,7 @@ export class FixtureModel extends DurableObject {
       return new Response('VOICE_RELEASED');
     }
     if(request.headers.get('upgrade')==='websocket') {
-      this.record('provider.connect',{published:this.published});
+      this.record('provider.connect',{published:this.published,session:request.headers.get('session-id'),headers:Object.fromEntries(request.headers)});
       const [client,server]=Object.values(new WebSocketPair());server.accept();
       server.addEventListener('close',()=>server.close(1000));
       let effectiveTools=[],requestIndex=0;
@@ -261,7 +261,7 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
         durableObjects:{NANOCODEX_SESSIONS:{className:"OriginAgentSession",useSQLite:true},NANOCODEX_USERS:{className:"UserAccount",useSQLite:true},NANOCODEX_ORGANIZATIONS:{className:"Organization",useSQLite:true},
           NANOCODEX_API_KEYS:{className:"ApiKeyRecord",useSQLite:true},NANOCODEX_AUTH:{className:"NonceStorage",useSQLite:true},NANOCODEX_ACCOUNT_TOOLS:{className:"OriginAccountHostedTools",useSQLite:true},
           MODEL:{className:"FixtureModel",useSQLite:true},NANOCODEX_MEMORY:{className:"FixtureModel",useSQLite:true},NANOCODEX_SANDBOXES:{className:"FixtureSandbox",useSQLite:true}},
-        serviceBindings:{NANOCODEX:{name:"managed",entrypoint:"FixtureEgress"}},r2Buckets:["NANOCODEX_HISTORY","NANOCODEX_WORKSPACES"]},
+        serviceBindings:{NANOCODEX:{name:"managed",entrypoint:"FixtureEgress"},NANOCODEX_SESSION_MODEL_EGRESS:{name:"managed",entrypoint:"FixtureEgress"}},r2Buckets:["NANOCODEX_HISTORY","NANOCODEX_WORKSPACES"]},
     ]});
   let failure, live, handAttachment, foreignAttachment, stalledAttachment, evidence={};
   try {
@@ -388,6 +388,7 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     assert.equal(upgradeStatus,101,'prepared live request upgrades while fresh discovery is held');
     const warming=await (await backend.fetch('https://fixture.internal/__trace')).json();
     assert.ok(warming.some(row=>row.event==='credential.prewarm' && row.region==='wnam'),'live admission starts prewarm while its reply is withheld');
+    assert.equal(warming.filter(row=>row.event==='provider.request').length,3,'auth-only live preparation sends no provider frames');
     await backend.fetch('https://fixture.internal/__release-prewarm');
     live.send(JSON.stringify({type:'prompt',id:liveTurn,input:'Reply STARTUP_OK'}));
     await waitMessage(message=>message.type==='turn_accepted' && message.id===liveTurn);
@@ -407,6 +408,8 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     assert.match(JSON.stringify(await waitTurn(liveTurn,ready.session_id,liveToken)),/STARTUP_OK/);
     const liveTrace=await(await backend.fetch('https://fixture.internal/__trace')).json();
     const liveRequests=liveTrace.filter(row=>row.event==='provider.request');
+    assert.equal(liveTrace.filter(row=>row.event==='provider.connect').length,2,'live turn reuses exactly one early socket');
+    assert.ok(records.some(row=>row.type==='managed.model_upgrade_preparation' && row.outcome==='consumed'),'SDK consumes pre-write upgrade');
     assert.equal(liveRequests.length,4);
     assert.ok(liveRequests[3].tools.includes('exec'),'first live prompt retains tools after discovery');
     assert.match(JSON.stringify(liveRequests[3].input),/startup_context/,'first live prompt retains the startup snapshot');
@@ -712,6 +715,14 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     const revoked=await directFetch();
     assert.equal(revoked.status,401,await revoked.text(),"direct admission checks live revocation on replay");
     assert.equal((await prewarmTrace()).filter(row=>row.event==='credential.prewarm').length,beforeRevoked.length,'revoked admission never prewarms');
+    const upgradesBeforeRejected=(await prewarmTrace()).filter(row=>row.event==='provider.connect').length;
+    await new Promise((resolve,reject)=>{
+      const denied=new WebSocket(liveUrl,{headers:{authorization:'Bearer '+directOwner.token,'x-nanocodex-prepare':'active-conversation'}});
+      denied.on('open',()=>{denied.terminate();reject(Error('revoked live authorization unexpectedly upgraded'));});
+      denied.on('unexpected-response',(_request,response)=>{response.resume();try{assert.equal(response.statusCode,401);resolve();}catch(error){reject(error);}});
+      denied.on('error',reject);
+    });
+    assert.equal((await prewarmTrace()).filter(row=>row.event==='provider.connect').length,upgradesBeforeRejected,'rejected live authorization starts no speculative provider handshake');
     evidence.credential_prewarm=beforeRevoked;
     const afterDirect=await(await backend.fetch("https://fixture.internal/__trace")).json();
     assert.equal(afterDirect.filter(row=>row.event==="provider.request").length,directCount,"replay, conflict, invalid input and revocation start no new inference");
