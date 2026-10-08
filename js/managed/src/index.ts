@@ -12885,6 +12885,13 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   #modelEgress(): Pick<Fetcher, "fetch"> {
+    const owner = () => sessionCredentialOwner({
+      subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
+      binding: this.#credentialBinding, session: this.#session(),
+      initialization: this.#initializationOwnership(),
+      deleting: this.#deleting, deleted: this.#deleted,
+      exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
+    });
     return scopedManagedModelEgress(
       this.env.NANOCODEX, this.ctx.id.toString(), this.#credentialSubject(),
       this.#credentialBinding?.strategy !== "session_v1" || this.env.NANOCODEX_SESSION_MODEL_EGRESS === undefined ? undefined : {
@@ -12892,20 +12899,19 @@ export class DurableAgentSession extends DurableComputerObject {
           fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
             const request = new Request(input, init);
             const prepared = this.#preparedModelUpgrade;
-            const response = await prepared?.take(request, () => this.ctx.storage.sync(),
-              () => this.#preparedModelUpgrade === prepared && !this.#deleting && !this.#deleted
-                && !this.#durabilityExported && this.#durabilityImportState !== "pending");
+            const generation = this.#runtimeOwnershipGeneration;
+            const valid = () => this.#runtimeOwnershipGeneration === generation
+              && owner() === request.headers.get("x-nanocodex-session-model-owner")
+              && (!prepared || this.#preparedModelUpgrade === prepared);
+            const response = await prepared?.take(request, () => this.ctx.storage.sync(), valid);
+            // Retirement can run while awaiting preparation or durability. An
+            // obsolete request must not escape through the ordinary fallback.
+            if (!valid()) throw new Error("Managed model ownership is no longer available");
             return response ?? this.env.NANOCODEX_SESSION_MODEL_EGRESS!.fetch(request);
           },
         } as Fetcher,
         clientIngressColo: () => this.#routingOrigin().clientIngressColo,
-        owner: () => sessionCredentialOwner({
-          subject: this.#credentialSubject(), storageId: this.ctx.id.toString(),
-          binding: this.#credentialBinding, session: this.#session(),
-          initialization: this.#initializationOwnership(),
-          deleting: this.#deleting, deleted: this.#deleted,
-          exported: this.#durabilityExported, importPending: this.#durabilityImportState === "pending",
-        }),
+        owner,
       },
       this.#configuration().chatgpt_account_id,
     );

@@ -50,9 +50,11 @@ export class Session extends DurableObject {
       if(response && await this.prepared.take(actual,()=>gate,()=>true))throw Error("duplicate consumption");
       return response ?? provider.fetch(actual);
     }}});
-    const result=await transport.createWebSocket('https://nanocodex.internal/v1/responses','runtime',{authorization:'host_managed'});
-    result.socket.send(JSON.stringify({type:'response.create'}));
-    return new Response('done');
+    try {
+      const result=await transport.createWebSocket('https://nanocodex.internal/v1/responses','runtime',{authorization:'host_managed'});
+      result.socket.send(JSON.stringify({type:'response.create'}));
+      return new Response('done');
+    } catch { return new Response('retired', {status:409}); }
   }
 }
 export default {fetch(request,env){return env.SESSIONS.getByName(new URL(request.url).searchParams.get('id')??'default').fetch(request);}};
@@ -72,6 +74,13 @@ test('prepared upgrade uses real SDK once after admission and cleans failures/mi
       if(['retire','late'].includes(mode))await call('/dispose',mode);
       if(mode==='expiry')await state(mode,v=>v.closed===1);
       await call('/release',mode);
+      if(['retire','late'].includes(mode)) {
+        assert.equal((await pending).status,409);
+        const retired=await state(mode,v=>v.closed===1);
+        assert.equal(retired.frames,0,'retired preparation sent a frame');
+        assert.equal(retired.upgrades,1,'retired preparation opened a fallback connection');
+        continue;
+      }
       assert.equal((await pending).status,200);
       const done=await state(mode,v=>v.frames===1);
       assert.equal(done.reused,mode==='reuse');

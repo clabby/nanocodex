@@ -28,6 +28,7 @@ export class PreparedModelUpgrade {
     this.#observe("started");
   }
   async take(request: Request, durable: () => Promise<void>, valid: () => boolean): Promise<Response | undefined> {
+    if (!valid()) { this.dispose("stale"); throw new Error("Managed model preparation is no longer authorized"); }
     if (this.#claimed || this.#disposed) return undefined;
     if (request.method !== "GET" || request.url !== this.#request.url) return undefined;
     const headers = (value: Request) => JSON.stringify([...value.headers.entries()].sort(([a], [b]) => a.localeCompare(b)));
@@ -39,7 +40,8 @@ export class PreparedModelUpgrade {
     try {
       await durable();
       const response = await this.#promise;
-      if (!response || this.#disposed || !valid()) { this.dispose("stale"); return undefined; }
+      if (!valid()) { this.dispose("stale"); throw new Error("Managed model preparation is no longer authorized"); }
+      if (!response || this.#disposed) { this.dispose("stale"); return undefined; }
       this.#transferred = true;
       clearTimeout(this.#timer);
       this.#observe("consumed");
