@@ -18,6 +18,7 @@ import { AgentSearchDialog } from "./AgentSearchDialog";
 import type { ManagedConversation } from "./managedAgentRuntime";
 import { useModalBoundary } from "./modalBoundary";
 import { NanocodexMark } from "./MainNavigation";
+import { accountRouteIntent } from "./accountRoutePreload";
 
 /** Web navigation owns presentation; the managed runtime still owns conversation selection. */
 const SIDEBAR_PAGE = 60;
@@ -180,7 +181,7 @@ export function AgentSidebar({
             <Layers aria-hidden="true" />
             <span>Agents</span>
           </Link>
-          <Link to="/account">
+          <Link to="/account" {...accountRouteIntent}>
             <CircleUserRound aria-hidden="true" />
             <span>Account</span>
           </Link>

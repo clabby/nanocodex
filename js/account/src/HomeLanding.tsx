@@ -6,6 +6,7 @@ import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import { useAccountSession } from "./AccountSession";
 import { pathForSurface } from "./navigation";
 import { preloadAgentExperience } from "./agentExperiencePreload";
+import { accountRouteIntent } from "./accountRoutePreload";
 import { MainNavigationLinks, NanocodexMark } from "./MainNavigation";
 import "./HomeLanding.css";
 
@@ -127,7 +128,7 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
           <div className="home-hero-actions">
             {account ? <>
               <Link className="home-button" to={agentsPath} {...agentIntent}>Open your agents</Link>
-              <Link className="home-button home-button--ghost" to={accountPath}>Manage connections</Link>
+              <Link className="home-button home-button--ghost" to={accountPath} {...accountRouteIntent}>Manage connections</Link>
             </> : <>
               <button className="home-button" type="button" onClick={focusSignIn} disabled={checking}>Sign in to connect accounts</button>
               <a className="home-button home-button--ghost" href="#home-cli">Install the CLI</a>
@@ -152,7 +153,7 @@ function HomeMarketing({ theme: controlledTheme, onThemeChange }: ThemeProps) {
               <p>{account.address ? `Personal account ${account.address.slice(0, 6)}…${account.address.slice(-4)}` : "Your personal account"} is ready. Pick up a conversation or manage what your agents can reach.</p>
               <div className="home-signed-in-actions">
                 <Link className="home-button" to={agentsPath} {...agentIntent}>Agents</Link>
-                <Link className="home-button home-button--ghost" to={accountPath}>Account &amp; connections</Link>
+                <Link className="home-button home-button--ghost" to={accountPath} {...accountRouteIntent}>Account &amp; connections</Link>
               </div>
             </section>
           ) : checking ? (

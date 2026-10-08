@@ -1,5 +1,6 @@
 import { Link } from "react-router";
 import { preloadAgentExperience } from "./agentExperiencePreload";
+import { accountRouteIntent } from "./accountRoutePreload";
 import { mainNavigation, pathForSurface, type MainSurface } from "./navigation";
 
 /** The Nanocodex app mark shared by the homepage, agents and account chrome. */
@@ -28,7 +29,7 @@ export function MainNavigationLinks({ current, className }: { current: MainSurfa
           className={current === item.surface ? "is-active" : undefined}
           {...(item.surface === "agent"
             ? { onFocus: preloadAgentExperience, onPointerEnter: preloadAgentExperience, onPointerDown: preloadAgentExperience }
-            : {})}
+            : item.surface === "connect" ? accountRouteIntent : {})}
         >
           {item.label}
         </Link>

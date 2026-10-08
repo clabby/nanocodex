@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useSta
 import { useLocation, useNavigate } from "react-router";
 import { HomeLanding } from "./HomeLanding";
 import { loadAgentExperience } from "./agentExperiencePreload";
+import { loadDeviceConnect } from "./accountRoutePreload";
 import { lockDocumentScroll } from "./modalBoundary";
 import { visualViewportKeyboardInset } from "./mobileInteraction";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
@@ -17,7 +18,7 @@ import {
 export type Theme = "light" | "dark";
 
 const AgentExperience = lazy(() => loadAgentExperience().then((module) => ({ default: module.AgentExperience })));
-const DeviceConnect = lazy(() => import("./DeviceConnect").then((module) => ({ default: module.DeviceConnect })));
+const DeviceConnect = lazy(() => loadDeviceConnect().then((module) => ({ default: module.DeviceConnect })));
 
 const titles: Record<MainSurface, string> = {
   home: "Nanocodex · agents connected to your accounts",
