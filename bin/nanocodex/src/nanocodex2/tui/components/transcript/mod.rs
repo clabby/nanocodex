@@ -1631,10 +1631,7 @@ impl LayoutCache {
                     ToolState::Failed => 2,
                     ToolState::Yielded => 3,
                 }] += 1;
-                duration = duration.saturating_add(
-                    live.or(call.duration_ns)
-                        .unwrap_or(0),
-                );
+                duration = duration.saturating_add(live.or(call.duration_ns).unwrap_or(0));
             }
             duration = duration.max(wrapper_duration);
             // A wrapper's children may follow an intervening message in another block.

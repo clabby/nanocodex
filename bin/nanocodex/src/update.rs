@@ -1300,7 +1300,9 @@ async fn install_local_binary(
     if companion.is_none() {
         (companion, hand_identity) = retained_hand(store).await?;
         if companion.is_none() && voice.is_some() {
-            bail!("--voice-archive needs a Hand: pass --hand-binary or build nanocodex-hand beside --path");
+            bail!(
+                "--voice-archive needs a Hand: pass --hand-binary or build nanocodex-hand beside --path"
+            );
         }
     }
     // Include the retained Hand too: the same CLI can be selected again after
@@ -1379,7 +1381,9 @@ async fn retained_hand(store: &VersionStore) -> Result<(Option<Vec<u8>>, Option<
         (Some(bytes), identity)
     } else {
         let active = store.active()?;
-        let identity = active.as_deref().and_then(|active| store.hand_identity_of(active));
+        let identity = active
+            .as_deref()
+            .and_then(|active| store.hand_identity_of(active));
         let hand = match active.as_deref() {
             Some(active) if store.is_cached_bundle(active, false)? => {
                 Some(fs::read(store.version_dir(active).join(HAND_FILE))?)

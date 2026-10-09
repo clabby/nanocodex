@@ -40,7 +40,10 @@ pub(super) fn prewarm() {
             .spawn(|| {
                 let assets = assets();
                 for (language, example) in [
-                    ("javascript", "const result = await tools.exec_command({cmd: 'ls'});"),
+                    (
+                        "javascript",
+                        "const result = await tools.exec_command({cmd: 'ls'});",
+                    ),
                     ("rust", "pub fn main() { println!(\"ready\"); }"),
                     ("json", "{\"result\": [true, 42]}"),
                     ("bash", "echo \"$PATH\" | head -n 1"),
