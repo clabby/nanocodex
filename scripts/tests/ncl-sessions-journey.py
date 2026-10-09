@@ -280,7 +280,12 @@ finally:
             raise AssertionError(f"timed out: {what}")
         def ckeys(*k): tmux("send-keys", "-t", S2 + ":0.0", *k)
         def ctyp(t): tmux("send-keys", "-t", S2 + ":0.0", "-l", t)
-        cwait(lambda s: "Enter send" in s, "claude composer", 40)
+        # Long workspace paths can displace the optional Enter-send footer hint.
+        def composer_visible(screen):
+            lines = [line.strip() for line in screen.splitlines()]
+            tops = [i for i, line in enumerate(lines) if line.startswith("╭─") and "%/" in line]
+            return bool(tops) and any(line.startswith("╰─") for line in lines[tops[-1] + 1:])
+        cwait(composer_visible, "claude composer", 40)
         ctyp("CLAUDE_FIRST"); ckeys("Enter"); cwait(lambda s: "REPLY_CLAUDE_FIRST" in s, "claude first answer")
         ctyp("CLAUDE_SECOND"); ckeys("Enter"); cwait(lambda s: "REPLY_CLAUDE_SECOND" in s, "claude second answer")
         ckeys("C-M-b")
