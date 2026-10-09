@@ -3374,7 +3374,7 @@ async fn run_inner(
                         }
                         ConnectionResult::Agent { purpose, result: Ok((agent, managed_events, agent_id, workspace, history, warning, settings, created, active_turns)) } => {
                             if let Some(local) = &mut runtime.local {
-                                local.adopt().await;
+                                local.adopt();
                                 if let Some(root) = app.root_mut(PaneId::Main) {
                                     root.set_capabilities(local.capabilities());
                                 }

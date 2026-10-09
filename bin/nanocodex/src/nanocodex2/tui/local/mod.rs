@@ -32,6 +32,7 @@ pub(crate) struct LocalState {
     pub(crate) launch: LocalLaunch,
     pub(crate) backend: Option<LocalBackend>,
     bridge: Option<JoinHandle<()>>,
+    retiring: tokio::task::JoinSet<eyre::Result<()>>,
     slot: Slot,
     pub(crate) submissions: events::Submissions,
     pub(crate) features: Features,
@@ -121,6 +122,7 @@ impl LocalState {
             launch,
             backend: None,
             bridge: None,
+            retiring: tokio::task::JoinSet::new(),
             slot: Arc::default(),
             submissions: events::Submissions::default(),
             features: Features::new(),
@@ -163,7 +165,7 @@ impl LocalState {
     }
 
     /// Adopts the backend built by [`Self::connect`] and attaches features.
-    pub(crate) async fn adopt(&mut self) {
+    pub(crate) fn adopt(&mut self) {
         let built = self
             .slot
             .lock()
@@ -174,7 +176,7 @@ impl LocalState {
         };
         if let Some(old) = self.backend.take() {
             self.features.shutdown();
-            drop(old.shutdown().await);
+            self.retiring.spawn(old.shutdown());
         }
         if let Some(old) = self.bridge.replace(bridge) {
             old.abort();
@@ -258,12 +260,19 @@ impl LocalState {
             .take();
         if let Some((backend, bridge)) = pending {
             bridge.abort();
-            backend.shutdown().await?;
+            self.retiring.spawn(backend.shutdown());
         }
-        match self.backend.take() {
-            Some(backend) => backend.shutdown().await,
-            None => Ok(()),
+        if let Some(backend) = self.backend.take() {
+            self.retiring.spawn(backend.shutdown());
         }
+        let mut first_error = None;
+        while let Some(result) = self.retiring.join_next().await {
+            let result = result.map_err(eyre::Error::from).and_then(|result| result);
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
