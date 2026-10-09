@@ -11,8 +11,8 @@ use std::{fmt, ops::Range, sync::Arc};
 pub(crate) struct Submission {
     text: String,
     images: Vec<SubmissionImage>,
-    /// Model-facing text replacing the displayed label (private workflow prompts).
-    agent_text: Option<String>,
+    /// Model-facing input replacing the displayed label (private workflow prompts).
+    agent: Option<Box<Submission>>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -26,7 +26,7 @@ impl Submission {
         Self {
             text,
             images: Vec::new(),
-            agent_text: None,
+            agent: None,
         }
     }
 
@@ -35,7 +35,7 @@ impl Submission {
         Self {
             text: label,
             images: Vec::new(),
-            agent_text: Some(instruction),
+            agent: Some(Box::new(Self::text(instruction))),
         }
     }
 
@@ -53,7 +53,7 @@ impl Submission {
         Self {
             text,
             images,
-            agent_text: None,
+            agent: None,
         }
     }
 
@@ -69,16 +69,24 @@ impl Submission {
     pub(crate) fn join(submissions: Vec<Self>) -> Self {
         let mut text = String::new();
         let mut images = Vec::new();
-        // Joined steers keep each private instruction in place of its label.
-        let agent_text = submissions
+        // Joined steers keep each private instruction in place of its label and
+        // every other submission's text and images, remapped by the same join.
+        let agent = submissions
             .iter()
-            .any(|submission| submission.agent_text.is_some())
+            .any(|submission| submission.agent.is_some())
             .then(|| {
-                submissions
-                    .iter()
-                    .map(|submission| submission.agent_text.as_deref().unwrap_or(&submission.text))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
+                Box::new(Self::join(
+                    submissions
+                        .iter()
+                        .map(|submission| match &submission.agent {
+                            Some(agent) => (**agent).clone(),
+                            None => Self {
+                                agent: None,
+                                ..submission.clone()
+                            },
+                        })
+                        .collect(),
+                ))
             });
         for (index, submission) in submissions.into_iter().enumerate() {
             if index > 0 {
@@ -95,7 +103,7 @@ impl Submission {
         Self {
             text,
             images,
-            agent_text,
+            agent,
         }
     }
 
@@ -106,8 +114,8 @@ impl Submission {
         let separator = if self.text.is_empty() { "" } else { "\n\n" };
         let offset = prefix.len() + separator.len();
         self.text = format!("{prefix}{separator}{}", self.text);
-        if let Some(agent_text) = &mut self.agent_text {
-            *agent_text = format!("{prefix}\n\n{agent_text}");
+        if let Some(agent) = self.agent.take() {
+            self.agent = Some(Box::new(agent.prepend_text(prefix.clone())));
         }
         for image in &mut self.images {
             image.range.start += offset;
@@ -125,8 +133,8 @@ impl Submission {
     }
 
     pub(crate) fn agent_prompt(&self) -> Prompt {
-        if let Some(text) = &self.agent_text {
-            return Prompt::content(vec![UserInput::Text { text: text.clone() }]);
+        if let Some(agent) = &self.agent {
+            return agent.agent_prompt();
         }
         let mut content = Vec::new();
         let mut cursor = 0;
@@ -151,8 +159,8 @@ impl Submission {
     }
 
     pub(crate) fn managed_prompt(&self) -> ManagedPromptInput {
-        if let Some(text) = &self.agent_text {
-            return ManagedPromptInput::Text(text.clone());
+        if let Some(agent) = &self.agent {
+            return agent.managed_prompt();
         }
         let mut content = Vec::new();
         let mut cursor = 0;
@@ -234,5 +242,31 @@ mod tests {
             matches!(&content[1], ManagedPromptContent::Image { image_url, .. } if image_url.ends_with(",a"))
         );
         assert!(matches!(&content[2], ManagedPromptContent::Text { text } if text == " after"));
+    }
+    #[test]
+    fn joined_steers_keep_user_images_beside_a_private_instruction() {
+        let joined = Submission::join(vec![
+            Submission::multimodal(
+                "look [Image #1]".to_owned(),
+                [(5..15, "data:image/png;base64,a".to_owned())],
+            ),
+            Submission::labelled("Collapsed /btw".to_owned(), "PRIVATE".to_owned()),
+        ]);
+        assert_eq!(joined.display_text(), "look [Image #1]\n\nCollapsed /btw");
+        let PromptInput::Content(content) = joined.agent_prompt().instruction else {
+            panic!("joined steers with images should use content input");
+        };
+        assert!(matches!(&content[0], UserInput::Text { text } if text == "look "));
+        assert!(
+            matches!(&content[1], UserInput::Image { image_url, .. } if image_url.ends_with(",a"))
+        );
+        assert!(matches!(&content[2], UserInput::Text { text } if text == "\n\nPRIVATE"));
+        let ManagedPromptInput::Content(managed) = joined.managed_prompt() else {
+            panic!("joined steers with images should use managed content input");
+        };
+        assert!(
+            matches!(&managed[1], ManagedPromptContent::Image { image_url, .. } if image_url.ends_with(",a"))
+        );
+        assert!(matches!(&managed[2], ManagedPromptContent::Text { text } if text == "\n\nPRIVATE"));
     }
 }
