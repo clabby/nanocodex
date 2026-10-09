@@ -3949,9 +3949,12 @@ async fn run_inner(
                         Ok(turn) => {
                             let control = turn.control();
                             if let Some(managed_turn_id) = turn.request_id() {
-                                debug_assert_eq!(
-                                    runtime.local_managed_turns.get(&id).map(String::as_str),
-                                    Some(managed_turn_id),
+                                // Local harnesses (Claude) assign their own turn id;
+                                // only the managed service echoes the caller's id.
+                                debug_assert!(
+                                    runtime.local.is_some()
+                                        || runtime.local_managed_turns.get(&id).map(String::as_str)
+                                            == Some(managed_turn_id),
                                     "managed prompt must preserve its caller-owned request ID"
                                 );
                                 if runtime.managed_active_turns.remove(managed_turn_id) {
