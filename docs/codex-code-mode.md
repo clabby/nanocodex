@@ -193,6 +193,18 @@ terminates remaining cells, so its JSONL can contain `tool.result` records after
 the last terminal run event.
 The Claude harness instead drains its cells at every turn end.
 
+Embedded hosts take part through `CodeModeHost::detach_turn` and
+`CodeModeHost::cancel_turn_with_updates`. The WASM bridge calls the synchronous
+`nanocodexHost.detachCodeTurn(sessionId)` at turn completion and
+`nanocodexHost.cancelCodeTurnWithUpdates(sessionId)` on cancellation. Each
+returns a JSON array of `{relay_id, origin_call_id}`, one per affected cell, and
+the bridge reads every relay through `nextCodeUpdate(sessionId, relay_id)` until
+`null`. A relay delivers each nested start and completion that no observer
+has received, then ends once its cell settles or a later `wait` takes over the
+cell. Relays of a cancelled turn are drained before the turn commits. A host
+that does not export these functions keeps its cells' nested updates for the
+next `wait`.
+
 `wait(terminate: true)`, cancellation, turn teardown and host shutdown remain
 separate terminal controls. Preemption never interrupts an evaluator or an
 external tool. In particular, an uncertain write is not rolled back by a yield
