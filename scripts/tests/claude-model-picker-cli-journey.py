@@ -131,7 +131,7 @@ def main():
 
         start = len(requests)
         try:
-            wait(lambda: 'Message' in screen.text(), 'initial composer absent')
+            wait(lambda: 'Enter send' in screen.text(), 'initial composer absent')
             if fail_first:
                 if queued_failure:
                     os.write(master, b'/model sonnet\rDo not send this queued prompt to the previous provider\r')
@@ -143,7 +143,7 @@ def main():
                     (out / 'rejected-prompt.txt').write_text(screen.text())
                 h.require(len(requests) == start, 'failed selection dispatched inference')
             send('/model')
-            wait(lambda: 'Select Model' in screen.text(), 'model picker absent')
+            wait(lambda: 'Select model' in screen.text(), 'model picker absent')
             models = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5']
             # The slash-command popup can briefly cover the picker's last rows.
             wait(lambda: all(model in screen.text() for model in models), 'picker omitted a model')
@@ -153,7 +153,7 @@ def main():
                 os.write(master, b'jjj\r')
             else:
                 os.write(master, b'\x1b')
-                wait(lambda: 'Select Model' not in screen.text(), 'picker failed to close')
+                wait(lambda: 'Select model' not in screen.text(), 'picker failed to close')
                 send('/model ' + target)
                 if queued:
                     send('First prompt after model selection')
