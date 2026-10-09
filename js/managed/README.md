@@ -28,6 +28,21 @@ This works across harnesses and uses the child's captured permissions. Completio
 while the parent is active (including in `wait_agent`) does not add another turn;
 failed or cancelled parent work is not automatically restarted.
 
+With thinking enabled, Claude Opus 5.5, Sonnet 5.5, and Fable 5.1 request
+`display: "updates"` and its required beta header. Nonempty provider progress
+updates stream as `reasoning.summary.delta` into the existing Thinking rows;
+empty thinking blocks, signatures, and redacted blocks never become display
+text. Signed blocks remain intact in the provider conversation. Other Claude
+models keep their existing thinking display. Progress is model-generated and
+may be skipped, especially at higher effort. Managed Claude instructions also
+ask for concise initial and periodic updates during multi-step work.
+See [Claude thinking display](https://platform.claude.com/docs/en/build-with-claude/thinking#controlling-thinking-display).
+
+`pnpm --filter nanocodex-managed-service run test:claude-managed` covers the
+public curl SSE and history path. The native terminal journey is
+`python3 scripts/tests/claude-progress-cli-journey.py --binary target/debug/nanocodex`.
+Both retain synthetic transcripts under ignored `output/`.
+
 Claude steering accepts identified corrections with the same durable receipt,
 deduplication, and pending-withdrawal contract as Codex. Consumption emits
 `run.steered` with the caller's `message_id`; acknowledgement means the input is

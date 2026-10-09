@@ -205,6 +205,10 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/nanocodex-hand" "dist/${{ matrix.companion }}"
           fi
+          signing=unsigned
+          if [[ -f signed-hand/SIGNING ]]; then signing="$(cat signed-hand/SIGNING)"; fi
+          scripts/release/hand-identity.sh "target/${{ matrix.target }}/release/nanocodex" \
+            "${{ matrix.target }}" "$signing" dist
           gzip -n -9 -c "dist/${{ matrix.artifact }}" \
             > "dist/${{ matrix.artifact }}.gz"
           gzip -n -9 -c "dist/${{ matrix.companion }}" \
@@ -401,10 +405,25 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
+      - name: Test Hand reuse against a fake release store
+        shell: bash
+        run: scripts/release/test-reuse-unchanged-hand.sh
+      - name: Republish an unchanged Hand
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Compare with the latest published stable release.
+          previous=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          if [[ "$previous" == "$GITHUB_REF_NAME" ]]; then previous=""; fi
+          scripts/release/reuse-unchanged-hand.sh dist "$previous"
       - name: Generate checksums
         shell: bash
         run: |
