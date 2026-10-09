@@ -2607,7 +2607,7 @@ async fn terminal_id_command_during_startup_does_not_submit_a_turn() {
     // before replay finishes: either ID response must remain a local control.
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let mut fixture = Fixture::launch_with_history(false, false, Vec::new(), gate.clone()).await;
-    fixture.terminal.wait_text("nanocodex2").await;
+    fixture.terminal.wait_text("Enter").await;
     fixture.terminal.prompt("/id", "\r");
     fixture.terminal.wait_text("ID").await;
     let screen = fixture.terminal.screen.lock().unwrap().screen().contents();
