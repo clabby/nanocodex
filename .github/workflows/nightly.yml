@@ -101,6 +101,8 @@ jobs:
         if: matrix.component == 'cli'
         shell: bash
         run: ./scripts/check-rustls-provider.sh
+      - uses: ./.github/actions/docker-hub-mirror
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
       - name: Prepare embedded Linux Wayland helpers
         if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
         shell: bash
@@ -203,6 +205,24 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
+      # The shipped updater installs this exact pair (and, from minimal real
+      # source checkouts, rebuilt pairs) under an isolated synthetic account.
+      - name: Exercise the public macOS updater journeys with the built pair
+        if: runner.os == 'macOS' && matrix.component == 'cli'
+        shell: bash
+        run: |
+          node bin/nanocodex/tests/update_local_e2e.mjs \
+            "target/${{ matrix.target }}/nightly/nanocodex" \
+            "target/${{ matrix.target }}/nightly/nanocodex-hand" \
+            "${{ runner.temp }}/update-local-e2e" --source
+      - name: Retain updater journey evidence
+        if: always() && runner.os == 'macOS' && matrix.component == 'cli'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-update-journeys-${{ matrix.target }}
+          path: ${{ runner.temp }}/update-local-e2e
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Retain Cargo build timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

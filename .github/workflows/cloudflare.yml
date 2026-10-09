@@ -301,6 +301,12 @@ jobs:
           node-version: 24
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         id: builder
+        with:
+          # Docker Hub images resolve through mirror.gcr.io first; BuildKit
+          # falls back to Docker Hub, avoiding anonymous pull limits.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       # Keep CI_TESTS_ENABLED unset so the sandbox retains its default tests.
       - name: Build preview image without publication
         env:
@@ -338,6 +344,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # Wrangler builds the account container with the runner's Docker daemon.
+      - uses: ./.github/actions/docker-hub-mirror
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -631,6 +639,12 @@ jobs:
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         if: steps.available.outputs.hit != 'true'
         id: builder
+        with:
+          # Docker Hub images resolve through mirror.gcr.io first; BuildKit
+          # falls back to Docker Hub, avoiding anonymous pull limits.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Log in to the image cache registry
         id: cache-login
         if: >-
