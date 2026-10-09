@@ -1252,11 +1252,7 @@ fn heading_style(level: HeadingLevel, theme: &Theme) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-pub fn wrap_spans(
-    spans: &[Span<'static>],
-    width: u16,
-    prefer_words: bool,
-) -> Vec<Line<'static>> {
+pub fn wrap_spans(spans: &[Span<'static>], width: u16, prefer_words: bool) -> Vec<Line<'static>> {
     wrap_spans_with_whitespace(spans, width, prefer_words, false)
 }
 

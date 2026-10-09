@@ -595,10 +595,7 @@ mod tests {
             "Linux server",
         ])
         .unwrap();
-        assert!(matches!(
-            cli.command,
-            crate::daemon::DaemonCommand::Hand(_)
-        ));
+        assert!(matches!(cli.command, crate::daemon::DaemonCommand::Hand(_)));
         assert!(
             crate::daemon::DaemonCli::try_parse_from([
                 "nanocodex2",

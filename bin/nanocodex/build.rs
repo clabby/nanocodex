@@ -7,8 +7,9 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let source = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is unset")?)
-        .join("../../macos/HandMenuBar/main.swift");
+    let source =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is unset")?)
+            .join("../../macos/HandMenuBar/main.swift");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", source.display());
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;

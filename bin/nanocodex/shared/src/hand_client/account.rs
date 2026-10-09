@@ -52,11 +52,7 @@ fn diagnostic(status: Option<StatusCode>, headers: &HeaderMap, attempt: usize) -
     )
 }
 
-pub async fn identify(
-    client: &Client,
-    origin: &str,
-    key: &str,
-) -> Result<Value, ManagedError> {
+pub async fn identify(client: &Client, origin: &str, key: &str) -> Result<Value, ManagedError> {
     for attempt in 1..=ATTEMPTS {
         let result = client
             .get(format!("{origin}/v1/me"))

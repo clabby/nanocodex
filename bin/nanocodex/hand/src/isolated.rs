@@ -202,4 +202,3 @@ async fn connect_vm_hand(
     };
     connected.map(|connected| connected.map(|(attachment, _events)| attachment))
 }
-

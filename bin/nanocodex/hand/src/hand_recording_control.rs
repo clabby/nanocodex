@@ -20,28 +20,25 @@ pub(crate) type Handler = Arc<dyn Fn(Value) -> BoxFuture<'static, Value> + Send 
 
 /// Run the recorder or send it one control request.
 pub(crate) async fn run(args: &nanocodex_bin_shared::hand_args::HandRecordingArgs) -> Result<()> {
-        if args.desktop_runtime.is_some() && !args.serve {
-            bail!("desktop_runtime_requires_serve");
-        }
-        if args.serve {
-            return super::hand_recording::serve(
-                args.state_dir.clone(),
-                args.desktop_runtime.clone(),
-            )
+    if args.desktop_runtime.is_some() && !args.serve {
+        bail!("desktop_runtime_requires_serve");
+    }
+    if args.serve {
+        return super::hand_recording::serve(args.state_dir.clone(), args.desktop_runtime.clone())
             .await;
-        }
-        let request = args
-            .request
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("invalid_control_request"))?;
-        if request.len() > REQUEST_LIMIT {
-            bail!("request_too_large");
-        }
-        let request: Value =
-            serde_json::from_str(request).map_err(|_| anyhow::anyhow!("invalid_json"))?;
-        let response = request_local(&args.state_dir, request).await?;
-        println!("{}", serde_json::to_string(&response)?);
-        Ok(())
+    }
+    let request = args
+        .request
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("invalid_control_request"))?;
+    if request.len() > REQUEST_LIMIT {
+        bail!("request_too_large");
+    }
+    let request: Value =
+        serde_json::from_str(request).map_err(|_| anyhow::anyhow!("invalid_json"))?;
+    let response = request_local(&args.state_dir, request).await?;
+    println!("{}", serde_json::to_string(&response)?);
+    Ok(())
 }
 
 pub(crate) struct ControlGuard {

@@ -23,9 +23,7 @@ use super::native_hand::NativeState;
 #[cfg(any(target_os = "macos", test))]
 mod power;
 
-use nanocodex_bin_shared::hand_client::{
-    directory, error, home, log_file, socket_path, transport,
-};
+use nanocodex_bin_shared::hand_client::{directory, error, home, log_file, socket_path, transport};
 
 #[derive(Args, Default)]
 pub(crate) struct DeviceHand {
@@ -445,7 +443,6 @@ async fn share(
         Err(e) => Err(e),
     }
 }
-
 
 async fn connect(directory: &Path, cancel: &CancellationToken) -> Result<(), ManagedError> {
     let socket = socket_path(directory)?;

@@ -357,12 +357,7 @@ impl Cache {
         self.advance_terminal_generation();
     }
 
-    pub fn retransmit(
-        &mut self,
-        destination: &str,
-        workspace: &Path,
-        size: Size,
-    ) -> LoadResult {
+    pub fn retransmit(&mut self, destination: &str, workspace: &Path, size: Size) -> LoadResult {
         let Some(path) = local_path(destination, workspace) else {
             return LoadResult::Failed;
         };

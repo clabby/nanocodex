@@ -201,11 +201,7 @@ pub fn forwarded() -> bool {
 
 /// Run `executable` with `arguments` (argv without argv\[0\]) in place of this
 /// process, preserving the exit status. Unix replaces the process image.
-pub fn forward(
-    executable: &Path,
-    argv0: Option<OsString>,
-    arguments: &[OsString],
-) -> ExitCode {
+pub fn forward(executable: &Path, argv0: Option<OsString>, arguments: &[OsString]) -> ExitCode {
     let mut command = std::process::Command::new(executable);
     command.args(arguments).env(FORWARDED_ENV, "1");
     #[cfg(unix)]

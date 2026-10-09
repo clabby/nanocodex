@@ -297,7 +297,6 @@ impl Host {
     }
 }
 
-
 /// Whether a value is a safe managed agent identifier.
 pub fn valid_managed_agent_id(value: &str) -> bool {
     !value.is_empty()

@@ -84,9 +84,7 @@ pub fn shutdown() {
 }
 
 /// Terminal uploads queued by the renderer, in order. Write before the frame.
-pub fn drain_commands(
-    mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
-) -> std::io::Result<u64> {
+pub fn drain_commands(mut write: impl FnMut(&[u8]) -> std::io::Result<()>) -> std::io::Result<u64> {
     let commands = match RENDERER
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

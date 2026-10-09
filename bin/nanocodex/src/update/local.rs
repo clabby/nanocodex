@@ -90,7 +90,10 @@ fn package_version(version: &str) -> Option<&str> {
     let value = version
         .lines()
         .find_map(|line| line.split_once("Version: ").map(|(_, value)| value.trim()))?;
-    value.split(['-', '+', ' ']).next().filter(|value| !value.is_empty())
+    value
+        .split(['-', '+', ' '])
+        .next()
+        .filter(|value| !value.is_empty())
 }
 
 /// The deterministic Hand identity an executable reports, if any. Probe

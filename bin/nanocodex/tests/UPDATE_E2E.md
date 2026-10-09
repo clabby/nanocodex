@@ -3,7 +3,7 @@
 Run from the repository root with the CLI and Hand built from the same checkout:
 
 ```sh
-cargo build --locked -p nanocodex-bin --bins --features tempo
+cargo build --locked --features nanocodex-bin/tempo
 # --source adds the minimal source-selector journeys on macOS, with a clean env.
 # Linux always checks historical/unsupported-source preflight rejection instead.
 # --old-updater PATH also installs the pair with a previously shipped two-binary

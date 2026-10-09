@@ -68,16 +68,16 @@ mod vm_hand_config;
 mod vm_host;
 
 // Shared with the CLI; keep their historical module paths in this tree.
+pub(crate) use nanocodex_bin_shared::hand_args::{
+    HandNetwork, HandServe as Hand, Host, HostScope, SYSTEM_HOST_TOKEN_ENV, VmRunConfig,
+};
 #[cfg(target_os = "macos")]
 pub(crate) use nanocodex_bin_shared::hand_keep_awake;
+#[cfg(target_os = "macos")]
+pub(crate) use nanocodex_bin_shared::voice_recording;
 pub(crate) use nanocodex_bin_shared::{
     computer, hand_executable, hand_observability, host, launcher, run_with_runtime,
     startup_timing, version,
-};
-#[cfg(target_os = "macos")]
-pub(crate) use nanocodex_bin_shared::voice_recording;
-pub(crate) use nanocodex_bin_shared::hand_args::{
-    HandNetwork, HandServe as Hand, Host, HostScope, SYSTEM_HOST_TOKEN_ENV, VmRunConfig,
 };
 pub(crate) use nanocodex_cli_auth::client_from_environment;
 pub(crate) use nanocodex_managed::validate_vm_factory_name;

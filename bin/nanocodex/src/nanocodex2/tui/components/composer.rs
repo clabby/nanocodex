@@ -6,12 +6,12 @@
 mod history;
 mod layout;
 
-use crate::nanocodex2::tui::theme::ThemeExt as _;
 use super::{
     node::{Component, ComponentUpdate, RenderRequest},
     selection::{TextRange, TextSpan},
     waved_text::WavedText,
 };
+use crate::nanocodex2::tui::theme::ThemeExt as _;
 use crate::nanocodex2::{
     config::{ReasoningEffort, ReasoningMode},
     tui::{

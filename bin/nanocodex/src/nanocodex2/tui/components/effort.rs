@@ -3,11 +3,11 @@
 
 //! Animated circular selector for reasoning effort.
 
-use crate::nanocodex2::tui::theme::ThemeExt as _;
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},
 };
+use crate::nanocodex2::tui::theme::ThemeExt as _;
 use crate::nanocodex2::{config::ReasoningEffort, tui::theme::Theme};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{

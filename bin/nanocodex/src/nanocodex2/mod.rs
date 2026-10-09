@@ -26,10 +26,10 @@ mod voice_state;
 
 // Shared with the Hand executable through nanocodex-bin-shared; keep their
 // historical paths inside this managed tree.
-pub(crate) use nanocodex_bin_shared::{host, screen_ice, voice_recording};
 pub(crate) use crate::{computer, hand_login, launcher, startup_timing, version};
-use nanocodex_bin_shared::hand_args::{HandRecordingArgs, HandServe, Host};
 pub(crate) use nanocodex_bin_shared::hand_args::valid_managed_agent_id;
+use nanocodex_bin_shared::hand_args::{HandRecordingArgs, HandServe, Host};
+pub(crate) use nanocodex_bin_shared::{host, screen_ice, voice_recording};
 
 use std::{
     ffi::OsString,
@@ -38,8 +38,7 @@ use std::{
 };
 
 use clap::{
-    Args, CommandFactory, FromArgMatches, Parser, Subcommand,
-    builder::NonEmptyStringValueParser,
+    Args, CommandFactory, FromArgMatches, Parser, Subcommand, builder::NonEmptyStringValueParser,
 };
 use host::HostConfig;
 use nanocodex_agent::{AgentEvents, Nanocodex, NanocodexError, PromptRequest, Turn, TurnResult};
@@ -443,7 +442,6 @@ fn auth_error(error: nanocodex_cli_auth::Error) -> ManagedError {
     ManagedError::Configuration(error.to_string())
 }
 
-
 fn parse_agent_reference(value: &str) -> Result<AgentReference, String> {
     if valid_managed_agent_id(value) {
         return Ok(AgentReference {
@@ -478,7 +476,6 @@ fn parse_agent_reference(value: &str) -> Result<AgentReference, String> {
         managed_origin: Some(url.origin().ascii_serialization()),
     })
 }
-
 
 fn supported_agent_page_origin(url: &Url) -> bool {
     let Some(host) = url.host_str() else {
@@ -627,7 +624,8 @@ async fn build_workspace_agent_with_settings(
     let workspace = config.workspace().to_path_buf();
     // A terminal is a client of the account's persistent computer Hand. Its
     // directory is turn context, never another machine or tool publisher.
-    let client = nanocodex_bin_shared::hand_client::with_client_context(client.clone(), &workspace)?;
+    let client =
+        nanocodex_bin_shared::hand_client::with_client_context(client.clone(), &workspace)?;
     let backend = match (agent_id, state) {
         (None, None) if initial_prompt.is_some() => {
             Managed::create(client.clone()).with_settings(settings)
@@ -740,8 +738,8 @@ fn write_json_line<T: serde::Serialize>(value: &T) -> Result<(), ManagedError> {
 
 #[cfg(test)]
 mod tests {
-    use nanocodex_bin_shared::hand_args::HostScope;
     use super::*;
+    use nanocodex_bin_shared::hand_args::HostScope;
 
     #[test]
     fn version_reports_full_source_revision_for_local_updates() {
@@ -751,11 +749,7 @@ mod tests {
             .try_get_matches_from(["nanocodex2", "--version"])
             .unwrap_err();
         assert_eq!(output.kind(), clap::error::ErrorKind::DisplayVersion);
-        assert!(
-            output
-                .to_string()
-                .contains(crate::version::long())
-        );
+        assert!(output.to_string().contains(crate::version::long()));
         assert!(output.to_string().contains("Build Profile: "));
     }
 

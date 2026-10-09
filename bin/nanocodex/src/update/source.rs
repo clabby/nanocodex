@@ -201,9 +201,16 @@ pub(super) async fn build(
         ]);
     match layout {
         Layout::Split { hand_package: true } => {
-            command.args(["--package", "nanocodex-hand-daemon", "--bin", "nanocodex-hand"]);
+            command.args([
+                "--package",
+                "nanocodex-hand-daemon",
+                "--bin",
+                "nanocodex-hand",
+            ]);
         }
-        Layout::Split { hand_package: false } => {
+        Layout::Split {
+            hand_package: false,
+        } => {
             command.args(["--bin", "nanocodex-hand"]);
         }
         Layout::Pair => {
@@ -312,14 +319,20 @@ async fn layout(root: &Path) -> Result<Layout> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|package| package["name"] == "nanocodex-bin" || package["name"] == "nanocodex-hand-daemon")
+        .filter(|package| {
+            package["name"] == "nanocodex-bin" || package["name"] == "nanocodex-hand-daemon"
+        })
         .find(|package| {
-            package["targets"].as_array().into_iter().flatten().any(|target| {
-                target["name"] == "nanocodex-hand"
-                    && target["kind"]
-                        .as_array()
-                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
-            })
+            package["targets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|target| {
+                    target["name"] == "nanocodex-hand"
+                        && target["kind"]
+                            .as_array()
+                            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+                })
         })
         .map(|package| package["name"] == "nanocodex-hand-daemon");
     Ok(match hand_package {

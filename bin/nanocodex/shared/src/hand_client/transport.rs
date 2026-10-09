@@ -43,9 +43,7 @@ impl Listener {
         self.inner.accept().await.map(|(stream, _)| stream)
     }
     #[cfg(windows)]
-    pub async fn accept(
-        &mut self,
-    ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    pub async fn accept(&mut self) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
         self.inner.connect().await?;
         // Keep an instance alive while replacing the listener, including when
         // the previous client closes: the pipe name must never be unowned.

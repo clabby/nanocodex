@@ -51,8 +51,8 @@ mod setup;
 mod subagents;
 mod tool_calls;
 mod update;
-pub use nanocodex_bin_shared::version::BuildInfo;
 pub(crate) use nanocodex_bin_shared::version;
+pub use nanocodex_bin_shared::version::BuildInfo;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")

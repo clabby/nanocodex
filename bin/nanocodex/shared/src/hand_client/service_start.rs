@@ -19,10 +19,7 @@ pub enum Action {
     LinuxStart,
 }
 impl Action {
-    pub fn command(
-        self,
-        gui: Option<(u32, &std::path::Path)>,
-    ) -> (&'static str, Vec<String>) {
+    pub fn command(self, gui: Option<(u32, &std::path::Path)>) -> (&'static str, Vec<String>) {
         if matches!(
             self,
             Self::MacGuiStatus | Self::MacGuiStart | Self::MacGuiLoad

@@ -128,8 +128,7 @@ fn setup_directory() -> Result<PathBuf, String> {
 
 /// Optional managed CUA may not hold shell, file access, or first input behind
 /// MCP startup. Explicit custom providers retain their normal error contract.
-pub async fn connect_for_startup()
--> Result<Option<nanocodex_computer::ComputerTools>, String> {
+pub async fn connect_for_startup() -> Result<Option<nanocodex_computer::ComputerTools>, String> {
     if let Err(error) = setup_in_background(false) {
         tracing::warn!(%error, "could not start background Computer Use setup");
     }
@@ -166,8 +165,7 @@ pub async fn connect_for_startup()
 /// Resolve the provider on use, retaining it once connected so existing realms
 /// and workspace processes survive. No action is retried after dispatch.
 #[allow(dead_code)] // Shared with the CLI installer, which does not publish tools.
-pub async fn connect_for_hand() -> Result<Option<nanocodex_computer::ComputerTools>, String>
-{
+pub async fn connect_for_hand() -> Result<Option<nanocodex_computer::ComputerTools>, String> {
     if std::env::var_os("NANOCODEX_COMPUTER").is_some_and(|value| !value.is_empty()) {
         return connect_for_startup().await;
     }
