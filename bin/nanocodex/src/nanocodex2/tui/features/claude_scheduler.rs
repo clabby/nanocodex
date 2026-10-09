@@ -1,4 +1,4 @@
-//! Claude SessionScheduler pump (WP1): cron/loop wakeups and Monitor events.
+//! Claude SessionScheduler pump: cron/loop wakeups and Monitor events.
 //!
 //! Port of the legacy cron_tick arm. A due prompt fires only from
 //! [Feature::idle_tick], which the driver calls while the main agent is idle,
@@ -122,7 +122,7 @@ impl Feature for ClaudeScheduler {
             cx.host
                 .error(Some(PaneId::Main), format!("Cannot cancel wakeup: {error}"));
         }
-        // Esc keeps its normal meaning (cancel/clear) as in the legacy TUI.
+        // Esc keeps its normal meaning (cancel/clear).
         KeyOutcome::Ignored
     }
 

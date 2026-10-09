@@ -120,8 +120,9 @@ impl super::DriverRuntime {
         let Some(local) = self.local.as_mut() else {
             return Err("no local session".to_owned());
         };
-        local.launch = launch;
-        let connecting = local.connect();
+        // The current launch stays until the new agent connects (adopt), so a
+        // failed switch keeps the running session's settings.
+        let connecting = local.connect_with(move |_| Ok(launch));
         Ok(self.spawn_local_connection(purpose, connecting))
     }
 }

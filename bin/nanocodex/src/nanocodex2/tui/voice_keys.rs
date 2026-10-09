@@ -1,5 +1,5 @@
-//! Configurable voice mute shortcut (`--voice-mute-key`). WP4 owns its use by
-//! Realtime voice; parsing is shared by flag validation and key matching.
+//! Configurable voice mute shortcut (`--voice-mute-key`). Realtime voice uses
+//! it; parsing is shared by flag validation and key matching.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

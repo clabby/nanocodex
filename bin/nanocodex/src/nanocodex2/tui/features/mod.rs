@@ -1,6 +1,6 @@
 //! Feature extension points of the unified TUI.
 //!
-//! Every feature ported from the legacy TUI lives in exactly one file under
+//! Every local feature lives in exactly one file under
 //! this directory and implements [`Feature`]. The driver (`super::run_inner`)
 //! owns one [`Features`] set and calls it at four fixed points:
 //!
@@ -43,7 +43,7 @@ pub(crate) mod mcp;
 pub(crate) mod realtime_voice;
 pub(crate) mod split;
 pub(crate) mod subagents;
-// FEATURE-HOOK: wp2 terminal launcher shared with the legacy TUI until WP5.
+// Terminal detection and launch commands for /split.
 mod split_launch;
 
 /// Slash commands whose behaviour belongs to a feature module.
@@ -244,13 +244,13 @@ impl Features {
             features: vec![
                 Box::new(claude_interaction::ClaudeInteraction::default()),
                 Box::new(claude_scheduler::ClaudeScheduler::default()),
-                Box::new(harness::Harness::default()),
+                Box::new(harness::Harness),
                 Box::new(branches::Branches::default()),
-                Box::new(btw_local::LocalBtw::default()),
-                Box::new(split::Split::default()),
+                Box::new(btw_local::LocalBtw),
+                Box::new(split::Split),
                 Box::new(mcp::Mcp::default()),
                 Box::new(realtime_voice::RealtimeVoice::default()),
-                Box::new(benchmark::Benchmark::default()),
+                Box::new(benchmark::Benchmark),
                 Box::new(subagents::Subagents::default()),
             ],
         }

@@ -38,6 +38,9 @@ pub(crate) struct LocalLaunch {
     pub(crate) replaceable: bool,
     /// `--prompt`: submitted once, as soon as the agent is ready.
     pub(crate) initial_prompt: Option<String>,
+    /// Private agent instruction for `initial_prompt`, which is then only its
+    /// transcript label (`nanocodex eval benchmark` shows `/benchmark PROFILE`).
+    pub(crate) initial_instruction: Option<String>,
     /// A saved Codex thread to reopen (`ncl resume`, /attach).
     pub(crate) resume: Option<super::sessions::Resume>,
 }

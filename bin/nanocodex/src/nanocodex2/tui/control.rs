@@ -33,7 +33,7 @@ pub(super) fn snapshot(bridge: &Bridge, app: &AppNode, runtime: &DriverRuntime, 
     state["managed_cursor"] = json!(runtime.observed_cursor);
     state["local_shells"] = json!(runtime.active_shells);
     if runtime.local.is_some() {
-        // FEATURE-HOOK: wp2 local conversations expose their rollout for history reads.
+        // Local conversations expose their rollout for history reads.
         super::local::control::publish(bridge, runtime);
     } else if !runtime.agent_id.is_empty() {
         bridge.conversation(Conversation {

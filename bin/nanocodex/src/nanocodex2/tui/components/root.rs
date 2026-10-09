@@ -385,7 +385,7 @@ pub(crate) enum RootEffect {
         reasoning_mode: ReasoningMode,
     },
     SetModel(Model),
-    /// FEATURE-HOOK: wp1/wp4 a command owned by a feature module.
+    /// A command owned by a feature module.
     Feature(crate::nanocodex2::tui::features::FeatureCommand),
     SetFastMode(bool),
     SetMaxSubagents(usize),
@@ -986,7 +986,7 @@ impl RootNode {
         self.composer.component()
     }
 
-    /// FEATURE-HOOK: wp1 a modal Claude request discards the stale composer draft
+    /// A modal Claude request discards the stale composer draft
     /// so input typed for the previous UI state can never answer it (legacy parity).
     pub(crate) fn discard_feature_draft(&mut self) {
         drop(self.composer.component_mut().take_draft());
@@ -3446,7 +3446,14 @@ impl RootNode {
         if self.side_pane
             && !matches!(
                 &command,
-                SettingsCommand::CloseBtw | SettingsCommand::Btw(_) | SettingsCommand::Zoom
+                SettingsCommand::CloseBtw
+                    | SettingsCommand::Btw(_)
+                    | SettingsCommand::Zoom
+                    // FEATURE-HOOK: wp2 the side thread collapses or splits from its own pane.
+                    | SettingsCommand::Feature(
+                        crate::nanocodex2::tui::features::FeatureCommand::Collapse
+                            | crate::nanocodex2::tui::features::FeatureCommand::Split
+                    )
             )
         {
             self.notification = Some(Notification::plain(
@@ -3588,7 +3595,6 @@ impl RootNode {
             }
             SettingsCommand::OpenModel => self.open_model(),
             SettingsCommand::SetModel(model) => self.apply_model(model),
-            // FEATURE-HOOK: wp1/wp4
             SettingsCommand::Feature(command) => ComponentUpdate {
                 effects: vec![RootEffect::Feature(command)],
                 render: RenderRequest::Immediate,

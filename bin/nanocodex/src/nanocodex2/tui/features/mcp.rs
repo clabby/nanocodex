@@ -1,4 +1,4 @@
-//! /mcp login and /mcp reload for the local agent's MCP servers (WP4).
+//! /mcp login and /mcp reload for the local agent's MCP servers.
 //!
 //! Port of the legacy worker's mcp_login/mcp_reload: login opens the server's
 //! OAuth page in the browser, waits for the callback and reconnects; reload

@@ -2,8 +2,7 @@
 //! saved Codex and Claude sessions (`ncl resume [ID] [--from ROLLOUT --at N]`), the
 //! in-TUI /attach picker and the replay of a resumed session's history.
 //!
-//! Ported from the legacy TUI (`tui/resume_picker.rs`, `run_observed`'s
-//! transcript restore) so the unified driver can show and continue local sessions.
+//! The unified driver uses this to show and continue local sessions.
 
 use std::{
     borrow::Cow,
@@ -119,7 +118,7 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<LocalSession>> {
             });
         }
     }
-    sessions.sort_by(|left, right| right.updated.cmp(&left.updated));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated));
     Ok(sessions)
 }
 
@@ -257,6 +256,7 @@ pub(crate) fn relaunch(base: &LocalLaunch, id: &str) -> Result<LocalLaunch> {
         vm: base.vm.clone(),
         replaceable: false,
         initial_prompt: None,
+        initial_instruction: None,
         resume,
     })
 }
@@ -271,6 +271,7 @@ pub(crate) fn codex_launch(base: &LocalLaunch, resume: Resume) -> LocalLaunch {
         vm: base.vm.clone(),
         replaceable: false,
         initial_prompt: None,
+        initial_instruction: None,
         resume: Some(resume),
     }
 }
@@ -284,6 +285,7 @@ pub(crate) fn fresh(base: &LocalLaunch) -> LocalLaunch {
         vm: base.vm.clone(),
         replaceable: true,
         initial_prompt: None,
+        initial_instruction: None,
         resume: None,
     }
 }

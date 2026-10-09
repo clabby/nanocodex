@@ -42,6 +42,10 @@ mod mcp;
 #[cfg_attr(not(feature = "tempo"), path = "mpp_disabled.rs")]
 mod mpp;
 mod nanocodex2;
+/// Criterion groups over the shared TUI renderer, for `benches/nanocodex2_tui.rs`.
+#[cfg(feature = "tui-bench")]
+#[doc(hidden)]
+pub use nanocodex2::tui::bench::tui_benches;
 mod native_sessions;
 mod observability;
 mod rewind;
@@ -660,6 +664,7 @@ async fn run(cli: Cli) -> Result<()> {
                     vm: command.vm,
                     replaceable: false,
                     initial_prompt: command.prompt,
+                    initial_instruction: None,
                     resume: None,
                 }
             } else {
@@ -707,6 +712,7 @@ async fn run(cli: Cli) -> Result<()> {
                     vm: command.vm,
                     replaceable: false,
                     initial_prompt: command.prompt,
+                    initial_instruction: None,
                     resume: Some(sessions::Resume::Codex(thread_id)),
                 }
             };
@@ -726,6 +732,7 @@ async fn run(cli: Cli) -> Result<()> {
                 vm: cli.vm,
                 replaceable,
                 initial_prompt: cli.prompt,
+                initial_instruction: None,
                 resume: None,
             })
             .await

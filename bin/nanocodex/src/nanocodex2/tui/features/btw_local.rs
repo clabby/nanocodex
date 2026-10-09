@@ -1,7 +1,7 @@
 //! Local /btw: a side conversation forked from the main agent's current
 //! snapshot and shown in its own pane, plus /collapse back into main.
 //!
-//! Ported from the legacy TUI (`open_btw`, `collapse_btw`). The driver opens the
+//! The driver opens the
 //! fork pane exactly as for a managed /btw and runs [`run`], which speaks the same
 //! [`Request`]/[`Event`] contract as the hosted fork (`super::super::btw`).
 

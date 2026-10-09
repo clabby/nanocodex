@@ -114,7 +114,10 @@ impl Benchmark {
                 vm,
                 // The controller instructions are bound to this agent.
                 replaceable: false,
-                initial_prompt: Some(prompt),
+                // The transcript shows the command, as /benchmark does; the
+                // agent receives the workflow instruction.
+                initial_prompt: Some(format!("/benchmark {profile}")),
+                initial_instruction: Some(prompt),
                 resume: None,
             })
             .await
