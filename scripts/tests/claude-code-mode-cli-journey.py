@@ -182,15 +182,30 @@ else: print('{}')
             until(lambda: inference_pending.is_set() and (workspace / 'interrupt-started.txt').exists(), 'yielded native process or blocked inference not reached')
             require(not (workspace / 'interrupt-leak.txt').exists(), 'delayed native effect ran before fixture gate release')
             cancel_sent = time.time()
+            mark = len(transcript)
             os.write(master, b'/cancel\r')
-            until(lambda: visible(b'Cancelled'), 'user cancellation did not settle while inference was pending')
-            (artifact / 'interrupt-timing.json').write_text(json.dumps({**inference_timing, 'effect_started': (workspace / 'interrupt-started.txt').stat().st_mtime, 'cancel_sent': cancel_sent, 'cancel_settled': time.time(), 'effect_present_at_settlement': (workspace / 'interrupt-leak.txt').exists()}, indent=2))
+
+            def idle_since_cancel():
+                # Settlement is observable without fixed status copy: the composer
+                # footer returns from live steer/queue controls to its idle send
+                # controls, whose session shortcut the live footer never shows.
+                tail = re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', bytes(transcript[mark:]))
+                return b'@@sessions' in re.sub(rb'\s+', b'', tail)
+
+            until(idle_since_cancel, 'user cancellation did not settle while inference was pending')
+            cancel_settled = time.time()
             require(not release_inference.is_set(), 'fixture released inference before cancellation settled')
-            release_inference.set()
+            effect_present = (workspace / 'interrupt-leak.txt').exists()
             (workspace / 'interrupt-release.txt').write_text('release delayed native effect after cancellation settled')
             phase.update(name='interrupt-recovery', counts={}, child=[], steps=[execute('const r=await tools.write_stdin({session_id:load("interruptShell"),yield_time_ms:1000}); if(r.exit_code!==0) throw Error("retained shell failed"); text("INTERRUPT_RECOVERY_OK");', 'INTERRUPT_RECOVERY_OK')])
             os.write(master, b'Continue after cancellation\r')
+            # The idle agent admits the next turn while the cancelled request is still held.
+            until(lambda: phase['counts'].get('root', 0) > 0, 'next turn was not admitted after cancellation')
+            require(not release_inference.is_set(), 'fixture released inference before the next turn was admitted')
             until(lambda: visible(b'interrupt-recovery-complete'), 'next turn failed after cancellation')
+            require(not visible(b'turnfailed'), 'user cancellation was presented as a failed turn')
+            (artifact / 'interrupt-timing.json').write_text(json.dumps({**inference_timing, 'effect_started': (workspace / 'interrupt-started.txt').stat().st_mtime, 'cancel_sent': cancel_sent, 'cancel_settled': cancel_settled, 'effect_present_at_settlement': effect_present}, indent=2))
+            release_inference.set()
             require((workspace / 'interrupt-leak.txt').read_text() == 'retained', 'turn cancellation lost retained shell session')
             os.write(master, b"\x03")
             deadline = time.monotonic() + 10
