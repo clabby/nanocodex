@@ -1306,6 +1306,88 @@ async fn unicode_tool_result_uses_same_text_estimate_as_queued_prompt() {
     tool_result_compaction("😀".repeat(600), false).await;
 }
 
+// One oversized receipt must not make every later request, including the round
+// compaction retains verbatim, exceed the model window.
+#[tokio::test]
+async fn oversized_tool_results_are_bounded_before_entering_history() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let log = requests.clone();
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |Json(body): Json<Value>| {
+            let log = log.clone();
+            async move {
+                let index = {
+                    let mut log = log.lock().unwrap();
+                    log.push(body);
+                    log.len()
+                };
+                let (blocks, reason) = if index == 1 {
+                    (
+                        vec![
+                            json!({"type":"tool_use","id":"toolu_text","name":"dump","input":{}}),
+                            json!({"type":"tool_use","id":"toolu_blocks","name":"dump_blocks","input":{}}),
+                        ],
+                        "tool_use",
+                    )
+                } else {
+                    (vec![json!({"type":"text","text":"done"})], "end_turn")
+                };
+                ([("content-type", "text/event-stream")], stream(blocks, reason))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = ClaudeClient::new(
+        reqwest::Client::new(),
+        format!("http://{address}/v1/messages"),
+        "synthetic",
+    );
+    let huge = || format!("HEAD{}TAIL", "x".repeat(4_000_000));
+    let definition = |name: &str| ToolDefinition {
+        name: name.into(),
+        description: "Synthetic oversized output".into(),
+        input_schema: json!({"type":"object"}),
+        strict: None,
+        defer_loading: false,
+    };
+    let (agent, _) = Nanocodex::builder(Claude::latest(client))
+        .tool(definition("dump"), move |_| async move { Ok(huge()) })
+        .tool_blocks(definition("dump_blocks"), move |_| async move {
+            Ok(vec![
+                json!({"type":"text","text":huge()}),
+                json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":png(1, 1)}}),
+                json!({"type":"text","text":"after budget"}),
+            ])
+        })
+        .build()
+        .unwrap();
+    for prompt in ["dump everything", "and again"] {
+        let result = agent.prompt(prompt).await.unwrap().result().await.unwrap();
+        assert_eq!(result.final_message(), "done");
+    }
+    let log = requests.lock().unwrap();
+    // The follow-up turn replays the recorded receipts from history.
+    assert_eq!(log.len(), 3);
+    for request in [&log[1], &log[2]] {
+        assert!(request.to_string().len() < 200_000);
+        let results = &request["messages"][2]["content"];
+        let text = results[0]["content"].as_str().unwrap();
+        assert!(text.starts_with("HEADx") && text.ends_with("xTAIL"));
+        assert!(text.contains("tokens truncated"));
+        let blocks = results[1]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        let first = blocks[0]["text"].as_str().unwrap();
+        assert!(first.starts_with("HEADx") && first.ends_with("xTAIL"));
+        assert_eq!(blocks[1]["source"]["data"], png(1, 1));
+        assert!(!blocks[2]["text"].as_str().unwrap().contains("after budget"));
+    }
+    server.abort();
+}
+
 #[tokio::test]
 async fn queued_user_text_counts_toward_next_compaction_decision() {
     let _ = rustls::crypto::ring::default_provider().install_default();

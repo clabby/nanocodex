@@ -44,6 +44,68 @@ fn estimate_text_tokens(text: &str) -> u64 {
     (text.encode_utf16().count() as u64).div_ceil(4)
 }
 
+// Per-receipt history bound shared with the OpenAI session history. Without it,
+// one oversized receipt can exceed the model window, and compaction cannot
+// shrink it because the latest tool round is retained verbatim.
+const TOOL_RESULT_TOKEN_LIMIT: u64 = 12_000;
+
+/// Keeps the head and tail of `text` within `max_tokens` of the local estimate.
+fn truncate_middle(text: &str, max_tokens: u64) -> String {
+    let total = estimate_text_tokens(text);
+    if total <= max_tokens {
+        return text.to_owned();
+    }
+    let side = usize::try_from(max_tokens.saturating_mul(2)).unwrap_or(usize::MAX);
+    let mut units = 0;
+    let head = text
+        .char_indices()
+        .find(|(_, c)| {
+            units += c.len_utf16();
+            units > side
+        })
+        .map_or(text.len(), |(end, _)| end);
+    units = 0;
+    let tail = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| {
+            units += c.len_utf16();
+            units > side
+        })
+        .map_or(0, |(start, c)| start + c.len_utf8())
+        .max(head);
+    format!(
+        "{}…{} tokens truncated…{}",
+        &text[..head],
+        total - max_tokens,
+        &text[tail..]
+    )
+}
+
+/// Text shares one budget across a receipt; media and protocol blocks are kept.
+fn bound_tool_result(content: ToolResultContent) -> ToolResultContent {
+    match content {
+        ToolResultContent::Text(text) => {
+            ToolResultContent::Text(truncate_middle(&text, TOOL_RESULT_TOKEN_LIMIT))
+        }
+        ToolResultContent::Blocks(mut blocks) => {
+            let mut remaining = TOOL_RESULT_TOKEN_LIMIT;
+            for block in &mut blocks {
+                if block["type"] != "text" {
+                    continue;
+                }
+                let Some(text) = block["text"].as_str() else {
+                    continue;
+                };
+                let bounded = truncate_middle(text, remaining);
+                remaining = remaining.saturating_sub(estimate_text_tokens(text));
+                block["text"] = bounded.into();
+            }
+            ToolResultContent::Blocks(blocks)
+        }
+    }
+}
+
 const fn add_usage(total: &mut Usage, usage: &Usage) {
     total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
     total.cache_read_input_tokens = total
@@ -3650,7 +3712,11 @@ impl State {
             ("started_after_ns".to_owned(), Value::Null),
         ]);
         self.emit(events, AgentEventKind::ToolResult, Value::Object(payload));
-        Ok(ContentBlock::tool_result_content(id, content, is_error))
+        Ok(ContentBlock::tool_result_content(
+            id,
+            bound_tool_result(content),
+            is_error,
+        ))
     }
     async fn lifecycle(
         &self,
