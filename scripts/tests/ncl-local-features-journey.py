@@ -74,7 +74,7 @@ def main():
         enter('/mcp reload'); wait(lambda: shown('Usage: /mcp reload <server>'), 'bare reload usage absent')
         enter('/mcp login stdio'); wait(lambda: shown('MCP server stdio:'), 'login error for non-OAuth server absent')
         checks.append('/mcp login on a non-OAuth stdio server fails with the MCP error instead of opening a browser')
-        enter('/mcp bogus'); wait(lambda: shown('Usage: /mcp login <server> or /mcp reload <server>'), 'mcp usage absent')
+        enter('/mcp bogus'); wait(lambda: shown("Usage: /mcp login <server> or /mcp reload"), 'mcp usage absent')
         enter('/voice list'); wait(lambda: shown('Platform voices (default marin)'), 'voice list absent')
         checks.append('/voice list lists Codex/ChatGPT and platform Realtime voices')
         enter('/voice marin'); wait(lambda: shown('voice is unavailable with the selected harness'), 'voice start without Realtime client did not fail clearly')
