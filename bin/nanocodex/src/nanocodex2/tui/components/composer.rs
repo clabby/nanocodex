@@ -164,8 +164,6 @@ impl SettingsCommand {
                     ),
                 })
             }
-                },
-            ),
             "/model" => {
                 let Some(argument) = parts.next() else {
                     return Some(Self::OpenModel);
