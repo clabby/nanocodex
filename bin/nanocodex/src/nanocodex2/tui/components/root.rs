@@ -2300,7 +2300,10 @@ impl RootNode {
                     | crate::nanocodex2::tui::features::FeatureCommand::Split,
                 ))) => {}
                 Some(ActionsEffect::Submit(command))
-                    if matches!(command.split_whitespace().next(), Some("/collapse" | "/split")) => {}
+                    if matches!(
+                        command.split_whitespace().next(),
+                        Some("/collapse" | "/split")
+                    ) => {}
                 Some(_) => {
                     self.overlay = None;
                     self.notification = Some(Notification::plain("Use /btw for questions and /close to leave; other controls belong to the main thread".into(), Color::Yellow));
