@@ -193,9 +193,6 @@ impl SettingsCommand {
                     input.trim_start()[command.len()..].trim().to_owned(),
                 ),
             )),
-            "/voice" if input.trim_start()[command.len()..].trim() == "list" => {
-                Some(Self::Voice(crate::nanocodex2::voice::Command::List))
-            }
             "/voice" => {
                 // FEATURE-HOOK: wp4 arguments the managed grammar rejects may still be
                 // local Realtime controls (e.g. platform voices); the driver shows the

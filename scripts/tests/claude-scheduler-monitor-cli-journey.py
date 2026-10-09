@@ -143,7 +143,7 @@ def main():
    time.sleep(.03)
   raise AssertionError(label)
  def visible(label,text):return text in screens[label].text()
- def finish(proc,fd,drain):os.write(fd,b'\x03');wait(lambda:proc.poll() is not None,drain,'CLI did not exit after Ctrl-C',10);drain();os.close(fd)
+ def finish(proc,fd,drain):os.write(fd,b'\x03\x03');wait(lambda:proc.poll() is not None,drain,'CLI did not exit after Ctrl-C',10);drain();os.close(fd)
  outcome={'success':False}
  try:
   phase('initial',steps_initial());started=time.time();proc,fd,drain=start('initial',[str(binary)]+common+['--prompt','Schedule real clock test.'])
