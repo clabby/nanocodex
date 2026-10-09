@@ -297,6 +297,10 @@ name = "tui_log_location"
 path = "tests/tui_log_location.rs"
 
 [[test]]
+name = "ncl_local_subagents"
+path = "tests/ncl_local_subagents.rs"
+
+[[test]]
 name = "nanocodex2_managed"
 path = "tests/nanocodex2_managed.rs"
 
