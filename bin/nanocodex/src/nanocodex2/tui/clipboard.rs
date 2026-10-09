@@ -63,9 +63,27 @@ fn encode_png(width: usize, height: usize, pixels: &[u8]) -> Result<Vec<u8>, Enc
 }
 
 // Terminals commonly paste a local filename for copied/dropped images. Only
-// consume an entire, existing image path; prose, missing files and other files
-// must retain normal text-paste behavior. Never fetch remote URLs.
-pub(crate) fn pasted_image_data_url(text: &str) -> Option<String> {
+// consume an existing image path at the start, preserving any caption exactly.
+// Prose, missing files and other files retain text-paste behavior. Never fetch URLs.
+pub(crate) fn pasted_image_data_url(text: &str) -> Option<(String, &str)> {
+    // Prefer the whole path (including unescaped spaces) before splitting a
+    // caption. Try longest prefixes first so existing filenames win.
+    if let Some(data) = image_path_data_url(text) {
+        return Some((data, ""));
+    }
+    for (offset, _) in text
+        .char_indices()
+        .rev()
+        .filter(|(_, ch)| ch.is_whitespace())
+    {
+        if let Some(data) = image_path_data_url(&text[..offset]) {
+            return Some((data, &text[offset..]));
+        }
+    }
+    None
+}
+
+fn image_path_data_url(text: &str) -> Option<String> {
     let text = text.trim();
     if text.is_empty() {
         return None;

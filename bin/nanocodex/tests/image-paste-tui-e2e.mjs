@@ -51,7 +51,7 @@ server.on('upgrade', (req, socket, head) => {
 await new Promise(done => server.listen(0, '127.0.0.1', done));
 const origin = `http://127.0.0.1:${server.address().port}`;
 
-const imagePath = resolve(workspace, 'image with spaces.png');
+const imagePath = resolve(workspace, 'image with spaces (1).png');
 // A real, decodable one-pixel PNG, also checked at the outbound WebSocket boundary.
 writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64'));
 // 12 MP noisy image: its clipboard RGBA representation exceeds the Worker's
@@ -87,6 +87,8 @@ try {
   const turns = () => requests.filter(r => r.method === 'PROMPT');
   const cases = [
     [imagePath, true],
+    [imagePath.replaceAll(/([ ()])/g, String.fromCharCode(92) + '$1') + ' also this image', true, undefined, ' also this image'],
+    ["'" + imagePath + "' caption with apostrophe's text", true, undefined, " caption with apostrophe's text"],
     [imagePath, true, ' describe this image'],
     [largePath, true],
     ["'" + imagePath + "'", true],
@@ -98,7 +100,7 @@ try {
     [resolve(workspace, 'missing.png'), false],
     ['Please inspect ' + imagePath, false],
   ];
-  for (const [input, isImage, caption] of cases) {
+  for (const [input, isImage, caption, pastedCaption] of cases) {
     const before = turns().length;
     terminal.stdin.write(`\x1b[200~${input}\x1b[201~`);
     await new Promise(done => setTimeout(done, 250));
@@ -109,6 +111,7 @@ try {
     if (isImage) {
       const content = body.input;
       assert.ok(Array.isArray(content), JSON.stringify(body));
+      if (pastedCaption) assert.ok(content.some(part => part.type === 'text' && part.text === pastedCaption), 'preserve same-paste caption exactly');
       if (caption) assert.ok(content.some(part => part.type === 'text' && part.text.includes(caption.trim())));
       const image = content.find(part => part.type === 'image');
       assert.ok(image?.image_url.startsWith('data:image/png;base64,'), JSON.stringify(body));
