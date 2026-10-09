@@ -74,7 +74,9 @@ impl Computer {
         .await;
         match result {
             Ok(receipt) => {
-                if receipt["status"] != "installed" {
+                if receipt["status"] == "installed" {
+                    clear_setup_failure(&directory)?;
+                } else {
                     record_setup_failure(&directory, &receipt)?;
                 }
                 println!("{receipt}");
@@ -503,66 +505,5 @@ for line in sys.stdin:
                 .to_string()
                 .contains("Cannot start upstream Sky MCP provider")
         );
-    }
-
-    // No provider is selected while background setup runs. Its recorded
-    // outcome distinguishes a failed installation from one still preparing.
-    #[tokio::test]
-    async fn failed_background_setup_is_reported_instead_of_preparing() {
-        if ComputerConfig::discover().is_some() {
-            eprintln!("skipped: this account already selects a Computer Use provider");
-            return;
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let gateway = LazyComputer {
-            state: tokio::sync::Mutex::new(LazyComputerState::default()),
-            setup: Some(directory.path().to_owned()),
-        };
-        let context = |call| ToolContext::new("lazy-gateway", "fixture-session", call, &[], 16000);
-        let preparing = gateway
-            .invoke_tool("js", json!({}), context("preparing"))
-            .await
-            .unwrap();
-        eprintln!(
-            "no recorded outcome, expected preparing: {}",
-            preparing.structured_result()
-        );
-        assert!(
-            preparing
-                .structured_result()
-                .to_string()
-                .contains("preparing")
-        );
-
-        record_setup_failure(
-            directory.path(),
-            &json!({"status":"failed", "error":"OpenAI appcast signature mismatch"}),
-        )
-        .unwrap();
-        let failed = gateway
-            .invoke_tool("js", json!({}), context("failed"))
-            .await
-            .unwrap()
-            .structured_result()
-            .to_string();
-        eprintln!("recorded failure, expected failed: {failed}");
-        assert!(failed.contains("failed") && failed.contains("appcast signature mismatch"));
-        assert!(failed.contains("nanocodex computer setup") && failed.contains("setup.log"));
-        let action = gateway
-            .invoke_tool("js", json!({"code":"1"}), context("action"))
-            .await
-            .err()
-            .expect("an action without components must fail")
-            .to_string();
-        eprintln!("action after failure: {action}");
-        assert!(action.contains("no action was dispatched") && action.contains("appcast"));
-
-        // A new attempt clears the outcome before it runs.
-        clear_setup_failure(directory.path()).unwrap();
-        let retry = gateway
-            .invoke_tool("js", json!({}), context("retry"))
-            .await
-            .unwrap();
-        assert!(retry.structured_result().to_string().contains("preparing"));
     }
 }

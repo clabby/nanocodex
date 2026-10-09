@@ -673,14 +673,27 @@ async fn late_computer_provider_preserves_daemon_and_running_shell() {
     let managed = home.join("runtimes/openai-cua");
     std::fs::create_dir_all(&managed).unwrap();
     let provider = home.join("provider");
+    // Exercise the real setup command's non-install outcome on Linux. The
+    // native Linux capture provider is separate from the macOS upstream setup.
+    if cfg!(target_os = "linux") {
+        let setup = command(&home, &origin)
+            .env_remove("NANOCODEX_COMPUTER")
+            .env("NANOCODEX_DIR", &home)
+            .args(["computer", "setup", "--background"])
+            .output()
+            .await
+            .unwrap();
+        assert!(setup.status.success(), "{setup:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&setup.stdout).unwrap()["status"],
+            "unsupported"
+        );
+    }
     // A managed receipt may precede completion/recovery of its executable.
-    std::fs::write(
-        managed.join("provider.json"),
-        json!({"status":"installed", "transport":"mcp",
+    let provider_receipt = json!({"status":"installed", "transport":"mcp",
         "executable":provider, "dependency_contract":"nanocodex-native-no-codex-v1"})
-        .to_string(),
-    )
-    .unwrap();
+    .to_string();
+    std::fs::write(managed.join("provider.json"), &provider_receipt).unwrap();
     let log = std::fs::File::create(home.join("daemon.log")).unwrap();
     let mut daemon = command(&home, &origin)
         .env_remove("NANOCODEX_COMPUTER")
@@ -729,7 +742,6 @@ async fn late_computer_provider_preserves_daemon_and_running_shell() {
             frame
         }
     };
-    let preparing = call("preparing", "mcp__cua_repl__js", json!({}), false).await;
     let receipt = |frame: &Value| {
         serde_json::from_str::<Value>(
             frame["outcome"]["output"]["structured_result"]["content"][0]["text"]
@@ -738,6 +750,31 @@ async fn late_computer_provider_preserves_daemon_and_running_shell() {
         )
         .unwrap()
     };
+    if cfg!(target_os = "linux") {
+        // The selected provider is unavailable during a later setup attempt;
+        // its stable gateway must report the actual outcome without reconnecting.
+        std::fs::remove_file(managed.join("provider.json")).unwrap();
+        let unavailable = call("setup-outcome", "mcp__cua_repl__js", json!({}), true).await;
+        assert_eq!(
+            receipt(&unavailable)["status"],
+            "unsupported",
+            "{unavailable}"
+        );
+        assert_eq!(receipt(&unavailable)["retry"], "nanocodex computer setup");
+        let rejected = call(
+            "setup-action",
+            "mcp__cua_repl__js",
+            json!({"code":"must-not-dispatch"}),
+            false,
+        )
+        .await;
+        assert!(
+            rejected.to_string().contains("no action was dispatched"),
+            "{rejected}"
+        );
+        std::fs::write(managed.join("provider.json"), &provider_receipt).unwrap();
+    }
+    let preparing = call("preparing", "mcp__cua_repl__js", json!({}), false).await;
     // A published receipt with a missing executable is a startup error, not
     // a successful preparation receipt. The same daemon must recover below.
     assert!(

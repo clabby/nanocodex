@@ -19,7 +19,7 @@ memchr = "2.8.3"
 nanocodex = { workspace = true }
 nanocodex-cli-auth.workspace = true
 nanocodex-computer.workspace = true
-nanocodex-managed = { path = "../../../crates/nanocodex-managed", version = "0.6.7", default-features = false }
+nanocodex-managed = { path = "../../../crates/nanocodex-managed", version = "0.6.7", default-features = false, features = ["tools"] }
 nanocodex-observability = { workspace = true, features = ["cli"] }
 nanocodex-remote = { path = "../../../crates/nanocodex-remote", version = "0.6.7" }
 nix = { workspace = true, features = ["fs"] }
