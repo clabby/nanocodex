@@ -6,7 +6,11 @@ use local_cli::local_cli;
 #[cfg(target_os = "linux")]
 #[test]
 fn ncl_sessions_journey() {
-    if std::process::Command::new("tmux").arg("-V").output().is_err() {
+    if std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_err()
+    {
         eprintln!("skipping: the ncl sessions journey drives a real tmux terminal");
         return;
     }
