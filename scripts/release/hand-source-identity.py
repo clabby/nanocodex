@@ -47,6 +47,8 @@ ENV_EXACT = {
     "CARGO_INCREMENTAL",
 }
 ENV_PREFIXES = ("CARGO_PROFILE_", "CARGO_TARGET_", "CC_", "CXX_", "AR_", "CFLAGS_", "CXXFLAGS_", "TARGET_C")
+# Output locations, not build inputs: absolute and checkout-specific.
+ENV_EXCLUDED = {"CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"}
 
 
 def fail(message):
@@ -199,7 +201,7 @@ def compute(args):
         output = run(tool, root, optional=True)
         records.add("tool", " ".join(tool), output if output is not None else b"absent")
     for name, value in os.environ.items():
-        if name in ENV_EXACT or name.startswith(ENV_PREFIXES):
+        if name not in ENV_EXCLUDED and (name in ENV_EXACT or name.startswith(ENV_PREFIXES)):
             records.add("env", name, value)
     payloads = {}
     for item in args.payload:

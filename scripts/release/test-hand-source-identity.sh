@@ -95,6 +95,12 @@ echo '// edit' >> app/shared/src/lib.rs;       expect changed "a shared-package 
 echo '# edit' >> .cargo/config.toml;           expect changed "a Cargo config edit"
 echo helpers-v2 > "$work/screen-helpers.tar.gz"; expect changed "a native payload change"
 features=""; expect changed "a feature change"; unset features; current="$(identity)"
+export CARGO_TARGET_DIR="$work/elsewhere/target"
+expect same "moving only the Cargo output directory"
+unset CARGO_TARGET_DIR
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v3"
+expect changed "target-specific rustflags"
+unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS; current="$(identity)"
 
 # Same package set and file bytes, different resolved edge: mid -> leaf 1.
 grep -A6 '^name = "mid"$' Cargo.lock | grep -q '"leaf 2.0.0"' || { echo "FAIL: fixture did not resolve mid to leaf 2" >&2; exit 1; }
