@@ -2326,6 +2326,22 @@ async fn run_inner(
         None
     });
     presentation_setup.spawn_blocking(detect_system_scheme);
+    let initial_prompt = runtime
+        .local
+        .as_mut()
+        .and_then(|local| local.launch.initial_prompt.take());
+    if let Some(text) = initial_prompt {
+        // Shown immediately; held as the pending submission until the agent connects.
+        let prompt = Submission::text(text);
+        let id = TurnId::new(runtime.next_turn);
+        runtime.next_turn = runtime.next_turn.saturating_add(1);
+        let record = runtime.record_submission(id, &prompt)?;
+        request_render(
+            app.update(AppEvent::Transcript { pane: PaneId::Main, record }),
+            &mut scheduler,
+        );
+        runtime.start_submission(PaneId::Main, id, prompt);
+    }
     match attach {
         Some(None) => {
             let update = app.open_resume_selector();

@@ -38,6 +38,8 @@ pub(crate) struct LocalLaunch {
     pub(crate) vm: VmArgs,
     /// Whether the backend may still be rebuilt with a different harness.
     pub(crate) replaceable: bool,
+    /// `--prompt`: submitted once, as soon as the agent is ready.
+    pub(crate) initial_prompt: Option<String>,
 }
 
 /// A running local agent and the resources it must release on exit.

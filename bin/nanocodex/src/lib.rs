@@ -684,7 +684,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Some(Command::Update(command)) => command.run().await,
-        None => {
+        None if std::env::var_os("NANOCODEX_LEGACY_TUI").is_some() => {
             tui::run_observed(
                 cli.agent,
                 cli.vm,
@@ -693,6 +693,19 @@ async fn run(cli: Cli) -> Result<()> {
                 Some(cli.observability),
             )
             .await
+        }
+        None => {
+            let mut agent = cli.agent;
+            agent.prefer_codex_for_vm(&cli.vm);
+            let replaceable = agent.claude_resume.is_none();
+            nanocodex2::tui::run_local(nanocodex2::tui::local::agent::LocalLaunch {
+                args: agent,
+                vm: cli.vm,
+                replaceable,
+                initial_prompt: cli.prompt,
+            })
+            .await
+            .map_err(|error| eyre!("{error}"))
         }
     }
 }
