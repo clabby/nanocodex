@@ -1030,20 +1030,34 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
 
     // Local settings: the control session observes them and the next
     // generation carries them to the provider.
+    // Change both settings away from the session's starting values so the
+    // next request can only carry them if the commands reached the agent.
+    let initial_effort = state["state"]["settings"]["effort"].clone();
+    let fast = state["state"]["settings"]["fast_mode"] != true;
+    assert_ne!(
+        initial_effort, "high",
+        "the journey needs a non-high starting effort: {state}"
+    );
+    assert_eq!(
+        generations.lock().unwrap()[0]["service_tier"] == "priority",
+        !fast,
+        "the first request must reflect the starting fast mode; evidence {}",
+        artifact.display()
+    );
     terminal.prompt("/thinking high", "\r");
     tokio::time::sleep(Duration::from_millis(200)).await;
-    terminal.prompt("/fast on", "\r");
+    terminal.prompt(if fast { "/fast on" } else { "/fast off" }, "\r");
     let deadline = std::time::Instant::now() + LIMIT;
     let settings = loop {
         let state = control_state(&mut lines, &mut write, &mut requests).await;
         let settings = &state["state"]["settings"];
-        if settings["effort"] == "high" && settings["fast_mode"] == true {
+        if settings["effort"] == "high" && settings["fast_mode"] == fast {
             break state;
         }
         if std::time::Instant::now() > deadline {
             evidence(&terminal, "settings-timeout");
             panic!(
-                "local /thinking high and /fast on never reached control state: {state}; evidence {}",
+                "local /thinking high and /fast {fast} never reached control state: {state}; evidence {}",
                 artifact.display()
             );
         }
@@ -1083,13 +1097,17 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
         assert_eq!(
             generations[1]["reasoning"]["effort"],
             "high",
-            "/thinking high must reach Responses; evidence {}",
+            "/thinking high must reach Responses (control state already reported high; first request {}); evidence {}",
+            generations[0]["reasoning"]["effort"],
             artifact.display()
         );
         assert_eq!(
+            generations[1]["service_tier"] == "priority",
+            fast,
+            "/fast {} must reach Responses (first request {}, next {}); evidence {}",
+            if fast { "on" } else { "off" },
+            generations[0]["service_tier"],
             generations[1]["service_tier"],
-            "priority",
-            "/fast on must reach Responses; evidence {}",
             artifact.display()
         );
     }
