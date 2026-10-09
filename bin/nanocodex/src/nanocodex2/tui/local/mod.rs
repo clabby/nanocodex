@@ -148,7 +148,7 @@ impl LocalState {
     }
 
     /// Adopts the backend built by [`Self::connect`] and attaches features.
-    pub(crate) async fn adopt(&mut self, capabilities: Capabilities) {
+    pub(crate) async fn adopt(&mut self) {
         let built = self
             .slot
             .lock()
@@ -164,6 +164,10 @@ impl LocalState {
         if let Some(old) = self.bridge.replace(bridge) {
             old.abort();
         }
+        self.launch = backend.launch.clone();
+        self.busy = false;
+        self.prompted = self.launch.resume.is_some();
+        let capabilities = backend.capabilities();
         self.features.attach(
             &mut backend,
             ContextBase {
