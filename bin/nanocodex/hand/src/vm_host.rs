@@ -136,7 +136,18 @@ mod supported {
     struct VmHostState {
         directory: PathBuf,
         host_id: Uuid,
-        _lock: File,
+        _lock: HostStateLock,
+    }
+
+    /// Exclusive ownership of a host state directory. Closing alone leaves the
+    /// lock held by descriptors inherited during a concurrent fork (VMM and
+    /// helper spawns), so release ownership explicitly.
+    struct HostStateLock(File);
+
+    impl Drop for HostStateLock {
+        fn drop(&mut self) {
+            let _ = fs2::FileExt::unlock(&self.0);
+        }
     }
 
     impl VmHostState {
@@ -247,7 +258,7 @@ mod supported {
             Ok(Self {
                 directory,
                 host_id,
-                _lock: lock,
+                _lock: HostStateLock(lock),
             })
         }
     }
