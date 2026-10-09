@@ -74,6 +74,29 @@ jobs:
           # Voice helpers have their own Cargo target directories.
           workspaces: ${{ matrix.workspaces }}
           cache-on-failure: true
+      # rust-cache restores third-party dependencies but always rebuilds
+      # workspace crates. sccache reuses unchanged workspace libraries across
+      # runs; binaries and changed crates still compile from source.
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        if: matrix.component == 'cli'
+        with:
+          version: v0.16.0
+      - name: Reuse unchanged workspace crates
+        if: matrix.component == 'cli'
+        shell: bash
+        env:
+          # PR-artifact builds of a pull-request head dispatched from master
+          # only read master's cache; scheduled nightlies (and branch dispatches,
+          # whose cache scope is private to that branch) write.
+          CACHE_MODE: ${{ (inputs.pr == '' || github.ref != 'refs/heads/master') && 'READ_WRITE' || 'READ_ONLY' }}
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "SCCACHE_GHA_RW_MODE=$CACHE_MODE"
+            # A cache-service outage falls back to compiling locally.
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          } >> "$GITHUB_ENV"
       - name: Enforce ring-only Rustls provider
         if: matrix.component == 'cli'
         shell: bash
@@ -172,6 +195,12 @@ jobs:
             target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report compiler cache reuse
+        if: always() && matrix.component == 'cli' && env.RUSTC_WRAPPER == 'sccache'
+        shell: bash
+        run: |
+          sccache --show-stats | tee sccache-stats.txt
+          { echo '### sccache (${{ matrix.target }})'; grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable)' sccache-stats.txt | grep -v ' by ' | sed 's/^/    /'; } >> "$GITHUB_STEP_SUMMARY"
 
   bundle:
     name: bundle ${{ matrix.target }}
@@ -264,6 +293,21 @@ jobs:
           workspaces: |
             . -> target
           cache-on-failure: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.16.0
+      - name: Reuse unchanged workspace crates
+        shell: pwsh
+        env:
+          # Same write policy as the Linux and macOS CLI builds.
+          CACHE_MODE: ${{ (inputs.pr == '' || github.ref != 'refs/heads/master') && 'READ_WRITE' || 'READ_ONLY' }}
+        run: |
+          @(
+            "RUSTC_WRAPPER=sccache",
+            "SCCACHE_GHA_ENABLED=true",
+            "SCCACHE_GHA_RW_MODE=$env:CACHE_MODE",
+            "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build Windows Hand payload
         shell: pwsh
         env:
@@ -319,6 +363,12 @@ jobs:
             target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report compiler cache reuse
+        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        shell: bash
+        run: |
+          sccache --show-stats | tee sccache-stats.txt
+          { echo '### sccache (x86_64-pc-windows-msvc)'; grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable)' sccache-stats.txt | grep -v ' by ' | sed 's/^/    /'; } >> "$GITHUB_STEP_SUMMARY"
 
   build-vm-guest:
     if: >-

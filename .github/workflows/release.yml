@@ -163,7 +163,7 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
           STABLE_GIT_COMMIT: ${{ github.sha }}
         run: |
-          cargo build --locked --release \
+          cargo build --locked --release --timings \
             --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo \
             --target ${{ matrix.target }}
       - name: Verify shipped Linux Hand screen payload
@@ -218,6 +218,15 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/*
           if-no-files-found: error
+      # Per-crate compile critical path for profiling; never a release asset.
+      - name: Retain Cargo build timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-timings-${{ matrix.target }}
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 30
 
   build-windows-hand:
     name: build Windows Hand installer
@@ -246,7 +255,7 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
           STABLE_GIT_COMMIT: ${{ github.sha }}
         run: |
-          cargo build --locked --release --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo
+          cargo build --locked --release --timings --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign payload when Authenticode is configured
         shell: pwsh
@@ -277,6 +286,14 @@ jobs:
           name: nanocodex-hand-x86_64-pc-windows-msvc
           path: dist/windows-hand/*
           if-no-files-found: error
+      - name: Retain Cargo build timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-timings-windows-hand
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 30
 
   publish-crates:
     name: publish crates.io packages
@@ -408,8 +425,11 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+      # Release assets only (the Linux, macOS and Windows nanocodex-* artifacts);
+      # build telemetry artifacts are never published.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          pattern: nanocodex-*
           path: dist
           merge-multiple: true
       - name: Test Hand reuse against a fake release store
