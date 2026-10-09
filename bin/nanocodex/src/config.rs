@@ -42,7 +42,7 @@ pub(crate) use claude::interaction::{
 pub(crate) use claude::scheduler::SessionScheduler;
 pub(crate) use claude::{prepare_rewind_branch, rewind_files};
 mod instructions;
-pub(crate) use instructions::{expand_session_user_skill, expand_user_skill};
+pub(crate) use instructions::expand_session_user_skill;
 
 pub(crate) struct ConfiguredAgent {
     pub(crate) claude_scheduler: Option<Arc<SessionScheduler>>,
