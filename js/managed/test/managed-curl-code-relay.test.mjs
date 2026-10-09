@@ -128,7 +128,7 @@ test('curl: yielded Code Mode nested calls terminate exactly once after completi
     // Decide from the current turn only: later turns retain earlier markers.
     const since = history.findLastIndex(item => item.role === 'user' && /CURL_[A-Z_]+:/.test(JSON.stringify(item.content)));
     const user = JSON.stringify(history[since]?.content ?? null);
-    const scenario = ['CURL_UNAWAITED_NEXT', 'CURL_CANCEL_NEXT', 'CURL_CANCEL', 'CURL_UNAWAITED'].find(marker => user.includes(marker + ':'));
+    const scenario = ['CURL_UNAWAITED_NEXT', 'CURL_CANCEL_NEXT', 'CURL_CANCEL', 'CURL_UNAWAITED', 'CURL_WAIT_CANCEL_WAIT', 'CURL_WAIT_CANCEL_NEXT', 'CURL_WAIT_CANCEL'].find(marker => user.includes(marker + ':'));
     const outputs = history.slice(since + 1).filter(item => /_call_output$/.test(item.type ?? ''));
     modelCalls.push({ process: processNumber, scenario, tool_outputs: outputs.length, last_output: outputs.at(-1), at: new Date().toISOString() });
     if (scenario === 'CURL_UNAWAITED') return outputs.length === 0 ? exec('curl-unawaited-cell',
@@ -141,6 +141,17 @@ test('curl: yielded Code Mode nested calls terminate exactly once after completi
       '// @exec: {"yield_time_ms": 200}\ntext(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/HANG"}));');
       cancelInference.started(); await delay(20_000); return say('CANCEL_NOT_CANCELLED'); }
     if (scenario === 'CURL_CANCEL_NEXT') return say('CANCEL_NEXT_OK');
+    // An earlier turn leaves its cell running; a later turn waits on it and
+    // is cancelled during that wait.
+    if (scenario === 'CURL_WAIT_CANCEL') return outputs.length === 0 ? exec('curl-wait-cancel-cell',
+      '// @exec: {"yield_time_ms": 200}\ntext(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/HANG"}));')
+      : say('WAIT_CANCEL_YIELDED');
+    if (scenario === 'CURL_WAIT_CANCEL_WAIT') {
+      const cellId = [...JSON.stringify(history).matchAll(/Script running with cell ID ([0-9a-f-]+:[0-9]+)/g)].at(-1)?.[1];
+      if (outputs.length === 0 && cellId) return respond([{ type: 'function_call', name: 'wait', call_id: 'curl-wait-cancel-wait', arguments: JSON.stringify({ cell_id: cellId, yield_time_ms: 60_000 }) }], false);
+      unexpected.push({ kind: 'wait-cancel', cellId: cellId ?? null, outputs: outputs.length }); return say('WAIT_NOT_CANCELLED');
+    }
+    if (scenario === 'CURL_WAIT_CANCEL_NEXT') return say('WAIT_CANCEL_NEXT_OK');
     unexpected.push({ kind: 'model', scenario: scenario ?? null }); return say('UNEXPECTED');
   };
 
@@ -334,6 +345,23 @@ test('curl: yielded Code Mode nested calls terminate exactly once after completi
     const settled = await history('cancel-history-final', agent);
     assert.deepEqual(openToolCalls(settled), []);
     assert.ok(Object.values(terminals(settled)).every(count => count === 1), JSON.stringify(terminals(settled)));
+    // 5. Cancelling a later turn during its wait on an earlier turn's cell
+    // settles that cell's nested call and the wait exactly once.
+    const yieldTurn = (await curl('wait-cancel-yield', '/v1/agents/' + agent + '/turns', { method: 'POST', body: { input: 'CURL_WAIT_CANCEL: start the hanging effect and answer.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    assert.equal((await terminal('wait-cancel-yield-terminal', agent, yieldTurn.turn_id)).state, 'completed');
+    const waitTurn = (await curl('wait-cancel-wait', '/v1/agents/' + agent + '/turns', { method: 'POST', body: { input: 'CURL_WAIT_CANCEL_WAIT: wait on the running cell.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    await waitFor('wait call started', async () => (await history('wait-cancel-poll', agent)).data.some(row => row.event?.type === 'tool.call' && row.event.payload.call_id === 'curl-wait-cancel-wait'), 30_000, 200);
+    await curl('wait-cancel-active-turn', '/v1/agents/' + agent + '/turns/' + waitTurn.turn_id + '/cancel', { method: 'POST', headers: { 'Idempotency-Key': randomUUID() }, expected: 202 });
+    assert.ok(['cancelled', 'failed'].includes((await terminal('wait-cancel-terminal', agent, waitTurn.turn_id)).state));
+    const waitCancelled = await history('wait-cancel-history', agent);
+    const waitNested = waitCancelled.data.filter(row => row.event?.type === 'tool.result' && row.event.payload.call_id === 'curl-wait-cancel-cell/code-1');
+    assert.equal(waitNested.length, 1, 'the waited earlier-turn nested call terminates exactly once');
+    assert.equal(waitNested[0].event.payload.status, 'failed');
+    assert.deepEqual(openToolCalls(waitCancelled), [], 'no call stays running after cancelling the wait');
+    assert.ok(Object.values(terminals(waitCancelled)).every(count => count === 1), JSON.stringify(terminals(waitCancelled)));
+    const waitNext = (await curl('wait-cancel-next-turn', '/v1/agents/' + agent + '/turns', { method: 'POST', body: { input: 'CURL_WAIT_CANCEL_NEXT: answer.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    assert.equal((await terminal('wait-cancel-next-terminal', agent, waitNext.turn_id)).state, 'completed');
+    summary.wait_cancel = { turn: waitTurn.turn_id, result: waitNested[0].event.payload.status, terminals: terminals(await history('wait-cancel-final', agent)) };
     summary.cancel = { turn: cancelRun.turn_id, result: cancelResults[0].event.payload.status, terminals: terminals(settled) };
     summary.unawaited = { agent, turn, late_result_cursor: late.frames.find(frame => frame === lateResult)?.cursor ?? null, terminals: terminals(final) };
 
