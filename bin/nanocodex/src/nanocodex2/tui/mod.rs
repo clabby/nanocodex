@@ -7,6 +7,8 @@
 //! interaction, and the caller-local shell convenience.
 
 pub(crate) mod backend;
+#[cfg(feature = "tui-bench")]
+pub(crate) mod bench;
 mod btw;
 mod bug;
 mod clipboard;
