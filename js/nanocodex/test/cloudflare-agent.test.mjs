@@ -420,7 +420,9 @@ test("public durable creation still validates credentials before returning", asy
   await assert.rejects(create(module, owner), /EGRESS broker rejected.*HTTP 403/);
 });
 
-test("a failed speculative connection does not authorize a later managed text turn", async () => {
+// The turn retries a rejected WebSocket handshake with the SDK 1/2/4/8 s
+// backoff (93571b344) before its HTTPS fallback surfaces the 403 (~16 s).
+test("a failed speculative connection does not authorize a later managed text turn", { timeout: 30_000 }, async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   let requests = 0;
   const owner = durableOwner(new MemoryStorage(), {
