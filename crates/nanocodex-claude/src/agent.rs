@@ -1287,6 +1287,185 @@ impl ClaudeBuilder {
     }
 }
 
+/// Observability bound for one tool.result event payload. Events are archived,
+/// broadcast and replayed; the model-visible tool content and durable effect
+/// receipts are separate and never truncated here.
+const EVENT_RESULT_BYTES: usize = 32 * 1024;
+const EVENT_PREVIEW_BYTES: usize = 16 * 1024;
+const EVENT_TOP_LEVEL_TEXT_BYTES: usize = 256 * 1024;
+
+struct CountingWriter(usize);
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encoded_len(value: Option<&Value>) -> usize {
+    match value {
+        None | Some(Value::Null) => 0,
+        Some(Value::String(text)) => text.len(),
+        Some(value) => {
+            let mut counter = CountingWriter(0);
+            serde_json::to_writer(&mut counter, value).map_or(0, |()| counter.0)
+        }
+    }
+}
+
+fn utf8_prefix(text: &str, bytes: usize) -> &str {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// Keeps image references needed by conversation-image history.
+fn event_image_reference(value: Option<&Value>) -> Value {
+    let Some(Value::Object(object)) = value else {
+        return Value::Null;
+    };
+    let reference: serde_json::Map<String, Value> = ["image_url", "file_id"]
+        .into_iter()
+        .filter_map(|key| {
+            object
+                .get(key)
+                .filter(|field| field.is_string())
+                .map(|field| (key.to_owned(), field.clone()))
+        })
+        .collect();
+    if reference.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(reference)
+    }
+}
+
+/// Bounded nested Code Mode tool.result payload fields.
+fn nested_event_result(call: &Value) -> serde_json::Map<String, Value> {
+    let output = call.get("output");
+    let structured = call.get("structured_result");
+    let metadata = call.get("metadata");
+    let mut fields = serde_json::Map::new();
+    let host_truncated = call.get("event_truncated").and_then(Value::as_bool) == Some(true);
+    let output_len = encoded_len(output);
+    let duplicate = structured.is_some_and(|value| {
+        output.and_then(Value::as_str).is_some_and(|text| {
+            text.len() == encoded_len(Some(value))
+                && serde_json::from_str::<Value>(text).ok().as_ref() == Some(value)
+        })
+    });
+    let size = output_len
+        + if duplicate {
+            0
+        } else {
+            encoded_len(structured)
+        }
+        + encoded_len(metadata);
+    if host_truncated || size <= EVENT_RESULT_BYTES {
+        fields.insert("result".into(), json!({ "text": output }));
+        fields.insert(
+            "structured_result".into(),
+            structured.cloned().unwrap_or(Value::Null),
+        );
+        fields.insert("metadata".into(), metadata.cloned().unwrap_or(Value::Null));
+        if host_truncated {
+            fields.insert("truncated".into(), Value::Bool(true));
+            fields.insert(
+                "original_bytes".into(),
+                call.get("event_original_bytes")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+        }
+        return fields;
+    }
+    let preview = match output {
+        Some(Value::String(text)) => utf8_prefix(text, EVENT_PREVIEW_BYTES).to_owned(),
+        Some(value) if !value.is_null() => {
+            let text = value.to_string();
+            utf8_prefix(&text, EVENT_PREVIEW_BYTES).to_owned()
+        }
+        _ => {
+            let text = structured.map(Value::to_string).unwrap_or_default();
+            utf8_prefix(&text, EVENT_PREVIEW_BYTES).to_owned()
+        }
+    };
+    fields.insert("result".into(), json!({ "text": preview }));
+    fields.insert(
+        "structured_result".into(),
+        event_image_reference(structured),
+    );
+    fields.insert(
+        "metadata".into(),
+        if encoded_len(metadata) <= 4096 {
+            metadata.cloned().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        },
+    );
+    fields.insert("truncated".into(), Value::Bool(true));
+    fields.insert("original_bytes".into(), json!(size));
+    fields
+}
+
+/// Top-level event fields: nested receipts are already published as their own
+/// events, so the exec/wait metadata keeps only their attribution summary.
+fn top_level_event_fields(
+    content: &ToolResultContent,
+    structured_result: Option<&Value>,
+    metadata: Option<&Value>,
+) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    let result = match content {
+        ToolResultContent::Text(text) if text.len() > EVENT_TOP_LEVEL_TEXT_BYTES => {
+            fields.insert("truncated".into(), Value::Bool(true));
+            fields.insert("original_bytes".into(), json!(text.len()));
+            json!({ "text": utf8_prefix(text, EVENT_TOP_LEVEL_TEXT_BYTES) })
+        }
+        ToolResultContent::Text(text) => json!({ "text": text }),
+        ToolResultContent::Blocks(blocks) => json!({ "content_blocks": blocks }),
+    };
+    fields.insert("result".into(), result);
+    let structured_len = encoded_len(structured_result);
+    if structured_len > EVENT_RESULT_BYTES {
+        fields.insert(
+            "structured_result".into(),
+            event_image_reference(structured_result),
+        );
+        fields.insert("structured_result_truncated".into(), Value::Bool(true));
+        fields.insert("structured_result_bytes".into(), json!(structured_len));
+    } else {
+        fields.insert(
+            "structured_result".into(),
+            structured_result.cloned().unwrap_or(Value::Null),
+        );
+    }
+    let metadata = match metadata {
+        Some(Value::Object(object)) if object.contains_key("_nanocodex_code") => {
+            let mut object = object.clone();
+            if let Some(code) = object.get_mut("_nanocodex_code")
+                && let Some(calls) = code.get("calls").and_then(Value::as_array)
+            {
+                *code = json!({
+                    "origin_call_id": code.get("origin_call_id"),
+                    "nested_call_count": calls.len(),
+                });
+            }
+            Value::Object(object)
+        }
+        Some(value) if encoded_len(Some(value)) > EVENT_RESULT_BYTES => Value::Null,
+        Some(value) => value.clone(),
+        None => Value::Null,
+    };
+    fields.insert("metadata".into(), metadata);
+    fields
+}
+
 #[cfg(all(feature = "tools", not(target_family = "wasm")))]
 fn host_reply(
     output: nanocodex_claude_tools::ToolOutput,
@@ -3428,20 +3607,49 @@ impl State {
                         "model_call_index": index, "parent_call_id": code.get("origin_call_id"),
                     }),
                 );
-                self.emit(events, AgentEventKind::ToolResult, json!({
-                    "call_id": call_id, "tool": tool,
-                    "status": if call.get("success").and_then(Value::as_bool) == Some(true) { "completed" } else { "failed" },
-                    "duration_ns": call.get("duration_ns"), "started_after_ns": call.get("started_after_ns"),
-                    "result": { "text": call.get("output") }, "structured_result": call.get("structured_result"),
-                    "metadata": call.get("metadata"), "parent_call_id": code.get("origin_call_id"),
-                }));
+                let mut payload = nested_event_result(call);
+                payload.extend([
+                    ("call_id".to_owned(), json!(call_id)),
+                    ("tool".to_owned(), json!(tool)),
+                    (
+                        "status".to_owned(),
+                        json!(
+                            if call.get("success").and_then(Value::as_bool) == Some(true) {
+                                "completed"
+                            } else {
+                                "failed"
+                            }
+                        ),
+                    ),
+                    ("duration_ns".to_owned(), json!(call.get("duration_ns"))),
+                    (
+                        "started_after_ns".to_owned(),
+                        json!(call.get("started_after_ns")),
+                    ),
+                    (
+                        "parent_call_id".to_owned(),
+                        json!(code.get("origin_call_id")),
+                    ),
+                ]);
+                self.emit(events, AgentEventKind::ToolResult, Value::Object(payload));
             }
         }
-        let event_content = match &content {
-            ToolResultContent::Text(text) => json!({"text": text}),
-            ToolResultContent::Blocks(blocks) => json!({"content_blocks": blocks}),
-        };
-        self.emit(events, AgentEventKind::ToolResult, json!({"call_id":id,"tool":name,"status":if is_error {"failed"}else{"completed"},"duration_ns":began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,"started_after_ns":null,"result":event_content,"structured_result":structured_result,"metadata":metadata}));
+        let mut payload =
+            top_level_event_fields(&content, structured_result.as_ref(), metadata.as_ref());
+        payload.extend([
+            ("call_id".to_owned(), json!(id)),
+            ("tool".to_owned(), json!(name)),
+            (
+                "status".to_owned(),
+                json!(if is_error { "failed" } else { "completed" }),
+            ),
+            (
+                "duration_ns".to_owned(),
+                json!(began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64),
+            ),
+            ("started_after_ns".to_owned(), Value::Null),
+        ]);
+        self.emit(events, AgentEventKind::ToolResult, Value::Object(payload));
         Ok(ContentBlock::tool_result_content(id, content, is_error))
     }
     async fn lifecycle(
