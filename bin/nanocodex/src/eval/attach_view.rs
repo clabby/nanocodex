@@ -1,28 +1,39 @@
 use std::{io, path::Path, time::Duration};
 
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use eyre::{Result, WrapErr as _};
 use futures_util::StreamExt as _;
-use legacy_crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use legacy_ratatui::{
+use nanocodex_eval::{EvaluationFamilyStatus, EvaluationObserver, EvaluationStatus};
+use ratatui::{
     Frame,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
 };
-use nanocodex_eval::{EvaluationFamilyStatus, EvaluationObserver, EvaluationStatus};
 use tokio::time::{MissedTickBehavior, interval};
-
-use super::terminal::TerminalSession;
 
 const SQLITE_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 
-pub(crate) async fn attach_evaluation(mut observer: EvaluationObserver) -> Result<()> {
+/// Read-only full-screen dashboard over an evaluation profile's SQLite ledger.
+pub(super) async fn attach_evaluation(mut observer: EvaluationObserver) -> Result<()> {
     let snapshot = observer
         .snapshot()
         .wrap_err("failed to read the initial evaluation snapshot")?;
-    let mut view = AttachView::new(snapshot);
-    let mut terminal = TerminalSession::enter().wrap_err("failed to initialize the terminal")?;
+    let view = AttachView::new(snapshot);
+    // try_init enters raw mode and the alternate screen and installs a panic
+    // hook that restores the terminal; restore also runs on every return.
+    let mut terminal = ratatui::try_init().wrap_err("failed to initialize the terminal")?;
+    let result = watch(&mut terminal, &mut observer, view).await;
+    ratatui::restore();
+    result
+}
+
+async fn watch(
+    terminal: &mut ratatui::DefaultTerminal,
+    observer: &mut EvaluationObserver,
+    mut view: AttachView,
+) -> Result<()> {
     let mut input = EventStream::new();
     let mut probe = interval(SQLITE_PROBE_INTERVAL);
     probe.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -279,10 +290,10 @@ fn model_label(family: &EvaluationFamilyStatus) -> String {
 
 #[cfg(test)]
 mod tests {
-    use legacy_crossterm::event::{KeyEvent, KeyModifiers};
-    use legacy_ratatui::{Terminal, backend::TestBackend};
+    use crossterm::event::{KeyEvent, KeyModifiers};
     use nanocodex::{Model, Thinking};
     use nanocodex_eval::{EvaluationCounts, EvaluationTreatment};
+    use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
 
@@ -296,7 +307,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(legacy_ratatui::buffer::Cell::symbol)
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("terminal-bench"));

@@ -51,7 +51,6 @@ mod setup;
 mod startup_timing;
 mod subagents;
 mod tool_calls;
-mod tui;
 mod update;
 mod version;
 #[cfg(any(
@@ -596,6 +595,7 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Some(Command::Resume(mut command)) => {
+            let _observability = command.observability.install(true)?;
             use nanocodex::HarnessFamily;
             use nanocodex2::tui::local::{agent::LocalLaunch, sessions};
             let codex_home = config::default_codex_home()?;
@@ -716,17 +716,8 @@ async fn run(cli: Cli) -> Result<()> {
                 .map_err(|error| eyre!("{error}"))
         }
         Some(Command::Update(command)) => command.run().await,
-        None if std::env::var_os("NANOCODEX_LEGACY_TUI").is_some() => {
-            tui::run_observed(
-                cli.agent,
-                cli.vm,
-                cli.prompt.map(tui::InitialPrompt::plain),
-                None,
-                Some(cli.observability),
-            )
-            .await
-        }
         None => {
+            let _observability = cli.observability.install(true)?;
             let mut agent = cli.agent;
             agent.prefer_codex_for_vm(&cli.vm);
             let replaceable = agent.claude_resume.is_none();

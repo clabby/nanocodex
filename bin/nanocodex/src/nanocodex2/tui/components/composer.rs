@@ -171,9 +171,11 @@ impl SettingsCommand {
                 (Some("login"), Some(name), None) => Self::Feature(
                     crate::nanocodex2::tui::features::FeatureCommand::McpLogin(name.to_owned()),
                 ),
-                (Some("reload"), name, None) => Self::Feature(
-                    crate::nanocodex2::tui::features::FeatureCommand::McpReload(name.map(str::to_owned)),
-                ),
+                (Some("reload"), name, None) => {
+                    Self::Feature(crate::nanocodex2::tui::features::FeatureCommand::McpReload(
+                        name.map(str::to_owned),
+                    ))
+                }
                 _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload [server]".into()),
             }),
             // FEATURE-HOOK: wp2 local /btw collapse/split and the branch navigator
@@ -191,9 +193,6 @@ impl SettingsCommand {
                     input.trim_start()[command.len()..].trim().to_owned(),
                 ),
             )),
-            "/voice" if input.trim_start()[command.len()..].trim() == "list" => {
-                Some(Self::Voice(crate::nanocodex2::voice::Command::List))
-            }
             "/voice" => {
                 // FEATURE-HOOK: wp4 arguments the managed grammar rejects may still be
                 // local Realtime controls (e.g. platform voices); the driver shows the

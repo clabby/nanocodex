@@ -42,7 +42,7 @@ pub(crate) use claude::interaction::{
 pub(crate) use claude::scheduler::SessionScheduler;
 pub(crate) use claude::{prepare_rewind_branch, rewind_files};
 mod instructions;
-pub(crate) use instructions::{expand_session_user_skill, expand_user_skill};
+pub(crate) use instructions::expand_session_user_skill;
 
 pub(crate) struct ConfiguredAgent {
     pub(crate) claude_scheduler: Option<Arc<SessionScheduler>>,
@@ -355,8 +355,7 @@ impl AgentArgs {
         } else {
             model.default_thinking()
         });
-        self.fast_mode =
-            Some(model.family() == HarnessFamily::Codex && (!same_family || fast_mode));
+        self.fast_mode = Some(model.supports_fast_mode() && fast_mode);
     }
 
     /// Arguments for switching a running TUI to another saved session (/attach):
@@ -401,6 +400,12 @@ impl AgentArgs {
         self.cwd = Some(workspace);
         self.claude_resume = Some(session);
         Ok(self)
+    }
+
+    pub(crate) fn local_claude_available(&self) -> bool {
+        self.claude_api_key.is_some()
+            || self.claude_auth.has_saved_credentials()
+            || self.selected_harness().ok() == Some(HarnessFamily::Claude)
     }
 
     pub(crate) fn harness_model(&self) -> Result<HarnessModel> {
@@ -557,6 +562,10 @@ impl AgentArgs {
     #[cfg(test)]
     pub(crate) const fn uses_persistent_browser_profile(&self) -> bool {
         self.browser.uses_persistent_profile()
+    }
+
+    pub(crate) const fn tui_reasoning_mode(&self) -> ReasoningMode {
+        self.reasoning_mode
     }
 
     pub(crate) fn thinking(&self) -> Thinking {
