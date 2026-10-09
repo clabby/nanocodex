@@ -10,6 +10,7 @@
     reason = "use the same reviewed Tact component ownership as the production binary"
 )]
 
+mod clipboard;
 #[path = "components/mod.rs"]
 mod components;
 #[path = "../config.rs"]
@@ -46,8 +47,8 @@ mod voice_state;
 // Keep production components on their normal module paths in this private target.
 mod tui {
     pub(crate) use crate::{
-        context, format, pane, private_input, prompt, review, screen, secure_input, session, share,
-        sites, spinner, sudo_input, theme, transcript, vault,
+        clipboard, context, format, pane, private_input, prompt, review, screen, secure_input,
+        session, share, sites, spinner, sudo_input, theme, transcript, vault,
     };
 }
 

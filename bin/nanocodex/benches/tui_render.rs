@@ -36,6 +36,15 @@ mod tui {
     }
 
     #[allow(dead_code, unused_imports)]
+    mod tool_calls {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/tui/tool_calls.rs"
+        ));
+    }
+    use tool_calls::ToolCalls;
+
+    #[allow(dead_code, unused_imports)]
     mod transcript {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1854,8 +1863,8 @@ mod tui {
                     },
                     |state| {
                         for _ in 0..TOGGLES {
-                            state.0.set_tool_details_expanded(false);
-                            state.0.set_tool_details_expanded(true);
+                            state.0.set_tool_calls(ToolCalls::Folded);
+                            state.0.set_tool_calls(ToolCalls::Expanded);
                         }
                         black_box((state.0.len(), state.1.len()));
                     },
@@ -1874,7 +1883,7 @@ mod tui {
                     status: ToolStatus::Completed,
                 });
             }
-            transcript.set_tool_details_expanded(false);
+            transcript.set_tool_calls(ToolCalls::Folded);
             let mut terminal = Terminal::new(TestBackend::new(120, 40))
                 .expect("folded tool terminal should initialize");
             bencher.iter(|| {
