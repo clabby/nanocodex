@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { Agent, Subagents, Transport } from '../host/index.mjs';
+import { codeEvaluator } from './quickjs-fixture.mjs';
 
 test('explicit child close overlapping root shutdown releases only that child permanently', { timeout: 30_000 }, async () => {
   const module = await WebAssembly.compile(await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url)));
@@ -22,20 +23,19 @@ test('explicit child close overlapping root shutdown releases only that child pe
       assert.equal(request.url, '/v1/responses');
       assert.equal(request.headers.authorization, 'Bearer synthetic-close-race');
       const definitions = [...(body.tools ?? []), ...body.input.filter(item => item.type === 'additional_tools').flatMap(item => item.tools)];
-      const tool = definitions.find(def => def.name === 'hold' || def.description?.startsWith('hold\n'));
-      assert.ok(tool, 'child receives the blocking host tool');
+      assert.deepEqual(definitions.map(tool => tool.name).sort(), ['exec', 'wait']);
       trace.push({ type: 'model_request', model: body.model });
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end(`data: ${JSON.stringify({ type: 'response.completed', response: {
         id: `response-${++callId}`, status: 'completed',
-        output: [{ type: 'function_call', call_id: `hold-${callId}`, name: tool.name, arguments: '{}' }],
+        output: [{ type: 'custom_tool_call', call_id: `hold-${callId}`, name: 'exec', input: 'text(await tools.hold({}));' }],
         usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       } })}\n\n`);
     } catch (error) { errors.push(String(error)); response.destroy(error); }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const root = await Agent.create({
-    module, model: 'gpt-6.1-sol', thinking: 'low', toolMode: 'direct',
+    module, model: 'gpt-6.1-sol', thinking: 'low', codeEvaluator,
     transport: Transport.openAi({ apiKey: 'synthetic-close-race', apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, stateless: true }),
     tools: [{ name: 'hold', description: 'Wait for cancellation', parameters: { type: 'object', properties: {}, additionalProperties: false },
       handler(_input, context) {

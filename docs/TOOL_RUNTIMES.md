@@ -43,6 +43,11 @@ Claude permission files and saved policies naming removed agent tools must be
 migrated to the canonical names. They fail explicitly instead of silently losing
 their restrictions. `spawn_agent(role)` selectors match the shared tool's role.
 
+Sibling messages and threaded replies work across Claude and Codex children in
+the same task tree. `send_agent_message` uses the shared agent IDs; replies use
+the received message ID as `in_reply_to`. Harness choice does not change tree
+authorization or message routing.
+
 ## Claude Code Mode
 
 Start the native CLI with `nanocodex --claude` (or pass `--claude` to
