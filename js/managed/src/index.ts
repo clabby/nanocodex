@@ -3602,6 +3602,8 @@ async function routeVmHostToolAttachment(
   }
   if (!validated.ok) {
     await validated.body?.cancel();
+    // A released or forgotten allocation is permanent: VM runtimes stop on 410.
+    if (validated.status === 410) return json({ error: "attachment_revoked" }, { status: 410 });
     return json({ error: "not_found" }, { status: 404 });
   }
   let grant: VmHostAttachmentGrant;
@@ -5757,8 +5759,14 @@ export class DurableAgentSession extends DurableComputerObject {
         // Re-discovering unrelated account tools delays every VM attachment.
         await performanceStage("attachment.router_ready", () => this.#ensureAgent({ reuseReady: true }));
       } catch (error) {
-        console.error({ type: "managed.tool_router_startup_failed", error_kind: errorKind(error) });
-        return json({ error: "tool_router_unavailable" }, { status: 503 });
+        // A conversation that can never start again (retired stored model,
+        // exported durability) must not keep its VM attachment retrying.
+        const terminal = this.#durabilityExported
+          || (error instanceof ManagedRequestError && error.code === "unsupported_stored_model");
+        console.error({ type: "managed.tool_router_startup_failed", terminal, ...errorDiagnostics(error) });
+        return terminal
+          ? json({ error: "agent_unavailable" }, { status: 410 })
+          : json({ error: "tool_router_unavailable" }, { status: 503, headers: { "retry-after": "5" } });
       }
       const expectedMachineId = request.headers.get("x-nanocodex-vm-machine-id") ?? undefined;
       const maximumLeaseExpiresAt = Number(
@@ -10990,7 +10998,7 @@ export class DurableAgentSession extends DurableComputerObject {
           if (!this.#accountHostedTools) return undefined;
           const started = performance.now();
           try {
-            await this.#accountHostedTools.refreshMachine(id, context, computer);
+            await this.#accountHostedTools.refreshMachine(id, context, computer, computer, context.signal);
             observeHandCall("namespace.selected_lookup", name, started, "ok", context.callId,
               { thread_id: session.session_id, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
           } catch (error) {
