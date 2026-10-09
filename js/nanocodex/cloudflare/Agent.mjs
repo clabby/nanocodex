@@ -144,14 +144,12 @@ export function destroy(owner) {
         `destroy:${globalThis.crypto.randomUUID()}`,
         fence,
       );
-      storage.sql.exec(
-        "DELETE FROM nanocodex_durable_records WHERE state_id = ?",
-        stateId,
-      );
-      storage.sql.exec(
-        "DELETE FROM nanocodex_durable_states WHERE state_id = ?",
-        stateId,
-      );
+      // The durable child task-tree journal is a sibling state of the root
+      // (see nanocodex-durability child_journal); destroy removes both.
+      for (const id of [stateId, `${stateId}:subagents`]) {
+        storage.sql.exec("DELETE FROM nanocodex_durable_records WHERE state_id = ?", id);
+        storage.sql.exec("DELETE FROM nanocodex_durable_states WHERE state_id = ?", id);
+      }
     }
     storage.sql.exec("DROP TABLE IF EXISTS nanocodex_cloudflare_fork_resume");
     clearCloudflareEventSocket(context);
