@@ -19,16 +19,18 @@ await mkdir(output, { recursive: true });
 const resumed = process.env.NANOCODEX_JOURNEY_RESUME
   ? JSON.parse(await readFile(resolve(process.env.NANOCODEX_JOURNEY_RESUME, 'run.json'), 'utf8')) : undefined;
 const run = resumed?.run ?? randomUUID();
+const attempt = randomUUID();
 const settings = { model: process.env.NANOCODEX_TEST_MODEL ?? 'gpt-6.1-sol', thinking: 'low', reasoning_mode: 'standard', fast_mode: false };
 const childModel = process.env.NANOCODEX_TEST_CHILD_MODEL;
 const childHarness = process.env.NANOCODEX_TEST_CHILD_HARNESS;
 assert.ok((!childModel && !childHarness) || (childModel && ['codex', 'claude'].includes(childHarness)), 'Provide both child model and child harness');
 const childSelection = childModel ? `For every spawn_agent call explicitly select harness ${childHarness} and model ${childModel}.` : '';
+const toolGuidance = 'Built-in subagent tools are directly callable as tools.spawn_agent, tools.wait_agent, tools.send_agent_message, tools.list_agents, tools.close_agent, and tools.submit_result inside exec. Inspect their full schemas in ALL_TOOLS. ToolSearch searches deferred tools, so an empty search does not mean these built-ins are unavailable. There is no codemode global.';
 const checks = [];
 const scenario = process.env.NANOCODEX_JOURNEY_SCENARIO ?? 'all';
-assert.ok(['all', 'idle', 'interruption'].includes(scenario));
+assert.ok(['all', 'idle', 'restart', 'interruption'].includes(scenario));
 let sequence = 0;
-await writeFile(`${output}/run.json`, JSON.stringify({ run, origin, settings, childModel, childHarness, scenario, resumed_from: process.env.NANOCODEX_JOURNEY_RESUME, started_at: new Date().toISOString(), source_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), script_sha256: createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex') }, null, 2));
+await writeFile(`${output}/run.json`, JSON.stringify({ run, attempt, origin, settings, childModel, childHarness, scenario, resumed_from: process.env.NANOCODEX_JOURNEY_RESUME, started_at: new Date().toISOString(), source_sha: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(), script_sha256: createHash('sha256').update(await readFile(fileURLToPath(import.meta.url))).digest('hex') }, null, 2));
 
 function frames(raw) {
   return raw.replaceAll('\r\n', '\n').split('\n\n').slice(0, -1).flatMap(frame => {
@@ -108,7 +110,9 @@ Create exactly two direct children sequentially, with roles CURL_PARENT and CURL
 CURL_PARENT task: spawn exactly one child role CURL_GRANDCHILD with that same output contract, task submit ${JSON.stringify(expectedG)} then finish, keeping itself open. Wait until grandchild completes. Then submit ${JSON.stringify(expectedA)} and finish. Keep the grandchild open and remember its ID for a follow-up.
 CURL_ERRORS task: deliberately submit {marker:${JSON.stringify(expectedB.marker)},value:"invalid-integer"} first, observe the contract rejection, then run exec_command({cmd:"exit 17",workdir:"/brain"}), observe actual exit code 17, then submit ${JSON.stringify(expectedB)} and finish. Do not repeat the shell command.
 Wait for both direct children to complete. Actually attempt send_agent_message to nonexistent agent_id 999999999 and observe rejection. Explicitly close CURL_ERRORS only. Call list_agents with include_completed:true. Keep CURL_PARENT and CURL_GRANDCHILD reusable. Report IDs and results. Do not invent receipts or spawn replacement agents.`;
-  const body = { input: input + (childSelection ? `\n${childSelection}` : ''), settings };
+  const body = resumed
+    ? JSON.parse(await readFile(resolve(process.env.NANOCODEX_JOURNEY_RESUME, '001-unauthenticated-create.request.json'), 'utf8'))
+    : { input: input + `\n${toolGuidance}` + (childSelection ? `\n${childSelection}` : ''), settings };
   await request('unauthenticated-create', '/v1/agent-runs', { method: 'POST', body, headers: { 'Idempotency-Key': key }, authenticated: false, expected: 401 });
   await request('invalid-cursor-before-admission', '/v1/agent-runs', { method: 'POST', body, headers: { 'Idempotency-Key': key, Accept: 'text/event-stream', 'Last-Event-ID': 'invalid' }, expected: 400 });
   const disconnected = await request('disconnect-after-admission', '/v1/agent-runs', { method: 'POST', body, headers: { 'Idempotency-Key': key, Accept: 'text/event-stream' }, expected: resumed ? 200 : 201, disconnectAfterReceipt: true });
@@ -140,54 +144,69 @@ Wait for both direct children to complete. Actually attempt send_agent_message t
   assert.equal(terminalReplay.frames().length, 1, 'Terminal cursor returns only original receipt then EOF');
   await request('unauthenticated-restart', `/v1/agents/${agent}/restart`, { method: 'POST', authenticated: false, expected: 401 });
   await request('unknown-agent', `/v1/agents/${randomUUID()}`, { expected: 404 });
-  const settled = (await request('settled-state', `/v1/agents/${agent}`)).json();
-  // Replaying combined admission prepares the runtime again without changing
-  // last_active. Allow its preparation lease to expire as well as the turn's.
-  const idleDeadline = Math.max(settled.last_active, Date.now()) + 300_000;
-  console.log(`Waiting for real idle teardown; next state check after ${new Date(idleDeadline + 5000).toISOString()}. Agent ${agent}`);
-  if (scenario === 'all') await interruptionJourney();
-  while (Date.now() < idleDeadline + 5000) await delay(Math.min(30_000, idleDeadline + 5000 - Date.now()));
   let idle;
-  for (let i = 0; i < 7; i++) {
-    idle = (await request(`idle-state-${i}`, `/v1/agents/${agent}`)).json();
-    if (!idle.agent_loaded) break;
-    await delay(10_000);
+  if (scenario !== 'restart') {
+    const settled = (await request('settled-state', `/v1/agents/${agent}`)).json();
+    // Replaying combined admission prepares the runtime again without changing
+    // last_active. Allow its preparation lease to expire as well as the turn's.
+    const idleDeadline = Math.max(settled.last_active, Date.now()) + 300_000;
+    console.log(`Waiting for real idle teardown; next state check after ${new Date(idleDeadline + 5000).toISOString()}. Agent ${agent}`);
+    if (scenario === 'all') await interruptionJourney();
+    while (Date.now() < idleDeadline + 5000) await delay(Math.min(30_000, idleDeadline + 5000 - Date.now()));
+    for (let i = 0; i < 7; i++) {
+      idle = (await request(`idle-state-${i}`, `/v1/agents/${agent}`)).json();
+      if (!idle.agent_loaded) break;
+      await delay(10_000);
+    }
+    assert.equal(idle.agent_loaded, false, 'Actual graceful idle teardown, not an operator restart');
   }
-  assert.equal(idle.agent_loaded, false, 'Actual graceful idle teardown, not an operator restart');
-  const followup = `Continue the synthetic durability test. Access no files, services, Hands, or connectors. Spawn no new agents. First call list_agents with include_completed:true. Attempt sending a message to closed child ${closedId}; it must be rejected. Delegate to existing child ${parentId}: ask your existing grandchild to recall its own original marker and integer from retained history and submit them again; wait for its result, then recall and submit your own original marker and integer from retained history. Include no marker or value in the message to either child. Keep both children open. Wait for child ${parentId} to complete and report actual results. Do not message peers or parents from child tasks.`;
-  const recalled = await request('nested-recall-after-idle', `/v1/agents/${agent}/turns`, { method: 'POST', body: { input: followup }, headers: { Accept: 'text/event-stream', 'Idempotency-Key': `recall-${run}` }, expected: 202 });
-  assertTerminal(recalled);
-  assert.equal(events(recalled).filter(event => event.type === 'tool.call' && event.payload.tool === 'spawn_agent').length, 0);
-  const after = completedOutputs(recalled);
-  assert.deepEqual(after.get(parentId), expectedA);
-  assert.deepEqual(after.get(grandchildId), expectedG);
-  assert.ok(toolResults(recalled, 'send_agent_message').some(result => result.status === 'failed' && /closed/i.test(String(result.value))), 'Explicitly closed child remains closed');
-  for (const event of events(recalled).filter(event => event.type === 'tool.call' && event.payload.tool === 'send_agent_message')) {
-    const args = JSON.stringify(event.payload.arguments);
-    assert.ok(!args.includes(expectedA.marker) && !args.includes(expectedG.marker), 'Delegation must not supply remembered answers');
+  const followup = `Continue the synthetic durability test. Access no files, services, Hands, or connectors. Spawn no new agents. First call list_agents with include_completed:true. Attempt sending a message to closed child ${closedId}; it must be rejected. Delegate to existing child ${parentId}: ask your existing grandchild to recall its own original marker and integer from retained history and submit them again; wait for its result, then recall and submit your own original marker and integer from retained history. Include no marker or value in the message to either child. Keep both children open. Wait for child ${parentId} to complete and report actual results. Do not message peers or parents from child tasks. ${toolGuidance}`;
+  if (scenario !== 'restart') {
+    const recalled = await request('nested-recall-after-idle', `/v1/agents/${agent}/turns`, { method: 'POST', body: { input: followup }, headers: { Accept: 'text/event-stream', 'Idempotency-Key': `recall-${attempt}` }, expected: 202 });
+    assertTerminal(recalled);
+    assert.equal(events(recalled).filter(event => event.type === 'tool.call' && event.payload.tool === 'spawn_agent').length, 0);
+    const after = completedOutputs(recalled);
+    assert.deepEqual(after.get(parentId), expectedA);
+    assert.deepEqual(after.get(grandchildId), expectedG);
+    assert.ok(toolResults(recalled, 'send_agent_message').some(result => result.status === 'failed' && /closed/i.test(String(result.value))), 'Explicitly closed child remains closed');
+    for (const event of events(recalled).filter(event => event.type === 'tool.call' && event.payload.tool === 'send_agent_message')) {
+      const args = JSON.stringify(event.payload.arguments);
+      assert.ok(!args.includes(expectedA.marker) && !args.includes(expectedG.marker), 'Delegation must not supply remembered answers');
+    }
   }
+  const beforeRestart = (await request('state-before-restart', `/v1/agents/${agent}`)).json();
+  assert.equal(beforeRestart.agent_loaded, true, 'A live completed runtime is available to restart');
   await request('restart-nested-runtime', `/v1/agents/${agent}/restart`, { method: 'POST', expected: 202 });
-  // /restart acknowledges before ctx.abort runs after 100ms. Let that exact
-  // scheduled eviction happen before admitting the continuation.
-  await delay(500);
-  const restarted = await request('nested-recall-after-restart', `/v1/agents/${agent}/turns`, { method: 'POST', body: { input: followup }, headers: { Accept: 'text/event-stream', 'Idempotency-Key': `restart-recall-${run}` }, expected: 202 });
+  let restartedState;
+  for (let i = 0; i < 20; i++) {
+    restartedState = (await request(`restart-state-${i}`, `/v1/agents/${agent}`)).json();
+    if (!restartedState.agent_loaded) break;
+    await delay(250);
+  }
+  assert.equal(restartedState.agent_loaded, false, 'Acknowledged restart actually unloads the completed runtime');
+  const restarted = await request('nested-recall-after-restart', `/v1/agents/${agent}/turns`, { method: 'POST', body: { input: followup }, headers: { Accept: 'text/event-stream', 'Idempotency-Key': `restart-recall-${attempt}` }, expected: 202 });
   assertTerminal(restarted);
   const restartedOutputs = completedOutputs(restarted);
   assert.deepEqual(restartedOutputs.get(parentId), expectedA);
   assert.deepEqual(restartedOutputs.get(grandchildId), expectedG);
   assert.equal(events(restarted).filter(event => event.type === 'tool.call' && event.payload.tool === 'spawn_agent').length, 0);
   assert.ok(toolResults(restarted, 'send_agent_message').some(result => result.status === 'failed' && /closed/i.test(String(result.value))));
+  for (const event of events(restarted).filter(event => event.type === 'tool.call' && event.payload.tool === 'send_agent_message')) {
+    const args = JSON.stringify(event.payload.arguments);
+    assert.ok(!args.includes(expectedA.marker) && !args.includes(expectedG.marker), 'Delegation must not supply remembered answers');
+  }
   await request('final-capacity', `/v1/agents/${agent}/capacity`);
-  await writeFile(`${output}/idle-result.json`, JSON.stringify({ passed: true, agent, parentId, grandchildId, closedId, idle, expected: [expectedA, expectedG, expectedB], checks }, null, 2));
+  await writeFile(`${output}/${scenario === 'restart' ? 'restart' : 'idle'}-result.json`, JSON.stringify({ passed: true, agent, parentId, grandchildId, closedId, idle, restartedState, expected: [expectedA, expectedG, expectedB], checks }, null, 2));
 }
 
 async function interruptionJourney() {
-  const proof = `/brain/curl-proof-${run}.txt`;
+  const proof = `/brain/curl-proof-${attempt}.txt`;
   const settledCommand = `echo settled >> ${proof}`;
   const pendingCommand = `echo pending >> ${proof}; sleep 45`;
   const body = { settings, input: `Synthetic interruption test. Access only the new synthetic file ${proof} in /brain, no other files, services, Hands or connectors. Use actual tools. Spawn exactly one child role CURL_INTERRUPTED with output contract integer. Child task: execute ${JSON.stringify(settledCommand)} in /brain and wait for its result; then execute ${JSON.stringify(pendingCommand)} in /brain and wait for its result; then submit integer 1. Never repeat either command, even on failure or an uncertain receipt. Do not message parent or peers. Parent must wait for that child to become terminal, report actual state, and keep it open. No other tool actions or replacement agents.` };
   if (childSelection) body.input += `\n${childSelection}`;
-  const created = (await request('active-create', '/v1/agent-runs', { method: 'POST', body, headers: { 'Idempotency-Key': `active-${run}` }, expected: resumed ? [200, 201] : 201 })).json();
+  body.input += `\n${toolGuidance}`;
+  const created = (await request('active-create', '/v1/agent-runs', { method: 'POST', body, headers: { 'Idempotency-Key': `active-${attempt}` }, expected: 201 })).json();
   const agent = created.agent_id;
   const turn = created.turn_id;
   assert.ok(agent && turn);
@@ -205,6 +224,8 @@ async function interruptionJourney() {
     }
     const proofResponse = await request(`active-proof-${i}`, `/v1/agents/${agent}/files?path=${encodeURIComponent(proof)}`, { expected: [200, 404] });
     if (proofResponse.status === 200 && proofResponse.raw === 'settled\npending\n') break;
+    const earlyTerminal = history.data?.find(row => row.turn_id === turn && ['turn_completed', 'turn_failed', 'turn_cancelled'].includes(row.type));
+    assert.ok(!earlyTerminal, `Turn ended before the pending effect: ${JSON.stringify(earlyTerminal)}`);
     assert.ok(i < 59, 'Child never reached the pending effect');
     await delay(1000);
   }
@@ -255,7 +276,7 @@ async function interruptionJourney() {
   while (Date.now() < cancelledAt + 46_000) await delay(Math.min(10_000, cancelledAt + 46_000 - Date.now()));
   const lateProof = await request('cancel-proof-after-command-deadline', `/v1/agents/${agent}/files?path=${encodeURIComponent(proof)}`);
   assert.equal(lateProof.raw, 'settled\npending\ncancel-ready\n');
-  await writeFile(`${output}/interruption-result.json`, JSON.stringify({ passed: true, agent, childId, terminal, cancelled, checks }, null, 2));
+  await writeFile(`${output}/interruption-result.json`, JSON.stringify({ passed: true, agent, childId, proof, terminal, cancelled, checks }, null, 2));
 }
 
 try {

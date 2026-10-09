@@ -2630,7 +2630,12 @@ async function managedFetchRoute(
             sessionAttempts = attempt;
             sessionDispatchAt = Date.now();
           }, { retryThrottled: !(firstTurn && acceptsAgentRunStream(request)) });
-        } catch {
+        } catch (error) {
+          // Owned per-attempt classifications (deadline, Session status, or
+          // exception class) only; clients still receive the retryable 503.
+          console.warn({ type: "managed.agent_create_failed", session_id: agentId,
+            attempts: sessionAttempts, keyed: requestKey !== null, first_turn: firstTurn !== undefined,
+            outcomes: error instanceof CreateStageFailure ? error.outcomes : [createStageOutcome(error)] });
           if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
           return json({ error: "agent creation failed" }, { status: 503 });
         }
@@ -3022,9 +3027,19 @@ async function managedFetchRoute(
         return json({ error: "forbidden" }, { status: 403 });
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
-      return stub.fetch("https://session.internal/restart", {
+      const prepared = await stub.fetch("https://session.internal/restart", {
         method: "POST", headers: sessionHeaders, signal: request.signal,
       });
+      if (!prepared.ok) return prepared;
+      const nonce = (await prepared.json<{ restart_nonce?: unknown }>()).restart_nonce;
+      if (typeof nonce !== "string") return json({ error: "restart_unavailable" }, { status: 502 });
+      // The receipt is Worker-owned and fully materialized before the Session
+      // aborts, so discarding the isolate cannot discard the acknowledgement.
+      const commitHeaders = new Headers(sessionHeaders);
+      commitHeaders.set("x-nanocodex-restart-nonce", nonce);
+      ctx.waitUntil(stub.fetch("https://session.internal/restart/commit", { method: "POST", headers: commitHeaders })
+        .then(response => response.body?.cancel(), () => undefined));
+      return json({ restarting: true }, { status: 202, headers: { "cache-control": "no-store" } });
     }
     if (resource === "done") {
       if (request.method !== "PUT") return json({ error: "method_not_allowed" }, { status: 405 });
@@ -4262,6 +4277,9 @@ export class DurableAgentSession extends DurableComputerObject {
   }
 
   #liveAdmissionReserved = false;
+  // One-shot, in-memory restart token: only this isolate's prepared drill can
+  // commit, so a reconstructed instance can never be aborted by a stale commit.
+  #restartNonce: string | undefined;
   #storageInitialized = false;
   #initializeStorage(): void {
     if (this.#storageInitialized) return;
@@ -4949,18 +4967,31 @@ export class DurableAgentSession extends DurableComputerObject {
       catch { return json({ error: "team_membership_required" }, { status: 403 }); }
       turnAuthorization = asserted.authorization;
     }
-    if (url.pathname === "/restart") {
+    if (url.pathname === "/restart" || url.pathname === "/restart/commit") {
       if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
       if (!ownerAssertion || !turnAuthorization.capabilities.includes("agents:write"))
         return json({ error: "forbidden" }, { status: 403 });
       const session = this.#session();
       if (!session || session.runtime_profile !== "managed" || this.#deleting || this.#deleted)
         return json({ error: "not_found" }, { status: 404 });
+      if (url.pathname === "/restart") {
+        // Phase 1 only arms the wakeup and acknowledges. Aborting here could
+        // discard this response (output gates, busy isolate) after the drill
+        // already took effect, so the caller commits once it holds the ack.
+        await this.ctx.storage.setAlarm(Date.now() + 1_000);
+        this.#restartNonce = crypto.randomUUID();
+        return json({ restart_nonce: this.#restartNonce }, { headers: { "cache-control": "no-store" } });
+      }
+      const nonce = request.headers.get("x-nanocodex-restart-nonce");
+      if (this.#restartNonce === undefined || nonce !== this.#restartNonce)
+        return json({ error: "restart_not_prepared" }, { status: 409 });
+      this.#restartNonce = undefined;
       // The persisted alarm is the only wakeup a discarded isolate keeps.
       await this.ctx.storage.setAlarm(Date.now() + 1_000);
+      await this.ctx.storage.sync();
       console.warn({ type: "managed.operator_restart", session_id: session.session_id });
-      setTimeout(() => this.ctx.abort("operator requested runtime restart"), 100);
-      return json({ restarting: true }, { status: 202, headers: { "cache-control": "no-store" } });
+      this.ctx.abort("operator requested runtime restart");
+      return new Response(null, { status: 204 });
     }
     if (url.pathname === "/done") {
       if (request.method !== "PUT") return json({ error: "method_not_allowed" }, { status: 405 });
@@ -15040,7 +15071,7 @@ async function fetchWithDeadline(
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
+      reject(new DeadlineError(`${operation} timed out after ${timeoutMs}ms`));
       controller.abort();
     }, timeoutMs);
   });
@@ -15049,6 +15080,25 @@ async function fetchWithDeadline(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/** Owned marker for fetchWithDeadline expiry; the message format is unchanged. */
+class DeadlineError extends Error {}
+
+/**
+ * Exhausted create-stage retries. Carries only owned classifications (never
+ * upstream messages or bodies) so callers can log actionable failures safely.
+ */
+class CreateStageFailure extends Error {
+  constructor(readonly outcomes: readonly string[]) {
+    super(`create stage failed after ${outcomes.length} attempts: ${outcomes.join(",")}`);
+  }
+}
+
+function createStageOutcome(error: unknown): string {
+  if (error instanceof DeadlineError) return "deadline";
+  const name = error instanceof Error ? error.name : typeof error;
+  return `exception:${/^[A-Za-z]{1,40}$/.test(name) ? name : "unknown"}`;
 }
 
 async function fetchCreateStage(
@@ -15061,7 +15111,7 @@ async function fetchCreateStage(
   onAttemptStart?: (attempt: number) => void,
   options: { retryThrottled?: boolean } = {},
 ): Promise<Response> {
-  let failure: unknown;
+  const outcomes: string[] = [];
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       onAttemptStart?.(attempt + 1);
@@ -15078,16 +15128,16 @@ async function fetchCreateStage(
       if (response.status !== 408 && (response.status !== 429 || options.retryThrottled === false) && response.status < 500) {
         return response;
       }
-      failure = new Error(`${operation} returned HTTP ${response.status}`);
+      outcomes.push(`http_${response.status}`);
       try { await response.body?.cancel(); } catch { /* Retrying owns the next attempt. */ }
     } catch (error) {
-      failure = error;
+      outcomes.push(createStageOutcome(error));
     }
     if (attempt + 1 < attempts) {
       await scheduler.wait((50 * 2 ** attempt) + Math.floor(Math.random() * 50));
     }
   }
-  throw failure;
+  throw new CreateStageFailure(outcomes);
 }
 
 function managedHttpError(error: unknown, fallbackCode = "managed_request_failed") {

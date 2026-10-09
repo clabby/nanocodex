@@ -821,9 +821,17 @@ idempotency key, verifies SSE cursor replay and expected rejections, and reuses
 an existing child and grandchild after real idle teardown. It also restarts a
 test agent during an effect, verifies no duplicate file append, delegates new
 work to the same child, cancels a later turn, and verifies another turn succeeds.
-`NANOCODEX_JOURNEY_SCENARIO=idle` or `interruption` selects one journey. Idle is
+`NANOCODEX_JOURNEY_SCENARIO=idle`, `restart`, or `interruption` selects one journey.
+`restart` checks explicit restart and nested recall without the idle wait.
+`NANOCODEX_JOURNEY_RESUME=/previous/evidence/directory` replays that run's exact
+saved admission body and key, preserving its existing children. Idle is
 measured after the last admission replay, which renews the preparation lease
 without changing `last_active`.
+
+The owner-only `POST /v1/agents/:id/restart` drill requires `agents:write` and
+returns `202 {"restarting":true}`. Eviction and recovery happen asynchronously;
+the acknowledgement is owned by the managed Worker before the Session aborts.
+An interrupted tool's outcome can remain unknown after recovery.
 
 The local journey uses real workerd, SQLite, HTTP, curl, and a synthetic Hand
 publisher, with fixtures for account identity and model inference. It forces

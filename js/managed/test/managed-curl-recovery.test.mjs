@@ -28,6 +28,10 @@ const exhausted = /MANAGED_RECOVERY_EXHAUSTED[\s\S]*outcome unknown/;
 // under test is reached exclusively through the public /v1 routes.
 const bootstrap = `import managed from './src/index.ts';export * from './src/index.ts';
 import {ensureAccount,createApiKey} from './src/account-auth.ts';
+import {DurableAgentSession as SessionBase} from './src/index.ts';
+// The restart acknowledgement leaves the Session 300ms after its handler
+// returns, as a held output gate or busy isolate can delay it in production.
+export class DurableAgentSession extends SessionBase{async fetch(request){const response=await super.fetch(request);if(new URL(request.url).pathname==='/restart')await scheduler.wait(300);return response;}}
 export default {async fetch(request,env,ctx){const path=new URL(request.url).pathname;
 if(path==='/__fixture/identity'){await ensureAccount(env,'${owner}',true);
  const auth=await(await env.NANOCODEX_USERS.getByName('${owner}').fetch('https://user.internal/authorization')).json();
@@ -395,9 +399,16 @@ test('curl recovers managed work across workerd SIGKILL without duplicate effect
     // same restored child (mirrors the live 'no Nanocodex host is active' report).
     // Same workerd process: the owner-only public drill ctx.abort()s the
     // Session isolate (as eviction/deploy would) while module globals survive.
+    const beforeRestart = await curl('before-public-restart-state', `/v1/agents/${childRun.agent_id}`, { expected: 200 });
+    assert.equal(beforeRestart.value.agent_loaded, true, 'the completed root runtime is loaded before the drill');
     const restarted = await curl('child-public-restart', `/v1/agents/${childRun.agent_id}/restart`, { method: 'POST', expected: 202 });
     assert.equal(restarted.value.restarting, true);
-    await delay(500); // the drill aborts the object 100ms after acknowledging
+    // The acknowledged drill actually discards the loaded runtime.
+    await waitFor('restart unloads the runtime', async () =>
+      (await curl('after-public-restart-state', `/v1/agents/${childRun.agent_id}`, { expected: 200 })).value.agent_loaded === false);
+    // The internal commit phase is not a public route.
+    const commitProbe = await curl('restart-commit-not-public', `/v1/agents/${childRun.agent_id}/restart/commit`, { method: 'POST' });
+    assert.ok(commitProbe.status >= 400 && commitProbe.status < 500, `public restart commit is rejected: ${commitProbe.status}`);
     const followup = (await curl('followup-turn', `/v1/agents/${childRun.agent_id}/turns`, { method: 'POST', body: { input: 'CURL_CHILD_FOLLOWUP: delegate effect D to the same child.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
     const followupDone = await terminal('followup-terminal', childRun.agent_id, followup.turn_id);
     const followupHistory = JSON.stringify(await history('followup-history', childRun.agent_id));
