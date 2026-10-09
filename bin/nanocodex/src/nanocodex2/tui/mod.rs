@@ -4324,6 +4324,10 @@ async fn apply_feature_update(
             scheduler.request_immediate(Instant::now());
             return Ok(false);
         }
+        FeatureUpdate::Subagent(update) => app.update(AppEvent::Subagent {
+            pane: PaneId::Main,
+            update,
+        }),
         FeatureUpdate::VoiceStatus(status) => {
             runtime.local_voice_status = status;
             app.update(AppEvent::VoiceStatus(runtime.voice_status()))
