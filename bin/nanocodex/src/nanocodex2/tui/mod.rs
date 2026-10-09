@@ -37,6 +37,9 @@ mod tmux;
 mod transcript;
 mod vault;
 mod voice_clone;
+pub(crate) mod backend;
+pub(crate) mod features;
+pub(crate) mod local;
 pub(crate) mod tool_calls;
 pub(crate) mod voice_keys;
 
