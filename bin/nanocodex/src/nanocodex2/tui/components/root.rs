@@ -464,6 +464,7 @@ pub(crate) enum DraftReset {
 
 /// Owns layout and routing so future screen components do not widen the event loop.
 pub(crate) struct RootNode {
+    capabilities: crate::nanocodex2::tui::backend::Capabilities,
     transcript: Node<Transcript>,
     composer: Node<Composer>,
     model_catalog: Vec<nanocodex_managed::AvailableModel>,
@@ -556,6 +557,7 @@ impl RootNode {
         let mut subagents = SubagentTree::new(thinking);
         subagents.set_workspace(workspace);
         Self {
+            capabilities: Default::default(),
             transcript: Node::new(transcript),
             model_catalog: Vec::new(),
             composer: Node::new(Composer::new(workspace, thinking)),
@@ -708,6 +710,7 @@ impl RootNode {
         root.set_max_subagents(self.subagents.max_subagents());
         root.thread = ThreadState::Started;
         root.fork_available = false;
+        root.set_capabilities(self.capabilities);
         root.side_pane = true;
         root.set_skills(Arc::clone(&self.skills));
         root.theme_mode = self.theme_mode;
@@ -2212,8 +2215,18 @@ impl RootNode {
             .map(str::to_owned)
     }
 
+    pub(crate) fn set_capabilities(
+        &mut self,
+        capabilities: crate::nanocodex2::tui::backend::Capabilities,
+    ) {
+        self.capabilities = capabilities;
+        self.composer.component_mut().set_capabilities(capabilities);
+        self.refresh_actions();
+    }
+
     fn action_availability(&self) -> ActionAvailability {
         ActionAvailability {
+            capabilities: self.capabilities,
             new_session: !self.has_active_turns()
                 && self.in_flight_shells == 0
                 && self.blocking_task.is_none()
@@ -2276,6 +2289,9 @@ impl RootNode {
         match update.effects.into_iter().next() {
             Some(ActionsEffect::Dismiss) => self.overlay = None,
             Some(ActionsEffect::Submit(command)) => return self.submit_action_command(command),
+            Some(ActionsEffect::Trigger(Action::LocalCommand(command))) => {
+                return self.submit_action_command(format!("/{command}"));
+            }
             Some(ActionsEffect::Trigger(Action::Copy)) => {
                 self.overlay = None;
                 return self.copy_response("");
@@ -2334,19 +2350,7 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::FastMode)) => {
                 self.overlay = None;
-                let enabled = !self.composer.component().fast_mode();
-                if enabled && !self.composer.component().model().supports_fast_mode() {
-                    self.notification = Some(Notification::plain(
-                        "Fast mode is unavailable for this model".into(),
-                        Color::Red,
-                    ));
-                    return ComponentUpdate::render(RenderRequest::Immediate);
-                }
-                self.set_fast_mode(enabled);
-                return ComponentUpdate {
-                    effects: vec![RootEffect::SetFastMode(enabled)],
-                    render: RenderRequest::Immediate,
-                };
+                return self.apply_settings_command(SettingsCommand::Fast(None));
             }
             Some(ActionsEffect::Trigger(Action::Theme)) => {
                 self.overlay = Some(Overlay::Theme(Node::new(ThemeSelector::new(
@@ -2361,7 +2365,9 @@ impl RootNode {
             }
             Some(ActionsEffect::Trigger(Action::Fork)) => return self.open_fork(),
             Some(ActionsEffect::Trigger(Action::Keybindings)) => {
-                self.overlay = Some(Overlay::Keybindings(Node::new(KeybindingsHelp::default())));
+                self.overlay = Some(Overlay::Keybindings(Node::new(KeybindingsHelp::new(
+                    self.capabilities,
+                ))));
             }
             Some(ActionsEffect::Trigger(Action::ReloadConfig)) => {
                 self.overlay = None;
@@ -3409,6 +3415,13 @@ impl RootNode {
     }
 
     fn apply_settings_command(&mut self, command: SettingsCommand) -> ComponentUpdate<RootEffect> {
+        if !command.available(self.capabilities) {
+            self.notification = Some(Notification::plain(
+                self.capabilities.unavailable("This command"),
+                Color::Yellow,
+            ));
+            return ComponentUpdate::render(RenderRequest::Immediate);
+        }
         if self.side_pane
             && !matches!(
                 &command,
@@ -3422,6 +3435,25 @@ impl RootNode {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         match command {
+            SettingsCommand::Cancel => ComponentUpdate {
+                effects: vec![RootEffect::CancelTurns],
+                render: RenderRequest::Immediate,
+            },
+            SettingsCommand::Fast(enabled) => {
+                let enabled = enabled.unwrap_or(!self.composer.component().fast_mode());
+                if enabled && !self.composer.component().model().supports_fast_mode() {
+                    self.notification = Some(Notification::plain(
+                        "Fast mode is unavailable for this model".into(),
+                        Color::Red,
+                    ));
+                    return ComponentUpdate::render(RenderRequest::Immediate);
+                }
+                self.set_fast_mode(enabled);
+                ComponentUpdate {
+                    effects: vec![RootEffect::SetFastMode(enabled)],
+                    render: RenderRequest::Immediate,
+                }
+            }
             SettingsCommand::CodeReview(command) => self.apply_code_review(command),
             SettingsCommand::Btw(question) => {
                 if self.side_pane {

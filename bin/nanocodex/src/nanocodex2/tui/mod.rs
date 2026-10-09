@@ -6,6 +6,7 @@
 //! orchestration and hosted tools; this module owns only presentation, terminal
 //! interaction, and the caller-local shell convenience.
 
+pub(crate) mod backend;
 mod btw;
 mod bug;
 mod clipboard;
@@ -13,9 +14,11 @@ mod components;
 mod context;
 mod control;
 mod editor;
+pub(crate) mod features;
 mod format;
 mod history;
 mod links;
+pub(crate) mod local;
 mod pane;
 mod private_input;
 mod prompt;
@@ -34,13 +37,10 @@ mod sudo_input;
 mod terminal;
 mod theme;
 mod tmux;
+pub(crate) mod tool_calls;
 mod transcript;
 mod vault;
 mod voice_clone;
-pub(crate) mod backend;
-pub(crate) mod features;
-pub(crate) mod local;
-pub(crate) mod tool_calls;
 pub(crate) mod voice_keys;
 
 pub(crate) use self::shared::run_shared;
@@ -1622,7 +1622,10 @@ impl DriverRuntime {
                 let text = prompt.display_text().to_owned();
                 match local.with_features(|features, cx| features.user_prompt(&text, cx)) {
                     Ok(completions) if !completions.is_empty() => {
-                        self.feature_completions.entry(id).or_default().extend(completions);
+                        self.feature_completions
+                            .entry(id)
+                            .or_default()
+                            .extend(completions);
                     }
                     Ok(_) => {}
                     Err(error) => rejection = Some(error),
@@ -2225,6 +2228,11 @@ async fn run_inner(
     let initial_effort = effort_from_thinking(initial_settings.thinking);
     let initial_reasoning_mode = reasoning_mode_from_managed(initial_settings.reasoning_mode);
     let mut root = RootNode::new(&workspace, initial_effort);
+    root.set_capabilities(if local_launch.is_some() {
+        backend::Capabilities::LOCAL
+    } else {
+        backend::Capabilities::MANAGED
+    });
     root.set_reasoning_modes(initial_reasoning_mode, initial_reasoning_mode);
     root.set_fast_mode(initial_settings.fast_mode);
     root.set_model(initial_settings.model);
@@ -2393,7 +2401,10 @@ async fn run_inner(
         runtime.next_turn = runtime.next_turn.saturating_add(1);
         let record = runtime.record_submission(id, &prompt)?;
         request_render(
-            app.update(AppEvent::Transcript { pane: PaneId::Main, record }),
+            app.update(AppEvent::Transcript {
+                pane: PaneId::Main,
+                record,
+            }),
             &mut scheduler,
         );
         runtime.start_submission(PaneId::Main, id, prompt);
@@ -4292,7 +4303,11 @@ async fn apply_feature_update(
                 runtime.feature_instructions.insert(id, instruction);
             }
             if let Some(completion) = prompt.completion {
-                runtime.feature_completions.entry(id).or_default().push(completion);
+                runtime
+                    .feature_completions
+                    .entry(id)
+                    .or_default()
+                    .push(completion);
             }
             let record = runtime.record_submission(id, &submission)?;
             let update = app.update(AppEvent::Transcript { pane, record });
@@ -4454,10 +4469,19 @@ async fn apply_update(
                         RootEffect::Feature(command) => {
                             // FEATURE-HOOK: wp2 /collapse and /split typed in the side pane.
                             let handled = runtime.local.as_mut().is_some_and(|local| {
-                                local.with_features(|features, cx| features.command(pane, &command, cx))
+                                local.with_features(|features, cx| {
+                                    features.command(pane, &command, cx)
+                                })
                             });
                             if !handled {
-                                absorb(app.update(AppEvent::NotifyError { pane, error: "This command needs a local agent (run ncl)".into() }), &mut effects, scheduler);
+                                absorb(
+                                    app.update(AppEvent::NotifyError {
+                                        pane,
+                                        error: "This command needs a local agent (run ncl)".into(),
+                                    }),
+                                    &mut effects,
+                                    scheduler,
+                                );
                             }
                         }
                         RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
