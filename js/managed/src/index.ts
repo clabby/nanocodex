@@ -86,7 +86,7 @@ import { serverHandTool } from "./ssh-hand-setup";
 import { parseEmailResume, resumeEmailWorkflow, type EmailResumeResult } from "./email-resume";
 import { phoneControlInput } from "./phone-control";
 import { accountAdmin } from "./account-admin";
-import { adminThreadsTool, routeAdminThreads, parseAdminThreadInput, threadProviderPerformance, type AdminThreadInput } from "./admin-threads";
+import { adminThreadsTool, boundedAdminEventPage, routeAdminThreads, parseAdminThreadInput, threadProviderPerformance, type AdminThreadInput } from "./admin-threads";
 import { listAdminAccounts, listAdminThreads } from "./account-auth";
 import { accountCommunication } from "./account-communication";
 import { routeTodoRequest } from "./todo-inbox";
@@ -4894,11 +4894,13 @@ export class DurableAgentSession extends DurableComputerObject {
       const page = input.after === undefined
         ? await this.#eventArchive.history(this.#eventLog, input.before, input.limit)
         : await this.#eventArchive.historyAfter(this.#eventLog, input.after, input.limit);
+      const bounded = boundedAdminEventPage(page.data.map(event =>
+        ({ cursor: event.cursor, created_at: event.created_at, turn_id: event.turn_id, ...event.message })), input.after === undefined);
       return reply(200, { thread: { id: session.session_id, owner_id: session.owner_id,
         organization_id: session.organization_id, team_id: session.team_id },
-        data: page.data.map(event => ({ cursor: event.cursor, created_at: event.created_at, turn_id: event.turn_id, ...event.message })),
-        has_more: page.has_more, latest_cursor: page.latest_cursor,
-        next_before: page.data[0]?.cursor ?? null, next_after: page.data.at(-1)?.cursor ?? input.after ?? null });
+        data: bounded.data, has_more: page.has_more || bounded.omitted > 0, latest_cursor: page.latest_cursor,
+        ...(bounded.omitted > 0 ? { page_truncated: true, omitted_events: bounded.omitted } : {}),
+        next_before: bounded.data[0]?.cursor ?? null, next_after: bounded.data.at(-1)?.cursor ?? input.after ?? null });
     } catch { return reply(503, { error: "event_archive_unavailable" }); }
   }
 
@@ -11289,6 +11291,14 @@ export class DurableAgentSession extends DurableComputerObject {
           const principal: Principal = { kind: "account_session", userId: current.owner_id,
             organizationId: current.organization_id, teamId: current.team_id, authorizationEpoch: current.authorization_epoch,
             role: "owner", subjectId: `user:${current.owner_id}`, credentialId: `admin-tool:${context.callId}`, capabilities: auth.capabilities };
+          // Inspecting this thread from its own tool would route back into this
+          // Durable Object through the Worker and exceed the subrequest depth.
+          if (input.thread_id === current.session_id && input.operation !== "accounts" && input.operation !== "list") {
+            const own = await this.inspectForAdmin(current.owner_id, input);
+            context.signal.throwIfAborted();
+            if (own.status !== 200) throw new ManagedRequestError(own.status, "admin_threads_failed", "Thread inspection failed; check the account, thread and page cursor.");
+            return JSON.parse(own.body);
+          }
           const query = new URLSearchParams(Object.entries(input).map(([key, value]) => [key, String(value)]));
           const response = await managedFetch(new Request(new URL(`/v1/admin/threads?${query}`, session.public_origin), { signal: context.signal }),
             this.env, this.ctx, principal, this.#routingOrigin().clientIngressColo);
