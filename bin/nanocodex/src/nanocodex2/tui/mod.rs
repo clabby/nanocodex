@@ -3269,11 +3269,14 @@ async fn run_inner(
                 let update = match event {
                     btw::Event::Ready { pane, agent_id, settings } => {
                         if let Some(btw) = &mut runtime.btw { btw.agent_id = Some(agent_id); }
+                        // Ready first: hydration restores idle activity, and the side pane
+                        // must leave its "Opening /btw" state exactly once.
+                        let ready = app.update(AppEvent::ForkReady { pane });
                         let update = app.update(AppEvent::SettingsHydrated { pane,
                             effort: effort_from_thinking(settings.thinking), fast_mode: settings.fast_mode,
                             model: settings.model });
                         request_render(update, &mut scheduler);
-                        app.update(AppEvent::ForkReady { pane })
+                        ready
                     }
                     btw::Event::Record { pane, record } => {
                         if record.source() == "tact" && matches!(record.kind(), "user.submitted" | "user.steered") {
@@ -4488,8 +4491,11 @@ async fn apply_feature_update(
             let Some(local) = &mut runtime.local else {
                 return Ok(false);
             };
-            local.launch = *launch;
-            runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Default);
+            let _ = local;
+            // The current launch stays until the rebuilt agent connects (adopt).
+            if let Err(error) = runtime.local_switch(ConnectionPurpose::Startup, *launch) {
+                request_render(app.update(AppEvent::NotifyError { pane: PaneId::Main, error }), scheduler);
+            }
             scheduler.request_immediate(Instant::now());
             return Ok(false);
         }
