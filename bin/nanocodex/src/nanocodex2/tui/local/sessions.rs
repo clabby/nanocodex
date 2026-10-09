@@ -118,7 +118,7 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<LocalSession>> {
             });
         }
     }
-    sessions.sort_by(|left, right| right.updated.cmp(&left.updated));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated));
     Ok(sessions)
 }
 

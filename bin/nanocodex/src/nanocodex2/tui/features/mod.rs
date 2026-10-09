@@ -241,13 +241,13 @@ impl Features {
             features: vec![
                 Box::new(claude_interaction::ClaudeInteraction::default()),
                 Box::new(claude_scheduler::ClaudeScheduler::default()),
-                Box::new(harness::Harness::default()),
+                Box::new(harness::Harness),
                 Box::new(branches::Branches::default()),
-                Box::new(btw_local::LocalBtw::default()),
-                Box::new(split::Split::default()),
+                Box::new(btw_local::LocalBtw),
+                Box::new(split::Split),
                 Box::new(mcp::Mcp::default()),
                 Box::new(realtime_voice::RealtimeVoice::default()),
-                Box::new(benchmark::Benchmark::default()),
+                Box::new(benchmark::Benchmark),
             ],
         }
     }

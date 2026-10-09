@@ -861,6 +861,63 @@ async fn request_permissions(open_settings: bool) -> Result<()> {
     Ok(())
 }
 
+async fn keep_awake(setting: Option<&str>) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = setting;
+        bail!("Hand keep-awake is currently available on macOS");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use crate::hand_keep_awake as preference;
+        let home =
+            PathBuf::from(std::env::var_os("HOME").ok_or_else(|| eyre::eyre!("HOME is unset"))?);
+        if !home.is_absolute() {
+            bail!("HOME must be absolute");
+        }
+        let owner = crate::hand_service::status().await?;
+        let before = preference::snapshot(&home, owner.pid)?;
+        if let Some(setting) = setting {
+            let enabled = setting == "on";
+            if owner.pid.is_some() && before["supported_daemon"] != true {
+                bail!(
+                    "The running Hand has not reported keep-awake support. Update the Hand and retry; no setting was changed."
+                );
+            }
+            if enabled && before["environment_override"] == true {
+                bail!(
+                    "The Hand service has {}=0. Remove that service override and restart it before enabling keep-awake; no setting was changed.",
+                    preference::ENVIRONMENT
+                );
+            }
+            preference::write(
+                &preference::setting_path(&home),
+                &json!({"enabled": enabled}),
+            )?;
+            if owner.pid.is_some() {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    let observed = preference::snapshot(&home, owner.pid)?;
+                    if observed["active"] == enabled && observed["error"].is_null() {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!(
+                            "Keep-awake preference was saved, but the running Hand has not confirmed applying it. Inspect with `nanocodex hand keep-awake`; do not assume its assertion changed."
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        // Re-read launchd after a concurrent service change; an old receipt
+        // must never claim the replacement owner's assertion is active.
+        let owner = crate::hand_service::status().await?;
+        println!("{}", preference::snapshot(&home, owner.pid)?);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,62 +978,5 @@ mod tests {
             ])
             .is_err()
         );
-    }
-}
-
-async fn keep_awake(setting: Option<&str>) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = setting;
-        bail!("Hand keep-awake is currently available on macOS");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use crate::hand_keep_awake as preference;
-        let home =
-            PathBuf::from(std::env::var_os("HOME").ok_or_else(|| eyre::eyre!("HOME is unset"))?);
-        if !home.is_absolute() {
-            bail!("HOME must be absolute");
-        }
-        let owner = crate::hand_service::status().await?;
-        let before = preference::snapshot(&home, owner.pid)?;
-        if let Some(setting) = setting {
-            let enabled = setting == "on";
-            if owner.pid.is_some() && before["supported_daemon"] != true {
-                bail!(
-                    "The running Hand has not reported keep-awake support. Update the Hand and retry; no setting was changed."
-                );
-            }
-            if enabled && before["environment_override"] == true {
-                bail!(
-                    "The Hand service has {}=0. Remove that service override and restart it before enabling keep-awake; no setting was changed.",
-                    preference::ENVIRONMENT
-                );
-            }
-            preference::write(
-                &preference::setting_path(&home),
-                &json!({"enabled": enabled}),
-            )?;
-            if owner.pid.is_some() {
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-                loop {
-                    let observed = preference::snapshot(&home, owner.pid)?;
-                    if observed["active"] == enabled && observed["error"].is_null() {
-                        break;
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        bail!(
-                            "Keep-awake preference was saved, but the running Hand has not confirmed applying it. Inspect with `nanocodex hand keep-awake`; do not assume its assertion changed."
-                        );
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            }
-        }
-        // Re-read launchd after a concurrent service change; an old receipt
-        // must never claim the replacement owner's assertion is active.
-        let owner = crate::hand_service::status().await?;
-        println!("{}", preference::snapshot(&home, owner.pid)?);
-        Ok(())
     }
 }

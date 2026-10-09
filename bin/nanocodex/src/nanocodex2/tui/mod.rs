@@ -1648,7 +1648,7 @@ impl DriverRuntime {
         }
         self.submitted_turns.insert(managed_request_id.clone());
         self.unacknowledged_inputs
-            .insert(id, (pane, managed_request_id.clone(), prompt.clone()));
+            .insert(id, (pane, managed_request_id.clone(), prompt));
         self.local_managed_turns
             .insert(id, managed_request_id.clone());
         self.admitting.insert(id);
@@ -3825,10 +3825,10 @@ async fn run_inner(
                         match outcome {
                             Ok(settings) => {
                                 runtime.settings = settings;
-                                if let Some(local) = &mut runtime.local {
-                                    if let Ok(model) = settings.model.as_str().parse() {
-                                        local.launch.args.select_tui_model(model, settings.thinking, settings.fast_mode);
-                                    }
+                                if let Some(local) = &mut runtime.local
+                                    && let Ok(model) = settings.model.as_str().parse()
+                                {
+                                    local.launch.args.select_tui_model(model, settings.thinking, settings.fast_mode);
                                 }
                                 if matches!(mutation, SettingsMutation::Complete(_)) && let Some(root) = app.root_mut(pane) {
                                     let mode = reasoning_mode_from_managed(settings.reasoning_mode);
