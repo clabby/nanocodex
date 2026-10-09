@@ -31,7 +31,7 @@ use crate::login::load_managed_mcp_credential;
 use crate::managed_memory::{ConfiguredManagedMemory, MEMORY_INSTRUCTIONS};
 use crate::mcp::{ConfiguredMcp, McpArgs};
 use crate::mpp::{MppAdapter, MppArgs};
-use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS, SubagentToolSet};
+use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS};
 use crate::vm::{ConfiguredVm, VmArgs};
 
 mod claude;
@@ -744,8 +744,7 @@ impl AgentArgs {
         }
         let tools = tools.build()?;
         let generic_subagents = self.subagents;
-        let subagent_tools = selected_subagent_tools(generic_subagents, tui);
-        let subagent_runtime = subagent_tools.map(|_| subagents::channel(self.max_subagents));
+        let subagent_runtime = generic_subagents.then(|| subagents::channel(self.max_subagents));
         let claude_tools = tools
             .clone()
             .into_builder()
@@ -824,11 +823,10 @@ impl AgentArgs {
                                     nanocodex::tools::runtime::ToolsBuildError::HostInitialization,
                                 )?;
                             if let Some(registry) = &registry {
-                                subagents::install_tools(
+                                nanocodex_subagents::install_tools(
                                     tools.clone(),
                                     parent,
                                     Arc::clone(registry),
-                                    subagent_tools.unwrap_or(SubagentToolSet::Generic),
                                 )
                             } else {
                                 Ok(tools.clone())
@@ -891,8 +889,8 @@ impl AgentArgs {
             workspaces
                 .seed(agent.session_id(), root_workspace.clone())
                 .map_err(nanocodex::tools::runtime::ToolsBuildError::HostInitialization)?;
-            if let (Some(registry), Some(subagent_tools)) = (&root_registry, subagent_tools) {
-                subagents::install_tools(tools.clone(), agent, Arc::clone(registry), subagent_tools)
+            if let Some(registry) = &root_registry {
+                nanocodex_subagents::install_tools(tools.clone(), agent, Arc::clone(registry))
             } else {
                 Ok(tools.clone())
             }
@@ -969,18 +967,6 @@ impl AgentArgs {
 pub(crate) struct LocalDurability {
     pub(crate) path: PathBuf,
     pub(crate) state_id: String,
-}
-
-const fn selected_subagent_tools(
-    generic_subagents: bool,
-    simplify_workflow: bool,
-) -> Option<SubagentToolSet> {
-    match (generic_subagents, simplify_workflow) {
-        (true, true) => Some(SubagentToolSet::GenericAndSimplify),
-        (true, false) => Some(SubagentToolSet::Generic),
-        (false, true) => Some(SubagentToolSet::Simplify),
-        (false, false) => None,
-    }
 }
 
 const SUBAGENT_INSTRUCTIONS: &str = concat!(

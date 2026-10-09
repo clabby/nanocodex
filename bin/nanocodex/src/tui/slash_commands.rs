@@ -37,13 +37,6 @@ const COMMANDS: &[SlashCommand] = &[
         requires_btw: false,
     },
     SlashCommand {
-        name: "/simplify",
-        usage: "/simplify [focus]",
-        description: "Review and simplify the current work",
-        accepts_arguments: true,
-        requires_btw: false,
-    },
-    SlashCommand {
         name: "/voice",
         usage: "/voice [voice|on|off|mute|list]",
         description: "Control the voice session",
