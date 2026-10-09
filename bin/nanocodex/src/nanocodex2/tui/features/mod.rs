@@ -94,6 +94,10 @@ pub(crate) trait FeatureOverlay: Send {
     fn key(&mut self, key: KeyEvent) -> OverlayOutcome;
     /// Bracketed paste while open; ignored by default.
     fn paste(&mut self, _text: &str) {}
+    /// Whether opening this overlay discards the main composer draft.
+    fn discards_draft(&self) -> bool {
+        false
+    }
 }
 
 /// A side agent a feature asks the driver to show in its own pane.
@@ -120,13 +124,22 @@ pub(crate) struct FeaturePrompt {
 /// A request from a feature task to the driver.
 pub(crate) enum FeatureUpdate {
     /// Informational footer/transcript notice.
-    Notice { pane: Option<PaneId>, message: String },
+    Notice {
+        pane: Option<PaneId>,
+        message: String,
+    },
     /// Error notice (the same rendering as NotifyError).
-    Error { pane: Option<PaneId>, message: String },
+    Error {
+        pane: Option<PaneId>,
+        message: String,
+    },
     /// Submit a prompt as if typed (scheduler fires, interaction follow-ups).
     Submit { pane: Option<PaneId>, text: String },
     /// Append a local transcript record.
-    Record { pane: Option<PaneId>, event: LocalEvent },
+    Record {
+        pane: Option<PaneId>,
+        event: LocalEvent,
+    },
     /// Show a modal overlay; replaces any open feature overlay.
     OpenOverlay(Box<dyn FeatureOverlay>),
     /// Close the open feature overlay.
@@ -194,7 +207,12 @@ pub(crate) trait Feature: Send {
     /// Take runtime pieces from a freshly built local agent and start tasks.
     fn attach(&mut self, _parts: &mut LocalParts, _cx: &FeatureContext<'_>) {}
     /// Handle a command; return false when it belongs to another feature.
-    fn command(&mut self, _pane: PaneId, _command: &FeatureCommand, _cx: &FeatureContext<'_>) -> bool {
+    fn command(
+        &mut self,
+        _pane: PaneId,
+        _command: &FeatureCommand,
+        _cx: &FeatureContext<'_>,
+    ) -> bool {
         false
     }
     fn key(&mut self, _key: &KeyEvent, _cx: &FeatureContext<'_>) -> KeyOutcome {
@@ -346,7 +364,10 @@ pub(crate) struct ContextBase<'a> {
     pub(crate) _marker: std::marker::PhantomData<&'a ()>,
 }
 
-#[allow(dead_code, reason = "kept for feature modules that persist per-workspace state")]
+#[allow(
+    dead_code,
+    reason = "kept for feature modules that persist per-workspace state"
+)]
 pub(crate) fn feature_state_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".nanocodex")
 }

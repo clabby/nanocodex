@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 #[derive(Default)]
 struct RecordingStore {
     inner: MemorySubagentStore,
-    writes: Mutex<Vec<String>>,
+    writes: Mutex<Vec<(String, Vec<Arc<str>>)>>,
     saved: Notify,
 }
 impl SubagentStore for RecordingStore {
@@ -29,13 +29,23 @@ impl SubagentStore for RecordingStore {
         &'a self,
         root: &'a str,
         payload: String,
+        records: Vec<Arc<str>>,
     ) -> SubagentStoreFuture<'a, std::io::Result<()>> {
         Box::pin(async move {
-            self.inner.save(root, payload.clone()).await?;
-            self.writes.lock().unwrap().push(payload);
+            self.inner
+                .save(root, payload.clone(), records.clone())
+                .await?;
+            self.writes.lock().unwrap().push((payload, records));
             self.saved.notify_one();
             Ok(())
         })
+    }
+    fn load_record<'a>(
+        &'a self,
+        root: &'a str,
+        key: &'a str,
+    ) -> SubagentStoreFuture<'a, std::io::Result<String>> {
+        self.inner.load_record(root, key)
     }
 }
 
@@ -85,9 +95,12 @@ async fn first_claude_turn_is_recoverable_before_provider_returns() {
         // Reconstruct from every admitted journal, including the earliest one.
         let writes = store.writes.lock().unwrap().clone();
         let mut running_restores = 0;
-        for payload in writes {
+        // Each journal references checkpoint records stored by it or by an earlier save.
+        let mut stored_records = Vec::new();
+        for (payload, records) in writes {
+            stored_records.extend(records);
             let copy = MemorySubagentStore::new();
-            copy.save(&root, payload.clone()).await.unwrap();
+            copy.save(&root, payload.clone(), stored_records.clone()).await.unwrap();
             let (restored, _, _) = channel(1);
             restored.set_store(Arc::new(copy));
             let report = restored.restore(&root).await.unwrap();

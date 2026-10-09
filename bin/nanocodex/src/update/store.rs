@@ -215,7 +215,16 @@ impl VersionStore {
                     .map_err(|_| eyre!("Windows rollback-pair verification panicked"))?
             });
             match verified {
-                Ok(()) => return self.install_bundle(key, &cli, &hand, None, None),
+                Ok(identity) => {
+                    return self.install_bundle_with_hand(
+                        key,
+                        &cli,
+                        &hand,
+                        identity.as_deref(),
+                        None,
+                        None,
+                    );
+                }
                 Err(error) => failure = Some(error),
             }
         }
@@ -270,6 +279,7 @@ impl VersionStore {
         )
     }
 
+    #[cfg(test)]
     pub(super) fn install_bundle(
         &self,
         key: &str,

@@ -24,7 +24,10 @@ impl Feature for Benchmark {
             return true;
         }
         if cx.agent.is_none() {
-            cx.host.error(Some(pane), "Wait for the local agent to start before /benchmark");
+            cx.host.error(
+                Some(pane),
+                "Wait for the local agent to start before /benchmark",
+            );
             return true;
         }
         let executable = std::env::current_exe().ok();
@@ -35,7 +38,10 @@ impl Feature for Benchmark {
             None,
             executable.as_deref(),
         );
-        let display = profile.map_or_else(|| "/benchmark".to_owned(), |profile| format!("/benchmark {profile}"));
+        let display = profile.map_or_else(
+            || "/benchmark".to_owned(),
+            |profile| format!("/benchmark {profile}"),
+        );
         cx.host.send(FeatureUpdate::SubmitPrompt(FeaturePrompt {
             pane: Some(pane),
             display,

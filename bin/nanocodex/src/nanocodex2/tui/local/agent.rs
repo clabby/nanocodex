@@ -11,9 +11,7 @@ use std::{path::PathBuf, sync::Arc};
 use eyre::Result;
 use nanocodex::{HarnessModel, Nanocodex, OpenAi, tools::mcp::McpHandle};
 
-use crate::config::{
-    AgentArgs, ConfiguredAgent, InteractionReceiver, SessionScheduler,
-};
+use crate::config::{AgentArgs, ConfiguredAgent, InteractionReceiver, SessionScheduler};
 use crate::nanocodex2::tui::backend::Capabilities;
 use crate::subagents::ChildAgents;
 use crate::vm::VmArgs;
@@ -114,10 +112,7 @@ impl LocalBackend {
     pub(crate) fn capabilities(&self) -> Capabilities {
         let mut capabilities = Capabilities::LOCAL;
         capabilities.voice_realtime = self.parts.realtime.is_some();
-        capabilities.claude_host = matches!(
-            self.model.family(),
-            nanocodex::HarnessFamily::Claude
-        );
+        capabilities.claude_host = matches!(self.model.family(), nanocodex::HarnessFamily::Claude);
         capabilities
     }
 

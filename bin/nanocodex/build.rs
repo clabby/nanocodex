@@ -1,11 +1,15 @@
+mod build_hand_identity;
 mod build_version;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build_version.rs");
+    println!("cargo:rerun-if-changed=build_hand_identity.rs");
     build_version::emit()?;
     embed_linux_screen_helpers()?;
     link_windows_stack_protector();
-    build_hand_menu_bar()
+    build_hand_menu_bar()?;
+    // Last: the identity hashes the payloads staged above.
+    build_hand_identity::emit()
 }
 
 /// The managed Hand embeds its Linux Wayland screen helpers. Distributable

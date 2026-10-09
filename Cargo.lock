@@ -5871,6 +5871,7 @@ dependencies = [
  "nanocodex-oai-tools",
  "nanocodex-observability",
  "nanocodex-remote",
+ "nanocodex-screen-supervisor",
  "nanocodex-subagents",
  "nanocodex-tui-control",
  "nanocodex-vm",
@@ -6422,6 +6423,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-screen-supervisor"
+version = "0.6.7"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nanocodex-subagents"
 version = "0.6.7"
 dependencies = [
@@ -6438,6 +6447,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tokio",
  "tower",
  "tracing",

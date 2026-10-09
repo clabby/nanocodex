@@ -43,11 +43,11 @@ fn parse(arguments: &str) -> Result<Control, String> {
         "off" | "stop" => Control::Stop,
         "list" => Control::List,
         "mute" => Control::Mute,
-        _ if argument.split_whitespace().count() == 1 => Control::Start(Some(
-            argument
-                .parse()
-                .map_err(|_| "Unknown voice. Use /voice list to see Codex voices.".to_owned())?,
-        )),
+        _ if argument.split_whitespace().count() == 1 => {
+            Control::Start(Some(argument.parse().map_err(|_| {
+                "Unknown voice. Use /voice list to see Codex voices.".to_owned()
+            })?))
+        }
         _ => return Err("Usage: /voice [on|off|stop|mute|list|<voice>]".to_owned()),
     })
 }
@@ -102,7 +102,10 @@ impl Feature for RealtimeVoice {
             let host = cx.host.clone();
             tokio::spawn(async move {
                 if let Err(error) = control.cancel().await {
-                    host.error(Some(PaneId::Main), format!("Could not cancel the voice turn: {error}"));
+                    host.error(
+                        Some(PaneId::Main),
+                        format!("Could not cancel the voice turn: {error}"),
+                    );
                 }
             });
         }
@@ -111,7 +114,12 @@ impl Feature for RealtimeVoice {
 
     fn shutdown(&mut self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
-        if let Some(forward) = self.forward.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        if let Some(forward) = self
+            .forward
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
             forward.abort();
         }
         let slot = Arc::clone(&self.slot);
@@ -125,15 +133,19 @@ impl Feature for RealtimeVoice {
 
 impl RealtimeVoice {
     fn active(&self) -> bool {
-        self.slot
-            .try_lock()
-            .map_or(true, |session| session.as_ref().is_some_and(VoiceSession::is_running))
+        self.slot.try_lock().map_or(true, |session| {
+            session.as_ref().is_some_and(VoiceSession::is_running)
+        })
     }
 
     fn control(&self, control: Control, pane: PaneId, host: FeatureHost) {
         if control == Control::List {
             let names = |voices: &[Voice]| {
-                voices.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                voices
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             };
             host.notice(
                 Some(pane),
@@ -182,7 +194,9 @@ impl Job {
                             self.host.error(Some(self.pane), error.to_string());
                         }
                     }
-                    _ => self.host.error(Some(self.pane), "Start /voice before muting."),
+                    _ => self
+                        .host
+                        .error(Some(self.pane), "Start /voice before muting."),
                 }
                 return;
             }
@@ -253,9 +267,10 @@ impl Job {
                 }
                 *slot = Some(session);
             }
-            Err(error) => self
-                .host
-                .error(Some(self.pane), format!("failed to start voice thread: {error}")),
+            Err(error) => self.host.error(
+                Some(self.pane),
+                format!("failed to start voice thread: {error}"),
+            ),
         }
     }
 
@@ -270,15 +285,21 @@ impl Job {
         })));
         let result = session.shutdown().await;
         self.generation.fetch_add(1, Ordering::AcqRel);
-        if let Some(forward) = self.forward.lock().unwrap_or_else(PoisonError::into_inner).take() {
+        if let Some(forward) = self
+            .forward
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
             forward.abort();
         }
         self.host.send(FeatureUpdate::VoiceStatus(None));
         match result {
             Ok(()) => self.host.notice(Some(self.pane), "Voice stopped"),
-            Err(error) => self
-                .host
-                .error(Some(self.pane), format!("failed to stop voice cleanly: {error}")),
+            Err(error) => self.host.error(
+                Some(self.pane),
+                format!("failed to stop voice cleanly: {error}"),
+            ),
         }
     }
 }

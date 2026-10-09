@@ -77,7 +77,7 @@ use crate::{
 ))]
 pub(crate) use eval_attach::attach_evaluation;
 
-pub(crate) use crate::nanocodex2::tui::tool_calls::ToolCalls;
+pub(crate) use crate::tool_calls::ToolCalls;
 
 const BTW_BOUNDARY: &str = r"You are answering an ephemeral BTW side question.
 Treat inherited conversation history only as reference context. Do not resume or complete an
@@ -86,8 +86,6 @@ that side question explicitly requests a mutation.
 
 BTW question:
 ";
-const DEFAULT_JAEGER_UI_URL: &str = "http://127.0.0.1:16686";
-const JAEGER_UI_URL_ENV: &str = "NANOCODEX_JAEGER_UI_URL";
 const MOUSE_SCROLL_ROWS: usize = 3;
 const MAX_AGENT_EVENTS_PER_BATCH: usize = 256;
 
@@ -760,7 +758,6 @@ enum Submission {
     CollapseBtw,
     SplitBtw,
     Cancel,
-    Trace,
     Fast(Option<bool>),
     AutoRoute,
     ModelPicker,
@@ -3928,7 +3925,7 @@ fn submit(
 /// control commands share this path with typed input.
 fn execute_submission(
     app: &mut App,
-    root_session_id: &str,
+    _root_session_id: &str,
     commands: &mpsc::UnboundedSender<WorkerCommand>,
     intent: SubmitIntent,
     submission: Submission,
@@ -4091,16 +4088,6 @@ fn execute_submission(
             app.cancel_pending(target);
             send_command(commands, WorkerCommand::Cancel { target })?;
         }
-        Submission::Trace => {
-            let Some(session_id) = active_session_id(app, root_session_id) else {
-                app.push_active_error("BTW traces are available after the fork finishes");
-                return Ok(());
-            };
-            match open_session_traces(session_id) {
-                Ok(()) => app.set_active_status("Opened session traces in Jaeger"),
-                Err(error) => app.push_active_error(format!("failed to open Jaeger: {error}")),
-            }
-        }
         Submission::Fast(enabled) => {
             let enabled = enabled.unwrap_or(!app.fast_mode());
             send_command(commands, WorkerCommand::SetFastMode { enabled })?;
@@ -4194,9 +4181,6 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
     }
     if trimmed == "/cancel" {
         return Submission::Cancel;
-    }
-    if trimmed == "/trace" {
-        return Submission::Trace;
     }
     if trimmed == "/benchmark" || trimmed.starts_with("/benchmark ") {
         let display = trimmed.to_owned();
@@ -4397,25 +4381,6 @@ fn active_session_id<'a>(app: &'a App, root_session_id: &'a str) -> Option<&'a s
     }
 }
 
-fn session_trace_url(base_url: &str, session_id: &str) -> Result<reqwest::Url> {
-    let base = reqwest::Url::parse(base_url).wrap_err("invalid Jaeger UI URL")?;
-    let mut url = base.join("search").wrap_err("invalid Jaeger search URL")?;
-    let tags = serde_json::json!({ "session.id": session_id }).to_string();
-    url.query_pairs_mut()
-        .append_pair("service", "nanocodex")
-        .append_pair("lookback", "1w")
-        .append_pair("limit", "1500")
-        .append_pair("tags", &tags);
-    Ok(url)
-}
-
-fn open_session_traces(session_id: &str) -> Result<()> {
-    let base_url =
-        std::env::var(JAEGER_UI_URL_ENV).unwrap_or_else(|_| DEFAULT_JAEGER_UI_URL.to_owned());
-    let url = session_trace_url(&base_url, session_id)?;
-    open_browser(url.as_str())
-}
-
 fn open_browser(url: &str) -> Result<()> {
     let mut command = browser_command(url);
     command
@@ -4482,8 +4447,8 @@ mod tests {
         Submission, SubmitIntent, TerminalAction, ToolCalls, UiAction, UiModel, UiUpdate,
         VoiceControl, WorkerCommand, WorkerEvent, active_session_id, apply_main_agent_event_batch,
         classify_submission, handle_key, handle_subagent_update, handle_worker_update,
-        paste_clipboard_image, prepare_btw_prompt, report_cancel_outcome, session_trace_url,
-        spawn_agent_worker, submit,
+        paste_clipboard_image, prepare_btw_prompt, report_cancel_outcome, spawn_agent_worker,
+        submit,
     };
     use crate::subagents::{AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate};
     use crate::tui::{
@@ -4681,10 +4646,6 @@ mod tests {
         assert_eq!(
             classify_submission("/cancel".to_owned()),
             Submission::Cancel
-        );
-        assert_eq!(
-            classify_submission(" /trace ".to_owned()),
-            Submission::Trace
         );
         let Submission::Prompt(benchmark) = classify_submission(" /benchmark release ") else {
             panic!("benchmark must expand into a private workflow prompt");
@@ -5115,34 +5076,6 @@ mod tests {
         assert_eq!(btw.scroll_from_bottom, 0);
         assert!(!btw.has_unseen_output);
         assert_eq!(app.focus, PaneId::Btw(btw_id));
-    }
-
-    #[test]
-    fn jaeger_search_targets_the_focused_session_and_encodes_its_tag() {
-        let mut app = App::new("/workspace".into());
-        assert_eq!(
-            active_session_id(&app, "main-session"),
-            Some("main-session")
-        );
-
-        let btw_id = app.begin_btw();
-        assert_eq!(active_session_id(&app, "main-session"), None);
-        app.btw_opened(btw_id, std::sync::Arc::from("btw session/&"), true);
-        let session_id = active_session_id(&app, "main-session").unwrap();
-        assert_eq!(session_id, "btw session/&");
-
-        let url = session_trace_url("http://127.0.0.1:16686", session_id).unwrap();
-        assert_eq!(url.path(), "/search");
-        let query = url
-            .query_pairs()
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(query.get("service").map(AsRef::as_ref), Some("nanocodex"));
-        assert_eq!(query.get("lookback").map(AsRef::as_ref), Some("1w"));
-        assert_eq!(query.get("limit").map(AsRef::as_ref), Some("1500"));
-        assert_eq!(
-            query.get("tags").map(AsRef::as_ref),
-            Some(r#"{"session.id":"btw session/&"}"#)
-        );
     }
 
     #[test]

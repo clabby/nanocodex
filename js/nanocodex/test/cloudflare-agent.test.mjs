@@ -1970,3 +1970,75 @@ test("idle root transport preparation is adopted by the next turn and never reus
   assert.equal(prepareTransport(agent), false, "a released Agent never prepares");
 });
 
+
+
+test("rejected subagent statuses log one redacted, coded line while the child keeps working", { timeout: 30_000 }, async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const profile = {
+    model: "@cf/zai-org/glm-5.3", thinking: "high",
+    workersAi: { ai: { async run(_model, input) {
+      if (input.messages.at(-1)?.role === "tool") {
+        return { choices: [{ finish_reason: "stop", message: { content: "STATUS_DONE" } }] };
+      }
+      const submit = input.tools.find((tool) => tool.function.description.startsWith("exec\n"));
+      return { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{
+        id: `status-submit-${crypto.randomUUID()}`, type: "function", function: {
+          name: submit.function.name, arguments: JSON.stringify({ input: "text(await tools.submit_result({ output: { ok: true } }));" }),
+        },
+      }] } }] };
+    } }, model: "@cf/zai-org/glm-5.3", thinking: "high" },
+  };
+  const rejected = [];
+  const options = {
+    [Symbol.for("nanocodex.cloudflare.internalConfiguration")]: {
+      model: profile.model, thinking: profile.thinking, reasoning_mode: "standard", fast_mode: false,
+    },
+    [Symbol.for("nanocodex.cloudflare.internalRuntime")]: {
+      workersAi: profile.workersAi, subagentsEnabled: true,
+      subagentRouting: {
+        async resolve() { return { model: profile.model, thinking: profile.thinking, routeId: "status-route" }; },
+        bind() {},
+      },
+      // A host that rejects every status, as managed authority does for a child
+      // whose live binding no longer matches.
+      subagentLifecycle(event) {
+        if (event.type !== "status") return;
+        rejected.push(event.status.state);
+        const error = new Error('status for "SECRET-TASK-TEXT" at https://private.example/x was rejected');
+        error.code = "subagent_status_authority_mismatch";
+        throw error;
+      },
+      inferenceForSession() { return profile; },
+    },
+  };
+  const logged = [];
+  const consoleError = console.error;
+  console.error = (...values) => { logged.push(values); };
+  const agent = await create(module, durableOwner(storage), options);
+  try {
+    const child = await Subagents.spawn(agent, {
+      role: "status-worker", task: "Return ok.",
+      outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"], additionalProperties: false },
+    });
+    for (const message of [undefined, "Return ok again."]) {
+      if (message) await Subagents.send(agent, { agentId: child.agent_id, message });
+      const result = await Subagents.wait(agent, { agentIds: [child.agent_id], timeoutMs: 5_000 });
+      assert.deepEqual(result.agents[0].status, { state: "completed", output: { ok: true } });
+    }
+  } finally {
+    await agent.session.shutdown();
+    console.error = consoleError;
+  }
+  assert.ok(rejected.length >= 3, `every status transition reached the host: ${rejected}`);
+  const records = logged.map(([value]) => value).filter((value) => value?.type === "nanocodex.subagent_host_error");
+  assert.equal(records.length, 1, "a persistent rejection logs once per child, operation and reason");
+  const [record] = records;
+  assert.equal(record.operation, "forwarding a subagent status");
+  assert.equal(record.reason, "subagent_status_authority_mismatch");
+  assert.equal(record.error_kind, "Error");
+  assert.match(record.message, /^Nanocodex failed while forwarding a subagent status/);
+  assert.match(record.error_message, /^status for "…" at <url> was rejected$/);
+  assert.match(record.session_id, /^[0-9a-f-]{36}$/);
+  assert.ok(!JSON.stringify(logged).includes("SECRET-TASK-TEXT"), "quoted content never reaches logs");
+});

@@ -83,13 +83,18 @@ async fn show(request: PendingInteraction, host: &FeatureHost) {
         }
     };
     match outcome {
-        Some(InteractionOutcome::Answered(answer)) => host.notice(None, format!("Answered: {answer}")),
+        Some(InteractionOutcome::Answered(answer)) => {
+            host.notice(None, format!("Answered: {answer}"))
+        }
         Some(InteractionOutcome::Cancelled) => host.notice(None, "Request cancelled"),
         Some(InteractionOutcome::Withdrawn) => {
             host.error(None, "The request was cancelled; no answer was sent");
         }
         // The overlay was replaced by another feature overlay; dropping the
         // request returns a cancellation to the tool instead of an answer.
-        None => host.error(None, "Claude request dismissed; the tool was told it was cancelled"),
+        None => host.error(
+            None,
+            "Claude request dismissed; the tool was told it was cancelled",
+        ),
     }
 }

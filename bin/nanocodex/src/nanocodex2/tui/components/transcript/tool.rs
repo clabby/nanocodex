@@ -649,7 +649,11 @@ pub(super) fn group_lines(group: &ToolGroup<'_>, width: u16, theme: &Theme) -> V
             .unwrap_or(0);
         let range = &parallel[group_index];
         let connector = if hidden > 0 {
-            if last_row { "    └── " } else { "    ├── " }
+            if last_row {
+                "    └── "
+            } else {
+                "    ├── "
+            }
         } else {
             activity_connector(
                 group_index + 1 == parallel.len(),
@@ -660,13 +664,15 @@ pub(super) fn group_lines(group: &ToolGroup<'_>, width: u16, theme: &Theme) -> V
         };
         let (call, live) = group.calls[index];
         let presentation = present(call, width, theme, false).truncate_summary();
-        let row_width = width.saturating_sub(display_width(connector)).saturating_add(4);
+        let row_width = width
+            .saturating_sub(display_width(connector))
+            .saturating_add(4);
         // The batch header already belongs to this transcript; rows stay terse.
         let mut row =
             summary_lines_with_origin(call, &presentation, live, row_width, theme, false, false)
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+                .into_iter()
+                .next()
+                .unwrap_or_default();
         // Drop the per-call indentation and disclosure marker; the branch replaces them.
         let spans = row.spans.drain(..).skip(2);
         let mut spans_with_connector = vec![Span::styled(connector, border)];
@@ -700,9 +706,7 @@ fn group_rows(group: &ToolGroup<'_>) -> Vec<usize> {
         })
         .collect::<Vec<_>>();
     let coordination = (0..count)
-        .filter(|&index| {
-            is_subagent_tool(group.calls[index].0.family()) && !rows.contains(&index)
-        })
+        .filter(|&index| is_subagent_tool(group.calls[index].0.family()) && !rows.contains(&index))
         .collect::<Vec<_>>();
     rows.extend(coordination);
     rows.truncate(budget);
@@ -793,7 +797,6 @@ fn one_line(spans: Vec<Span<'static>>, width: u16, ellipsis: Style) -> Line<'sta
 pub(super) fn first_emitted_line(tool: &ToolEntry) -> Option<String> {
     code::first_emitted_line(tool)
 }
-
 
 fn spans_need_truncation(spans: &[Span<'static>], width: u16) -> bool {
     spans.iter().any(|span| span.content.contains(['\n', '\r'])) || spans_width(spans) > width

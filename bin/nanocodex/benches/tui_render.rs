@@ -4,7 +4,11 @@ use criterion::{criterion_group, criterion_main};
 #[path = "../src/tui/voice.rs"]
 mod voice;
 
+#[path = "../src/tool_calls.rs"]
+mod tool_calls;
+
 mod tui {
+    use super::tool_calls::ToolCalls;
     use super::voice;
     use std::{
         cell::Cell,
@@ -1854,8 +1858,8 @@ mod tui {
                     },
                     |state| {
                         for _ in 0..TOGGLES {
-                            state.0.set_tool_details_expanded(false);
-                            state.0.set_tool_details_expanded(true);
+                            state.0.set_tool_calls(ToolCalls::Folded);
+                            state.0.set_tool_calls(ToolCalls::Expanded);
                         }
                         black_box((state.0.len(), state.1.len()));
                     },
@@ -1874,7 +1878,7 @@ mod tui {
                     status: ToolStatus::Completed,
                 });
             }
-            transcript.set_tool_details_expanded(false);
+            transcript.set_tool_calls(ToolCalls::Folded);
             let mut terminal = Terminal::new(TestBackend::new(120, 40))
                 .expect("folded tool terminal should initialize");
             bencher.iter(|| {

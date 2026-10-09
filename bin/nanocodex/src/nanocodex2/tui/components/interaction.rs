@@ -92,13 +92,16 @@ impl InteractionOverlay {
     }
 
     fn options(&self) -> Vec<(String, String)> {
-        self.lock().question.as_ref().map_or_else(Vec::new, |question| {
-            question
-                .options
-                .iter()
-                .map(|option| (option.label.clone(), option.description.clone()))
-                .collect()
-        })
+        self.lock()
+            .question
+            .as_ref()
+            .map_or_else(Vec::new, |question| {
+                question
+                    .options
+                    .iter()
+                    .map(|option| (option.label.clone(), option.description.clone()))
+                    .collect()
+            })
     }
 
     fn multi_select(&self) -> bool {
@@ -260,13 +263,20 @@ impl FeatureOverlay for InteractionOverlay {
         let option_rows = u16::try_from(options.len()).unwrap_or(u16::MAX);
         let [body, choices, answer, error] = Layout::vertical([
             Constraint::Min(1),
-            Constraint::Length(if options.is_empty() { 0 } else { option_rows.saturating_add(1) }),
+            Constraint::Length(if options.is_empty() {
+                0
+            } else {
+                option_rows.saturating_add(1)
+            }),
             Constraint::Length(1),
             Constraint::Length(u16::from(self.error.is_some())),
         ])
         .areas(layout.body);
         let prompt = self.lock().prompt().to_owned();
-        let lines = prompt.lines().map(|line| Line::from(line.to_owned())).collect::<Vec<_>>();
+        let lines = prompt
+            .lines()
+            .map(|line| Line::from(line.to_owned()))
+            .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
@@ -281,24 +291,34 @@ impl FeatureOverlay for InteractionOverlay {
                 .map(|(index, (label, description))| {
                     let current = self.selected == Some(index);
                     let mark = if multi {
-                        if self.chosen.contains(&index) { "[x] " } else { "[ ] " }
+                        if self.chosen.contains(&index) {
+                            "[x] "
+                        } else {
+                            "[ ] "
+                        }
                     } else if current {
                         "› "
                     } else {
                         "  "
                     };
                     let style = if current {
-                        Style::default().fg(theme.accent()).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(theme.accent())
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
                     Line::from(vec![
                         Span::styled(format!("{mark}{}. {label}", index + 1), style),
-                        Span::styled(format!("  {description}"), Style::default().fg(theme.muted())),
+                        Span::styled(
+                            format!("  {description}"),
+                            Style::default().fg(theme.muted()),
+                        ),
                     ])
                 })
                 .collect::<Vec<_>>();
-            let [_, list] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(choices);
+            let [_, list] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(choices);
             frame.render_widget(Paragraph::new(rows), list);
         }
         frame.render_widget(
@@ -311,7 +331,10 @@ impl FeatureOverlay for InteractionOverlay {
         );
         if let Some(message) = &self.error {
             frame.render_widget(
-                Paragraph::new(Line::styled(message.clone(), Style::default().fg(Color::Red))),
+                Paragraph::new(Line::styled(
+                    message.clone(),
+                    Style::default().fg(Color::Red),
+                )),
                 error,
             );
         }
@@ -357,6 +380,10 @@ impl FeatureOverlay for InteractionOverlay {
         }
         self.error = None;
         OverlayOutcome::Consumed
+    }
+
+    fn discards_draft(&self) -> bool {
+        true
     }
 
     fn paste(&mut self, text: &str) {
