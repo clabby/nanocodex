@@ -4276,7 +4276,7 @@ async fn apply_feature_update(
             if overlay.discards_draft()
                 && let Some(root) = app.root_mut(PaneId::Main)
             {
-                root.discard_draft();
+                root.discard_feature_draft();
             }
             runtime.feature_overlay = Some(overlay);
             if let Some(local) = &mut runtime.local {
