@@ -5853,10 +5853,10 @@ dependencies = [
  "image",
  "indicatif",
  "jsonschema",
- "kvm-ioctls",
  "mpp",
  "nanocodex",
  "nanocodex-agent",
+ "nanocodex-bin-shared",
  "nanocodex-browser",
  "nanocodex-cli-auth",
  "nanocodex-computer",
@@ -5864,12 +5864,9 @@ dependencies = [
  "nanocodex-egress",
  "nanocodex-eval",
  "nanocodex-eval-adapters",
- "nanocodex-hand",
  "nanocodex-managed",
  "nanocodex-oai-tools",
  "nanocodex-observability",
- "nanocodex-remote",
- "nanocodex-screen-supervisor",
  "nanocodex-subagents",
  "nanocodex-tui-control",
  "nanocodex-tui-render",
@@ -5914,12 +5911,39 @@ dependencies = [
  "unicode-width 0.2.0",
  "url",
  "uuid",
- "vergen",
  "vt100",
  "webrtc",
  "whoami 1.6.1",
  "yansi",
  "zeroize",
+]
+
+[[package]]
+name = "nanocodex-bin-shared"
+version = "0.6.7"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "nanocodex",
+ "nanocodex-cli-auth",
+ "nanocodex-computer",
+ "nanocodex-managed",
+ "nanocodex-observability",
+ "nanocodex-remote",
+ "nix 0.31.3",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6228,6 +6252,53 @@ dependencies = [
  "windows-sys 0.61.2",
  "x11rb",
  "x11rb-protocol",
+]
+
+[[package]]
+name = "nanocodex-hand-daemon"
+version = "0.6.7"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "dotenvy",
+ "flate2",
+ "fs2",
+ "futures-util",
+ "hex",
+ "image",
+ "kvm-ioctls",
+ "nanocodex",
+ "nanocodex-bin-shared",
+ "nanocodex-cli-auth",
+ "nanocodex-computer",
+ "nanocodex-hand",
+ "nanocodex-managed",
+ "nanocodex-oai-tools",
+ "nanocodex-remote",
+ "nanocodex-screen-supervisor",
+ "nanocodex-vm",
+ "nix 0.31.3",
+ "png 0.18.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shlex 2.0.1",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "webrtc",
+ "whoami 1.6.1",
 ]
 
 [[package]]
@@ -11888,18 +11959,6 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "vergen"
-version = "8.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2990d9ea5967266ea0ccf413a4aa5c42a93dbcfda9cb49a97de6931726b12566"
-dependencies = [
- "anyhow",
- "cfg-if",
- "rustversion",
- "time",
-]
 
 [[package]]
 name = "version_check"

@@ -420,7 +420,16 @@ async fn permission_request_targets_only_the_running_daemon() {
     });
 
     // The CLI forwards `hand` to the Hand executable, which owns the daemon.
-    let executable = Path::new(env!("CARGO_BIN_EXE_nanocodex-hand"));
+    // nanocodex-hand is the nanocodex-hand-daemon package; a plain
+    // workspace build places it beside the CLI.
+    let executable = Path::new(env!("CARGO_BIN_EXE_nanocodex"))
+        .with_file_name(format!("nanocodex-hand{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        executable.is_file(),
+        "{} is missing; build both executables with cargo build",
+        executable.display()
+    );
+    let executable = executable.as_path();
     let request = |pid: u32| {
         let mut command = command(&home, &origin);
         command

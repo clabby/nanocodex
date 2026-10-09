@@ -13,15 +13,12 @@ use nanocodex_managed::ManagedError;
 
 #[cfg(target_os = "linux")]
 use super::screen_host;
+use nanocodex_bin_shared::hand_args::HandRecordingArgs;
+
 use super::{
     Hand, Host, VmRunConfig, device_hand, launcher, native_hand, screen_native, startup_timing,
     vm_hand, vm_host,
 };
-
-/// Content identity of the Hand executable built from this tree, produced by
-/// the build script. Absent until the identity producer lands; the version
-/// then simply omits the line, so an updater falls back to byte comparison.
-pub(crate) const HAND_IDENTITY: Option<&str> = option_env!("NANOCODEX_HAND_IDENTITY");
 
 /// Version reported by the Hand: its package version and the content
 /// identity of its source and dependency closure. It deliberately carries no
@@ -30,12 +27,19 @@ fn hand_version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
         let mut version = format!("Version: {}", env!("CARGO_PKG_VERSION"));
-        if let Some(identity) = HAND_IDENTITY.filter(|identity| !identity.is_empty()) {
+        // The release reuse identity, when the build recorded one; otherwise
+        // the line is omitted and an updater falls back to byte comparison.
+        if let Some(identity) = crate::version::hand_identity() {
             version.push_str(
                 "
 Hand Identity: ",
             );
             version.push_str(identity);
+        } else if let Some(sha) = crate::version::git_sha() {
+            // Without an identity, local pair verification matches the exact
+            // source revision of the CLI and Hand instead.
+            version.push_str("\nCommit SHA: ");
+            version.push_str(sha);
         }
         version
     })
@@ -47,13 +51,13 @@ Hand Identity: ",
     about = "Nanocodex Hand daemon; user commands are provided by the nanocodex CLI",
     disable_help_subcommand = true
 )]
-struct DaemonCli {
+pub(crate) struct DaemonCli {
     #[command(subcommand)]
-    command: DaemonCommand,
+    pub(crate) command: DaemonCommand,
 }
 
 #[derive(Subcommand)]
-enum DaemonCommand {
+pub(crate) enum DaemonCommand {
     /// Serve this computer as a Hand; --vm or --docker serve an isolated Hand.
     Hand(Hand),
     #[command(name = "__device-hand", hide = true)]
@@ -90,14 +94,26 @@ enum DaemonCommand {
         source: PathBuf,
         destination: PathBuf,
     },
+    /// Control this Hand's recorder locally, without account authentication.
+    HandRecording(HandRecordingArgs),
 }
+
+const LOCAL_RECORDING_CONTROL_FAILED: &str = "local recording control failed";
 
 /// Run one daemon command of the Hand executable.
 pub(crate) fn main(arguments: Vec<OsString>) -> ExitCode {
     match try_main(arguments) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Error: {error}");
+            if matches!(&error, ManagedError::Configuration(message) if message == LOCAL_RECORDING_CONTROL_FAILED)
+            {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": false, "error": "local_recording_control_failed"})
+                );
+            } else {
+                eprintln!("Error: {error}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -176,12 +192,9 @@ fn serve_screen_host(
 
 async fn run(command: DaemonCommand) -> Result<(), ManagedError> {
     match command {
-        DaemonCommand::Hand(Hand {
-            management: Some(_),
-            ..
-        }) => Err(ManagedError::Configuration(
-            "Hand management commands are provided by the nanocodex CLI".into(),
-        )),
+        DaemonCommand::HandRecording(command) => super::hand_recording_control::run(&command)
+            .await
+            .map_err(|_| ManagedError::Configuration(LOCAL_RECORDING_CONTROL_FAILED.into())),
         DaemonCommand::Hand(command) if command.rootfs.is_none() && command.docker.is_none() => {
             native_hand::serve_hand(command).await
         }

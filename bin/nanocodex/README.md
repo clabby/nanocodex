@@ -754,12 +754,14 @@ restarts it and its VM host; finish active work first. A release whose Hand
 bytes or reported `Hand Identity` match the running Hand (or that carries no
 Hand) activates only the CLI and leaves the Hand service untouched.
 
-For a local build, run `cargo build -p nanocodex-bin --bins` and use
+For a local build, run `cargo build` and use
 `nanocodex update --path target/<profile>/nanocodex`; the `nanocodex-hand` built
-beside it is used automatically, or pass `--hand-binary PATH`. The CLI and Hand
-must report the same `Hand Identity` in `--version` (builds that predate Hand
-identities must report the same full `Commit SHA`); a mismatch stops
-installation before candidate files are written. A CLI without a Hand beside
+beside it is used automatically, or pass `--hand-binary PATH`. Release builds
+record `VERGEN_GIT_SHA`, `TAG_NAME` and `NANOCODEX_HAND_IDENTITY` at their
+entry points; a pair that reports a `Hand Identity` (or full `Commit SHA`)
+must report the same one, and a plain development pair must report the same
+package version and Hand service protocol. A mismatch stops installation
+before candidate files are written. A CLI without a Hand beside
 it keeps the installed Hand.
 
 Set `NANOCODEX_STARTUP_TIMING=1` on either CLI to emit content-free JSON phase

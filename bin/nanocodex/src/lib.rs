@@ -1,5 +1,6 @@
-//! The Nanocodex CLI and Hand, built as two role-split executables: `nanocodex`
-//! ([`cli_main`]) and `nanocodex-hand` ([`hand_main`]).
+//! The Nanocodex CLI (`nanocodex`, [`cli_main`]): the managed and local command
+//! trees and the terminal UI. The Hand executable is the separate
+//! nanocodex-hand-daemon package; this crate never depends on it.
 #![recursion_limit = "256"]
 
 mod auth;
@@ -7,7 +8,6 @@ mod benchmark;
 mod browser;
 mod browser_cookie_sync;
 mod clipboard;
-mod computer;
 mod config;
 #[cfg(feature = "tempo")]
 mod credits;
@@ -22,9 +22,6 @@ mod eval;
 )))]
 #[path = "eval_unsupported.rs"]
 mod eval;
-mod hand_executable;
-#[cfg(target_os = "macos")]
-mod hand_keep_awake;
 mod hand_login;
 mod hand_menu_bar;
 mod hand_menu_status;
@@ -32,7 +29,6 @@ mod hand_registry;
 mod hand_service;
 mod hand_setup;
 mod install;
-mod launcher;
 #[cfg(target_os = "linux")]
 mod linux_hand_service;
 mod login;
@@ -52,11 +48,11 @@ mod rewind;
 mod rollout_fork;
 mod run;
 mod setup;
-mod startup_timing;
 mod subagents;
 mod tool_calls;
 mod update;
-mod version;
+pub use nanocodex_bin_shared::version::BuildInfo;
+pub(crate) use nanocodex_bin_shared::version;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
@@ -69,6 +65,12 @@ mod vm;
 #[path = "vm_unsupported.rs"]
 mod vm;
 mod windows_hand;
+
+// Shared with the Hand executable (nanocodex-hand-daemon); keep their
+// historical module paths in this crate.
+#[cfg(target_os = "macos")]
+pub(crate) use nanocodex_bin_shared::hand_keep_awake;
+pub(crate) use nanocodex_bin_shared::{computer, hand_executable, launcher, startup_timing};
 
 use std::{
     ffi::{OsStr, OsString},
@@ -102,8 +104,8 @@ impl RetryableProcessExit {
 #[derive(Parser)]
 #[command(
     name = "ncl",
-    version = version::SHORT_VERSION,
-    long_version = version::LONG_VERSION,
+    version = version::short(),
+    long_version = version::long(),
     about = "An interactive coding agent and headless JSONL runner",
     subcommand_negates_reqs = true
 )]
@@ -250,7 +252,8 @@ enum Tree {
 /// Entry point of the `nanocodex` CLI. Hand serving and daemon-side
 /// entrypoints are forwarded to the installed Hand executable; the CLI never
 /// runs them in-process.
-pub fn cli_main() -> ExitCode {
+pub fn cli_main(build: BuildInfo) -> ExitCode {
+    version::init(build);
     hand_executable::take_forwarded();
     let mut arguments: Vec<OsString> = std::env::args_os().collect();
     let tree = select_tree(&mut arguments);
@@ -280,57 +283,6 @@ pub fn cli_main() -> ExitCode {
     }
 }
 
-/// Entry point of the `nanocodex-hand` daemon executable.
-///
-/// Only daemon commands (and the Hand's own `--version`/`--help`) run here;
-/// this entry never reaches the CLI command trees or the terminal UI, so they
-/// are not linked into the Hand. Older installations may point `bin/nanocodex2`
-/// at this file, so every other invocation, including a leading `--local`, is
-/// forwarded unchanged to the CLI installed beside it.
-pub fn hand_main() -> ExitCode {
-    hand_executable::set_hand_role();
-    hand_executable::take_forwarded();
-    let arguments: Vec<OsString> = std::env::args_os().collect();
-    if nanocodex2::is_helper_process() || is_hand_daemon_invocation(&arguments) {
-        return nanocodex2::daemon::main(arguments);
-    }
-    if hand_executable::forwarded() {
-        // The CLI forwarded this here; never bounce it back.
-        eprintln!("Error: this command is provided by the nanocodex CLI, not the Hand executable");
-        return ExitCode::FAILURE;
-    }
-    match hand_executable::cli_binary() {
-        Ok(cli) => hand_executable::forward(&cli, arguments.first().cloned(), &arguments[1..]),
-        Err(error) => {
-            eprintln!("Error: {error}; user commands are provided by the nanocodex CLI");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// Invocations the Hand executable serves itself, decided without the CLI
-/// command trees: daemon entrypoints, `hand` serving (no management
-/// subcommand, no help flag), and the Hand's bare `--version`/`--help`.
-fn is_hand_daemon_invocation(arguments: &[OsString]) -> bool {
-    let argument = |index: usize| arguments.get(index).and_then(|argument| argument.to_str());
-    match argument(1) {
-        Some("--version" | "-V" | "--help" | "-h") => arguments.len() == 2,
-        Some(
-            "__device-hand" | "__hand-screen" | "__hand-desktop" | "__install-hand"
-            | "__update-hand" | "wayland-host" | "desktop-host" | "server-host" | "__vm-run-config"
-            | "vm-run-config" | "__vm-clone-image" | "host",
-        ) => true,
-        // Serving flags start with `-`; a word is a CLI management subcommand.
-        Some("hand") => {
-            argument(2).is_none_or(|next| next.starts_with('-'))
-                && !arguments[2..]
-                    .iter()
-                    .any(|argument| argument == "-h" || argument == "--help")
-        }
-        _ => false,
-    }
-}
-
 /// Commands that serve a Hand or are internal entrypoints of the Hand daemon
 /// (service protocol, screen/input publishers, VMM children, root helpers).
 fn is_daemon_command(arguments: &[OsString]) -> bool {
@@ -342,7 +294,7 @@ fn is_daemon_command(arguments: &[OsString]) -> bool {
         Some(
             "__device-hand" | "__hand-screen" | "__hand-desktop" | "__install-hand"
             | "__update-hand" | "wayland-host" | "desktop-host" | "server-host" | "__vm-run-config"
-            | "vm-run-config" | "__vm-clone-image" | "host",
+            | "vm-run-config" | "__vm-clone-image" | "host" | "hand-recording",
         ) => true,
         // `hand` alone (or with backend flags) serves; management subcommands
         // and help stay in the CLI.

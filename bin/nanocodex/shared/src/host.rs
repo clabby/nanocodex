@@ -8,16 +8,16 @@ use std::{
 
 use serde::Deserialize;
 
-pub(crate) const MACHINE_CAPABILITIES: [&str; 5] =
+pub const MACHINE_CAPABILITIES: [&str; 5] =
     ["native", "filesystem", "process", "package", "server"];
 
 #[derive(Debug)]
-pub(crate) struct HostConfig {
+pub struct HostConfig {
     workspace: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum HostConfigError {
+pub enum HostConfigError {
     #[error("could not determine the config directory; set NANOCODEX_HOME")]
     HomeUnavailable,
     #[error("failed to determine the current directory: {0}")]
@@ -49,7 +49,7 @@ struct AgentConfigFile {
 }
 
 impl HostConfig {
-    pub(crate) fn load() -> Result<Self, HostConfigError> {
+    pub fn load() -> Result<Self, HostConfigError> {
         let current_dir = env::current_dir().map_err(HostConfigError::CurrentDirectory)?;
         let config_path = config_path()?;
         let config = ConfigFile::read(&config_path)?;
@@ -62,12 +62,12 @@ impl HostConfig {
         Ok(Self { workspace })
     }
 
-    pub(crate) fn workspace(&self) -> &Path {
+    pub fn workspace(&self) -> &Path {
         &self.workspace
     }
 }
 
-pub(crate) fn bounded_display_name(mut name: String) -> String {
+pub fn bounded_display_name(mut name: String) -> String {
     if name.trim().is_empty() {
         return "Local machine".to_owned();
     }
@@ -96,7 +96,7 @@ impl ConfigFile {
     }
 }
 
-pub(crate) fn config_path() -> Result<PathBuf, HostConfigError> {
+pub fn config_path() -> Result<PathBuf, HostConfigError> {
     if let Some(home) = env::var_os("NANOCODEX_HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home).join("config.toml"));
     }

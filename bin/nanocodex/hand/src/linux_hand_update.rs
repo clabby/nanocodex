@@ -1221,7 +1221,7 @@ fn prepare(
             sha256: sha.into(),
         },
     );
-    let source_revision = format!("{}\n", env!("VERGEN_GIT_SHA"));
+    let source_revision = format!("{}\n", crate::version::git_sha().unwrap_or("unknown"));
     if let Some(previous) = old_files.get("source-revision") {
         if previous.directory {
             bail!("source-revision metadata must be a regular file");

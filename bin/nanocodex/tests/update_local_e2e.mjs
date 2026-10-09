@@ -1,5 +1,6 @@
 // Public updater boundary test. Requires the real nanocodex CLI and nanocodex-hand
-// built from one source revision (cargo build -p nanocodex-bin --bins). The Hand
+// built from one source revision with their release provenance recorded
+// (VERGEN_GIT_SHA and NANOCODEX_HAND_IDENTITY set for cargo build). The Hand
 // is installed under its service file name nanocodex2. Never starts/stops an OS
 // service: Darwin uses an unregistered synthetic plist and asserts the live Hand
 // PID is unchanged. --old-updater PATH also installs the pair with a previously

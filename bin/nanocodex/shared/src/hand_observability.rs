@@ -6,7 +6,7 @@ use nanocodex_observability::{
 const DEFAULT_FILTER: &str = "warn,nanocodex2=info,nanocodex_oai_tools::attachment=info";
 
 #[derive(Args)]
-pub(crate) struct HandObservabilityArgs {
+pub struct HandObservabilityArgs {
     /// Tracing filter directive. Full tool payload tracing remains opt-in.
     #[arg(
         long,
@@ -30,7 +30,7 @@ pub(crate) struct HandObservabilityArgs {
 }
 
 impl HandObservabilityArgs {
-    pub(crate) fn install(&self) -> Result<ObservabilityGuard, ObservabilityError> {
+    pub fn install(&self) -> Result<ObservabilityGuard, ObservabilityError> {
         self.output.install(
             "nanocodex2-hand",
             env!("CARGO_PKG_VERSION"),

@@ -1,7 +1,8 @@
 //! Build an explicitly selected upstream revision before installing it.
 //!
-//! Current revisions build the `nanocodex` CLI and the `nanocodex-hand` daemon
-//! from package nanocodex-bin; the Hand is installed under its service file name
+//! Current revisions build the `nanocodex` CLI (package nanocodex-bin) and the
+//! `nanocodex-hand` daemon (package nanocodex-hand-daemon, or nanocodex-bin in
+//! earlier split revisions); the Hand is installed under its service file name
 //! `nanocodex2`. Historical revisions build their `nanocodex2-bin` pair, and the
 //! brief single-binary revisions install their one binary under both names.
 
@@ -58,8 +59,9 @@ pub(super) struct Build {
 /// How the fetched revision packages its CLI and Hand.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Layout {
-    /// nanocodex-bin's `nanocodex` CLI plus its `nanocodex-hand` daemon.
-    Split,
+    /// The `nanocodex` CLI plus the `nanocodex-hand` daemon, which is either its own
+    /// nanocodex-hand-daemon package or (earlier revisions) a nanocodex-bin target.
+    Split { hand_package: bool },
     /// Historical `nanocodex2-bin` package beside nanocodex-bin.
     Pair,
     /// One `nanocodex` binary serving as both CLI and Hand.
@@ -174,7 +176,7 @@ pub(super) async fn build(
     // Resolve shared dependency features once and use the optimized profile
     // without release LTO, matching the nightly build's faster feedback.
     let what = match layout {
-        Layout::Split => "nanocodex and nanocodex-hand",
+        Layout::Split { .. } => "nanocodex and nanocodex-hand",
         Layout::Pair => "nanocodex and nanocodex2",
         Layout::Single => "nanocodex",
     };
@@ -198,7 +200,10 @@ pub(super) async fn build(
             "nanocodex",
         ]);
     match layout {
-        Layout::Split => {
+        Layout::Split { hand_package: true } => {
+            command.args(["--package", "nanocodex-hand-daemon", "--bin", "nanocodex-hand"]);
+        }
+        Layout::Split { hand_package: false } => {
             command.args(["--bin", "nanocodex-hand"]);
         }
         Layout::Pair => {
@@ -209,6 +214,19 @@ pub(super) async fn build(
     command.args(["--features", "nanocodex-bin/tempo"]);
     if let Some(bundle) = &screen_bundle {
         command.env("NANOCODEX_LINUX_SCREEN_BUNDLE", bundle);
+        // Newer revisions embed the payload through a feature; older ones
+        // read the variable from their build script.
+        let (manifest, package) = if layout == (Layout::Split { hand_package: true }) {
+            ("bin/nanocodex/hand/Cargo.toml", "nanocodex-hand-daemon")
+        } else {
+            ("bin/nanocodex/Cargo.toml", "nanocodex-bin")
+        };
+        let manifest = tokio::fs::read_to_string(root.join(manifest))
+            .await
+            .unwrap_or_default();
+        if manifest.contains("\nembedded-screen-helpers = ") {
+            command.args(["--features", &format!("{package}/embedded-screen-helpers")]);
+        }
     }
     let status = command
         .status()
@@ -220,7 +238,7 @@ pub(super) async fn build(
     let extension = if cfg!(windows) { ".exe" } else { "" };
     let cli_path = target.join("nightly").join(format!("nanocodex{extension}"));
     let hand_path = match layout {
-        Layout::Split => target
+        Layout::Split { .. } => target
             .join("nightly")
             .join(format!("nanocodex-hand{extension}")),
         Layout::Pair => target
@@ -290,19 +308,24 @@ async fn layout(root: &Path) -> Result<Layout> {
     let metadata: serde_json::Value =
         serde_json::from_slice(&successful(output, "inspect the fetched Cargo workspace")?)
             .wrap_err("cargo returned invalid workspace metadata")?;
-    let split = metadata["packages"]
+    let hand_package = metadata["packages"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|package| package["name"] == "nanocodex-bin")
-        .flat_map(|package| package["targets"].as_array().into_iter().flatten())
-        .any(|target| {
-            target["name"] == "nanocodex-hand"
-                && target["kind"]
-                    .as_array()
-                    .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
-        });
-    Ok(if split { Layout::Split } else { Layout::Single })
+        .filter(|package| package["name"] == "nanocodex-bin" || package["name"] == "nanocodex-hand-daemon")
+        .find(|package| {
+            package["targets"].as_array().into_iter().flatten().any(|target| {
+                target["name"] == "nanocodex-hand"
+                    && target["kind"]
+                        .as_array()
+                        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+            })
+        })
+        .map(|package| package["name"] == "nanocodex-hand-daemon");
+    Ok(match hand_package {
+        Some(hand_package) => Layout::Split { hand_package },
+        None => Layout::Single,
+    })
 }
 
 /// Historical revisions declare a separate `nanocodex2-bin` workspace package;
