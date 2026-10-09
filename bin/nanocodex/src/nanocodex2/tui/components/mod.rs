@@ -36,6 +36,8 @@ pub(crate) use root::{
 };
 pub(crate) use transcript::image::{initialize as initialize_image_renderer, video_picker};
 pub(crate) use transcript::math;
+#[allow(unused_imports, reason = "used by the local driver's --tool-calls flag")]
+pub(crate) use transcript::{ToolCallsMode, set_initial_tool_calls};
 
 mod voice;
 

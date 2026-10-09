@@ -1414,11 +1414,39 @@ fn is_expandable(entry: &TranscriptEntry) -> bool {
 /// Initial tool display from NANOCODEX_TOOL_CALLS, shared with the classic CLI's
 /// --tool-calls: expanded (every detail), folded (summaries, default) or hidden.
 fn tool_calls_from_env() -> (Option<bool>, bool) {
+    match INITIAL_TOOL_CALLS.load(std::sync::atomic::Ordering::Acquire) {
+        1 => return (Some(true), false),
+        2 => return (None, false),
+        3 => return (None, true),
+        _ => {}
+    }
     match std::env::var("NANOCODEX_TOOL_CALLS").as_deref() {
         Ok("expanded") => (Some(true), false),
         Ok("hidden") => (None, true),
         _ => (None, false),
     }
+}
+
+/// Startup tool display chosen by a driver flag (ncl --tool-calls).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code, reason = "selected by the local driver's --tool-calls flag")]
+pub(crate) enum ToolCallsMode {
+    Expanded,
+    Folded,
+    Hidden,
+}
+
+static INITIAL_TOOL_CALLS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Overrides NANOCODEX_TOOL_CALLS for transcripts created afterwards.
+#[allow(dead_code, reason = "called by the local driver's --tool-calls flag")]
+pub(crate) fn set_initial_tool_calls(mode: ToolCallsMode) {
+    let value = match mode {
+        ToolCallsMode::Expanded => 1,
+        ToolCallsMode::Folded => 2,
+        ToolCallsMode::Hidden => 3,
+    };
+    INITIAL_TOOL_CALLS.store(value, std::sync::atomic::Ordering::Release);
 }
 
 impl LayoutCache {

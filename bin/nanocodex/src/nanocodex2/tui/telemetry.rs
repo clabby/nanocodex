@@ -332,6 +332,22 @@ impl ViewTelemetry {
     }
 }
 
+#[derive(clap::Parser)]
+struct EnvObservability {
+    #[command(flatten)]
+    args: crate::observability::ObservabilityArgs,
+}
+
+/// Installs TUI logging from the environment only (RUST_LOG, OTEL_LEVEL,
+/// NANOCODEX_LOG_FILE, NANOCODEX_LOG_FORMAT, OTEL_EXPORTER_OTLP_ENDPOINT), so
+/// managed command-line flags are unchanged. Without NANOCODEX_LOG_FILE the
+/// log goes to the per-launch TUI log file, never to the terminal.
+pub(crate) fn install_observability() -> Option<nanocodex_observability::ObservabilityGuard> {
+    use clap::Parser as _;
+    let parsed = EnvObservability::try_parse_from(["nanocodex"]).ok()?;
+    parsed.args.install(true).ok()
+}
+
 fn elapsed_ns(start: Instant, end: Instant) -> u64 {
     u64::try_from(end.saturating_duration_since(start).as_nanos()).unwrap_or(u64::MAX)
 }

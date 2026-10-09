@@ -2174,6 +2174,7 @@ async fn run_inner(
     let mut app = AppNode::new(Theme::default(), workspace.clone(), root);
     let mut reload: Option<crate::nanocodex2::reload::Registration> = None;
     let mut reload_requested = false;
+    let _observability = telemetry::install_observability(); // FEATURE-HOOK: wp3
     let mut terminal = TerminalSession::enter().await.map_err(terminal_error)?;
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
