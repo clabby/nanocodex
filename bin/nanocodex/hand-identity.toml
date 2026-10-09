@@ -11,9 +11,10 @@ exclude = [
     # The CLI executable root; nanocodex-hand is built from src/hand_main.rs.
     "bin/nanocodex/src/main.rs",
     "bin/nanocodex/src/nanocodex2/tui",
-    # Integration tests and documentation are not compiled into
+    # Integration tests, benchmarks and documentation are not compiled into
     # either executable.
     "bin/nanocodex/tests",
+    "bin/nanocodex/benches",
     "bin/nanocodex/README.md",
 ]
 

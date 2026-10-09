@@ -25,10 +25,13 @@ tempo = [
     "dep:nanocodex-egress",
     "dep:nanousd",
 ]
+# Criterion cases over the production shared TUI renderer (benches/nanocodex2_tui.rs).
+tui-bench = ["dep:criterion"]
 
 [dependencies]
 aes-gcm = "0.10.3"
 anyhow.workspace = true
+criterion = { workspace = true, optional = true }
 dark-light = "3.0.0"
 nanocodex-agent = { path = "../../crates/nanocodex-agent", version = "0.6.7", default-features = false }
 nanocodex-hand = { path = "../../crates/nanocodex-hand", version = "0.6.7" }
@@ -135,7 +138,6 @@ vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 [dev-dependencies]
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 axum = { workspace = true, features = ["ws"] }
-criterion.workspace = true
 hkdf = "0.12.4"
 nanocodex-oai-tools = { workspace = true, features = ["native"] }
 p256 = { version = "0.13.2", features = ["ecdh"] }
@@ -146,8 +148,8 @@ vt100.workspace = true
 
 [[bench]]
 name = "nanocodex2_tui"
-path = "src/nanocodex2/tui/bench.rs"
 harness = false
+required-features = ["tui-bench"]
 
 [[test]]
 name = "tui_split"
