@@ -313,115 +313,122 @@ text(JSON.stringify(results));`).toString("base64");
     states.large = await bulkTurn("BULK_LARGE " + "é漢🚀a".repeat(40_000));
     states.huge = await bulkTurn("BULK_HUGE " + "x🚀".repeat(1_000_000));
     states.tail = await bulkTurn("BULK_TAIL after the huge event");
+    // Verify once with every event in local SQLite storage (where stand-ins
+    // skip hydration), then again after sealing so pages cross the archive.
+    async function verifyBounded(stage, sealed) {
+      const truth = await truthHistory();
+      const truthCursors = truth.map(event => String(event.cursor));
+      const sizes = truth.map(event => ({ cursor: String(event.cursor), stored: storedBytes(event), json: bytesOf(event) }));
+      record({ kind: "ground_truth", stage, events: truth.length, sizes });
+      if (sealed) assert.ok(BigInt(sealed.end_cursor) > 0n && BigInt(sealed.end_cursor) < BigInt(truthCursors.at(-1)), "history spans archive and local storage");
+      assert.ok(sizes.some(size => size.stored > 8_192 && size.stored <= 8_448), "an event sits just above the stand-in threshold");
+      assert.ok(sizes.some(size => size.stored > 1_000_000 && size.stored <= 4 * 1024 * 1024), "a chunked readable event exists");
+      assert.ok(sizes.some(size => size.stored > 4 * 1024 * 1024), "an event exceeds the readable limit");
+      const toolResult = truth.filter(event => event.turn_id === toolTurn).sort((left, right) => storedBytes(right) - storedBytes(left))[0];
+      record({ kind: "huge_tool_result", cursor: toolResult?.cursor, stored: toolResult && storedBytes(toolResult), prefix: JSON.stringify(toolResult).slice(0, 300) });
+      assert.ok(toolResult && storedBytes(toolResult) > 60 * 1024 && toolResult.event?.type === "tool.result", "a huge tool result exists");
+
+      // Public HTTP: opt-in bounds keep pages small and every cursor present.
+      const httpPages = [], httpCursors = [];
+      for (let before; ;) {
+        const { raw, data } = await quiet("/v1/agents/" + bulk + "/events/history?limit=100&max_bytes=61440&max_event_bytes=8192" + (before ? "&before=" + before : ""));
+        httpPages.push({ response_bytes: bytesOf(raw), count: data.data.length, has_more: data.has_more,
+          stand_ins: data.data.filter(event => event.truncated === true && event.type === undefined).map(event => String(event.cursor)) });
+        httpCursors.unshift(...data.data.map(event => String(event.cursor)));
+        for (const event of data.data) {
+          const size = sizes.find(entry => entry.cursor === String(event.cursor));
+          if (size.stored > 8_192) assert.deepEqual([event.truncated, event.message_bytes, event.type], [true, size.stored, undefined]);
+          else assert.equal(JSON.stringify(event), JSON.stringify(truth.find(entry => String(entry.cursor) === size.cursor)));
+        }
+        assert.ok(bytesOf(raw) <= 61_440 + 100 * 256 + 512, "bounded HTTP page " + bytesOf(raw));
+        if (!data.has_more) break;
+        before = String(data.data[0].cursor);
+      }
+      assert.deepEqual(httpCursors, truthCursors, "bounded HTTP pages cover every cursor once");
+      await quiet("/v1/agents/" + bulk + "/events/history?max_bytes=1023", "GET", undefined, 400);
+      await quiet("/v1/agents/" + bulk + "/events/history?max_event_bytes=abc", "GET", undefined, 400);
+      record({ kind: "http_bounded_pages", stage, pages: httpPages });
+
+      // session_control: complete older and newer walks plus chunked reads.
+      const reads = sizes.filter(size => size.json > 8_192 || size.stored > 8_192).map(size => size.cursor);
+      const walkProgram = "SESSION_TOOL " + Buffer.from(`const SID = ${JSON.stringify(bulk)}, READ = ${JSON.stringify(reads)};
+  const utf8 = s => { let n = 0; for (const ch of s) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n; };
+  const fnv = s => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h; };
+  const summary = page => ({ count: page.count, bytes: page.bytes, data_bytes: utf8(JSON.stringify(page.data)), result_bytes: utf8(JSON.stringify(page)),
+    max_event_bytes: Math.max(0, ...page.data.map(event => utf8(JSON.stringify(event)))), cursors: page.data.map(event => event.cursor),
+    has_more: page.has_more, next_before: page.next_before, next_after: page.next_after, omitted: page.omitted_events ?? 0,
+    truncated: page.data.filter(event => event.truncated).map(event => ({ cursor: event.cursor, message_bytes: event.message_bytes ?? null,
+      original_bytes: event.original_bytes ?? null, readable: !/only this preview/.test(event.full_content) })) });
+  const older = [], newer = [], read = [];
+  for (let before, i = 0; i < 100; i++) {
+    const page = await tools.session_control({ operation: "events", session_id: SID, limit: 100, ...(before ? { before } : {}) });
+    older.push(summary(page)); if (page.next_before === null) break; before = page.next_before;
+  }
+  for (let after = "0", i = 0; i < 100; i++) {
+    const page = await tools.session_control({ operation: "events", session_id: SID, limit: 100, after });
+    newer.push(summary(page)); if (!page.has_more) break; after = page.next_after;
+  }
+  for (const cursor of READ) {
+    let offset = 0, text = "", calls = 0, sha, maxResult = 0;
+    for (;;) {
+      const chunk = await tools.session_control({ operation: "event", session_id: SID, cursor, ...(offset ? { offset } : {}) });
+      calls++; maxResult = Math.max(maxResult, utf8(JSON.stringify(chunk)));
+      if (!chunk.readable) { read.push({ cursor, readable: false, message_bytes: chunk.message_bytes, result_bytes: maxResult }); break; }
+      if (sha !== undefined && sha !== chunk.sha256) throw new Error("serialization changed between chunks");
+      sha = chunk.sha256; text += chunk.chunk;
+      if (chunk.complete) { read.push({ cursor, readable: true, calls, total_bytes: chunk.total_bytes, sha256: sha, length: text.length, fnv: fnv(text), max_result_bytes: maxResult }); break; }
+      offset = chunk.next_offset;
+    }
+  }
+  let badOffset; try { await tools.session_control({ operation: "event", session_id: SID, cursor: READ[0], offset: 999999999 }); } catch (error) { badOffset = String(error.message); }
+  text(JSON.stringify([{ label: "walk", ok: true, value: { older, newer, read, badOffset } }]));`).toString("base64");
+      const walk = results(await socketTurn(driver, walkProgram)).walk.value;
+      record({ kind: "bounded_walk", stage, walk });
+      const fnv = s => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h; };
+      for (const [direction, pages] of [["older", walk.older], ["newer", walk.newer]]) {
+        for (const page of pages) {
+          assert.ok(page.count <= 100 && page.count === page.cursors.length, direction + " count");
+          assert.equal(page.bytes, page.data_bytes, direction + " reported bytes are exact");
+          assert.ok(page.data_bytes <= 60 * 1024 && page.max_event_bytes <= 8 * 1024 && page.result_bytes <= 64 * 1024,
+            direction + " page bounds " + JSON.stringify({ ...page, cursors: page.cursors.length }));
+        }
+        const order = (direction === "older" ? pages.slice().reverse() : pages).flatMap(page => page.cursors.map(String));
+        assert.deepEqual(order, truthCursors, direction + " walk returns every cursor exactly once in order");
+      }
+      assert.equal(walk.older.at(-1).next_before, null);
+      const truncated = new Map(walk.older.flatMap(page => page.truncated).map(entry => [String(entry.cursor), entry]));
+      for (const size of sizes) {
+        const entry = truncated.get(size.cursor);
+        if (size.stored > 8_192) assert.equal(entry?.message_bytes, size.stored, "stand-in for " + size.cursor);
+        else if (size.json > 8_192) assert.equal(entry?.original_bytes, size.json, "tool stub for " + size.cursor);
+        else assert.equal(entry, undefined, "small event " + size.cursor + " is complete");
+      }
+      for (const entry of walk.read) {
+        const event = truth.find(candidate => String(candidate.cursor) === entry.cursor), size = sizes.find(candidate => candidate.cursor === entry.cursor);
+        if (size.stored > 4 * 1024 * 1024) {
+          assert.deepEqual([entry.readable, entry.message_bytes], [false, size.stored], "unreadable huge event is explicit");
+          assert.equal(truncated.get(entry.cursor).readable, false);
+          continue;
+        }
+        const serialized = JSON.stringify(event);
+        assert.deepEqual([entry.readable, entry.total_bytes, entry.sha256, entry.length, entry.fnv],
+          [true, bytesOf(serialized), createHash("sha256").update(serialized).digest("hex"), serialized.length, fnv(serialized)],
+          "complete content of " + entry.cursor);
+        assert.ok(entry.max_result_bytes <= 64 * 1024, "chunk result bound " + entry.max_result_bytes);
+      }
+      assert.match(walk.badOffset, /not a next_offset/);
+      const measurements = { truth_events: truth.length, stage, archived_through: sealed?.end_cursor ?? "0", latest: truthCursors.at(-1),
+        older_pages: walk.older.map(page => [page.count, page.bytes, page.result_bytes]), newer_pages: walk.newer.map(page => [page.count, page.bytes, page.result_bytes]),
+        http_pages: httpPages.map(page => [page.count, page.response_bytes]), reads: walk.read.map(entry => [entry.cursor, entry.readable, entry.total_bytes ?? entry.message_bytes, entry.calls ?? 1, entry.max_result_bytes ?? entry.result_bytes]) };
+      record({ kind: "bounded_measurements", ...measurements });
+      console.log(JSON.stringify({ bounded: measurements }));
+    }
+    await verifyBounded("local");
     const sealed = await (await backend.fetch("https://fixture.test/__archive", { method: "POST", body: JSON.stringify({ agent: bulk }) })).json();
     record({ kind: "archive_seal", bulk, states, calibration, sealed });
     assert.equal(sealed.sealed, true, JSON.stringify(sealed));
-    const truth = await truthHistory();
-    const truthCursors = truth.map(event => String(event.cursor));
-    const sizes = truth.map(event => ({ cursor: String(event.cursor), stored: storedBytes(event), json: bytesOf(event) }));
-    record({ kind: "ground_truth", events: truth.length, sizes });
-    assert.ok(BigInt(sealed.end_cursor) > 0n && BigInt(sealed.end_cursor) < BigInt(truthCursors.at(-1)), "history spans archive and local storage");
-    assert.ok(sizes.some(size => size.stored > 8_192 && size.stored <= 8_448), "an event sits just above the stand-in threshold");
-    assert.ok(sizes.some(size => size.stored > 1_000_000 && size.stored <= 4 * 1024 * 1024), "a chunked readable event exists");
-    assert.ok(sizes.some(size => size.stored > 4 * 1024 * 1024), "an event exceeds the readable limit");
-    const toolResult = truth.filter(event => event.turn_id === toolTurn).sort((left, right) => storedBytes(right) - storedBytes(left))[0];
-    record({ kind: "huge_tool_result", cursor: toolResult?.cursor, stored: toolResult && storedBytes(toolResult), prefix: JSON.stringify(toolResult).slice(0, 300) });
-    assert.ok(toolResult && storedBytes(toolResult) > 60 * 1024 && toolResult.event?.type === "tool.result", "a huge tool result exists");
-
-    // Public HTTP: opt-in bounds keep pages small and every cursor present.
-    const httpPages = [], httpCursors = [];
-    for (let before; ;) {
-      const { raw, data } = await quiet("/v1/agents/" + bulk + "/events/history?limit=100&max_bytes=61440&max_event_bytes=8192" + (before ? "&before=" + before : ""));
-      httpPages.push({ response_bytes: bytesOf(raw), count: data.data.length, has_more: data.has_more,
-        stand_ins: data.data.filter(event => event.truncated === true && event.type === undefined).map(event => String(event.cursor)) });
-      httpCursors.unshift(...data.data.map(event => String(event.cursor)));
-      for (const event of data.data) {
-        const size = sizes.find(entry => entry.cursor === String(event.cursor));
-        if (size.stored > 8_192) assert.deepEqual([event.truncated, event.message_bytes, event.type], [true, size.stored, undefined]);
-        else assert.equal(JSON.stringify(event), JSON.stringify(truth.find(entry => String(entry.cursor) === size.cursor)));
-      }
-      assert.ok(bytesOf(raw) <= 61_440 + 100 * 256 + 512, "bounded HTTP page " + bytesOf(raw));
-      if (!data.has_more) break;
-      before = String(data.data[0].cursor);
-    }
-    assert.deepEqual(httpCursors, truthCursors, "bounded HTTP pages cover every cursor once");
-    await quiet("/v1/agents/" + bulk + "/events/history?max_bytes=1023", "GET", undefined, 400);
-    await quiet("/v1/agents/" + bulk + "/events/history?max_event_bytes=abc", "GET", undefined, 400);
-    record({ kind: "http_bounded_pages", pages: httpPages });
-
-    // session_control: complete older and newer walks plus chunked reads.
-    const reads = sizes.filter(size => size.json > 8_192 || size.stored > 8_192).map(size => size.cursor);
-    const walkProgram = "SESSION_TOOL " + Buffer.from(`const SID = ${JSON.stringify(bulk)}, READ = ${JSON.stringify(reads)};
-const utf8 = s => { let n = 0; for (const ch of s) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n; };
-const fnv = s => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h; };
-const summary = page => ({ count: page.count, bytes: page.bytes, data_bytes: utf8(JSON.stringify(page.data)), result_bytes: utf8(JSON.stringify(page)),
-  max_event_bytes: Math.max(0, ...page.data.map(event => utf8(JSON.stringify(event)))), cursors: page.data.map(event => event.cursor),
-  has_more: page.has_more, next_before: page.next_before, next_after: page.next_after, omitted: page.omitted_events ?? 0,
-  truncated: page.data.filter(event => event.truncated).map(event => ({ cursor: event.cursor, message_bytes: event.message_bytes ?? null,
-    original_bytes: event.original_bytes ?? null, readable: !/only this preview/.test(event.full_content) })) });
-const older = [], newer = [], read = [];
-for (let before, i = 0; i < 100; i++) {
-  const page = await tools.session_control({ operation: "events", session_id: SID, limit: 100, ...(before ? { before } : {}) });
-  older.push(summary(page)); if (page.next_before === null) break; before = page.next_before;
-}
-for (let after = "0", i = 0; i < 100; i++) {
-  const page = await tools.session_control({ operation: "events", session_id: SID, limit: 100, after });
-  newer.push(summary(page)); if (!page.has_more) break; after = page.next_after;
-}
-for (const cursor of READ) {
-  let offset = 0, text = "", calls = 0, sha, maxResult = 0;
-  for (;;) {
-    const chunk = await tools.session_control({ operation: "event", session_id: SID, cursor, ...(offset ? { offset } : {}) });
-    calls++; maxResult = Math.max(maxResult, utf8(JSON.stringify(chunk)));
-    if (!chunk.readable) { read.push({ cursor, readable: false, message_bytes: chunk.message_bytes, result_bytes: maxResult }); break; }
-    if (sha !== undefined && sha !== chunk.sha256) throw new Error("serialization changed between chunks");
-    sha = chunk.sha256; text += chunk.chunk;
-    if (chunk.complete) { read.push({ cursor, readable: true, calls, total_bytes: chunk.total_bytes, sha256: sha, length: text.length, fnv: fnv(text), max_result_bytes: maxResult }); break; }
-    offset = chunk.next_offset;
-  }
-}
-let badOffset; try { await tools.session_control({ operation: "event", session_id: SID, cursor: READ[0], offset: 999999999 }); } catch (error) { badOffset = String(error.message); }
-text(JSON.stringify([{ label: "walk", ok: true, value: { older, newer, read, badOffset } }]));`).toString("base64");
-    const walk = results(await socketTurn(driver, walkProgram)).walk.value;
-    record({ kind: "bounded_walk", walk });
-    const fnv = s => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h; };
-    for (const [direction, pages] of [["older", walk.older], ["newer", walk.newer]]) {
-      for (const page of pages) {
-        assert.ok(page.count <= 100 && page.count === page.cursors.length, direction + " count");
-        assert.equal(page.bytes, page.data_bytes, direction + " reported bytes are exact");
-        assert.ok(page.data_bytes <= 60 * 1024 && page.max_event_bytes <= 8 * 1024 && page.result_bytes <= 64 * 1024,
-          direction + " page bounds " + JSON.stringify({ ...page, cursors: page.cursors.length }));
-      }
-      const order = (direction === "older" ? pages.slice().reverse() : pages).flatMap(page => page.cursors.map(String));
-      assert.deepEqual(order, truthCursors, direction + " walk returns every cursor exactly once in order");
-    }
-    assert.equal(walk.older.at(-1).next_before, null);
-    const truncated = new Map(walk.older.flatMap(page => page.truncated).map(entry => [String(entry.cursor), entry]));
-    for (const size of sizes) {
-      const entry = truncated.get(size.cursor);
-      if (size.stored > 8_192) assert.equal(entry?.message_bytes, size.stored, "stand-in for " + size.cursor);
-      else if (size.json > 8_192) assert.equal(entry?.original_bytes, size.json, "tool stub for " + size.cursor);
-      else assert.equal(entry, undefined, "small event " + size.cursor + " is complete");
-    }
-    for (const entry of walk.read) {
-      const event = truth.find(candidate => String(candidate.cursor) === entry.cursor), size = sizes.find(candidate => candidate.cursor === entry.cursor);
-      if (size.stored > 4 * 1024 * 1024) {
-        assert.deepEqual([entry.readable, entry.message_bytes], [false, size.stored], "unreadable huge event is explicit");
-        assert.equal(truncated.get(entry.cursor).readable, false);
-        continue;
-      }
-      const serialized = JSON.stringify(event);
-      assert.deepEqual([entry.readable, entry.total_bytes, entry.sha256, entry.length, entry.fnv],
-        [true, bytesOf(serialized), createHash("sha256").update(serialized).digest("hex"), serialized.length, fnv(serialized)],
-        "complete content of " + entry.cursor);
-      assert.ok(entry.max_result_bytes <= 64 * 1024, "chunk result bound " + entry.max_result_bytes);
-    }
-    assert.match(walk.badOffset, /not a next_offset/);
-    const measurements = { truth_events: truth.length, archived_through: sealed.end_cursor, latest: truthCursors.at(-1),
-      older_pages: walk.older.map(page => [page.count, page.bytes, page.result_bytes]), newer_pages: walk.newer.map(page => [page.count, page.bytes, page.result_bytes]),
-      http_pages: httpPages.map(page => [page.count, page.response_bytes]), reads: walk.read.map(entry => [entry.cursor, entry.readable, entry.total_bytes ?? entry.message_bytes, entry.calls ?? 1, entry.max_result_bytes ?? entry.result_bytes]) };
-    record({ kind: "bounded_measurements", ...measurements });
-    console.log(JSON.stringify({ bounded: measurements }));
+    assert.equal(sealed.start_cursor, "1", "the first verification read only local storage");
+    await verifyBounded("archived", sealed);
 
     record({ kind: "summary", driver, target, foreign, admitted_turns: [first, slow], steer_message: message, denied_turn: denied });
     console.log(JSON.stringify({ evidence, driver, target, admitted: [first, slow], steered: message }));
