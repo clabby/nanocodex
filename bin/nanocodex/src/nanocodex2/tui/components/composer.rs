@@ -947,6 +947,28 @@ impl Composer {
         self.auto_routing
     }
 
+    /// Local harness models without an effort setting (Claude Haiku 4.5)
+    /// send no thinking, so the border shows no effort for them.
+    fn model_has_effort(&self) -> bool {
+        use nanocodex::Thinking;
+        !self.capabilities.local
+            || self
+                .model()
+                .as_str()
+                .parse::<nanocodex::HarnessModel>()
+                .map_or(true, |model| {
+                    [
+                        Thinking::Low,
+                        Thinking::Medium,
+                        Thinking::High,
+                        Thinking::Xhigh,
+                        Thinking::Max,
+                    ]
+                    .into_iter()
+                    .any(|thinking| model.supports_thinking(thinking))
+                })
+    }
+
     fn model_label(&self) -> String {
         let Some(model) = self.routed_model else {
             return if self.auto_routing {
@@ -1833,12 +1855,14 @@ impl Composer {
             .front()
             .map(|timer| format!(" {} ", timer.label()))
             .unwrap_or_default();
-        let effort =
-            if self.shared_access.is_some() || self.auto_routing && self.routed_effort.is_none() {
-                String::new()
-            } else {
-                format!(" {} ", self.effort().as_str())
-            };
+        let effort = if self.shared_access.is_some()
+            || self.auto_routing && self.routed_effort.is_none()
+            || !self.model_has_effort()
+        {
+            String::new()
+        } else {
+            format!(" {} ", self.effort().as_str())
+        };
         let fast_mode =
             (self.shared_access.is_none() && !self.auto_routing && self.fast_mode).then_some("⚡ ");
         let pro_mode = (self.shared_access.is_none()

@@ -3078,8 +3078,18 @@ impl RootNode {
 
     fn apply_model(&mut self, model: Model) -> ComponentUpdate<RootEffect> {
         if !self.model_catalog.iter().any(|entry| entry.id == model) {
+            // Local Claude models are listed only once Claude is signed in.
+            let local_claude = self.capabilities.local
+                && model
+                    .as_str()
+                    .parse::<nanocodex::HarnessModel>()
+                    .is_ok_and(|native| native.family() == nanocodex::HarnessFamily::Claude);
             self.notification = Some(Notification::plain(
-                "Model is not available in the account catalog".into(),
+                if local_claude {
+                    "Claude is not signed in; run `nanocodex --claude auth login`".into()
+                } else {
+                    "Model is not available in the account catalog".into()
+                },
                 Color::Red,
             ));
             return ComponentUpdate::render(RenderRequest::Immediate);
@@ -3094,7 +3104,11 @@ impl RootNode {
         if model == self.composer.component().model() && !self.composer.component().auto_routing() {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        self.interactive = false;
+        // A local harness switch holds typed prompts in the driver until the
+        // selected harness is adopted, so its composer stays usable meanwhile.
+        if !self.capabilities.local {
+            self.interactive = false;
+        }
         let _ = self
             .composer
             .component_mut()

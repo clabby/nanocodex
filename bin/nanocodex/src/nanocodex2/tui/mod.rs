@@ -584,6 +584,10 @@ struct DriverRuntime {
     feature_completions: HashMap<TurnId, Vec<tokio::sync::oneshot::Sender<bool>>>,
     feature_turns: HashSet<TurnId>,
     local_voice_status: Option<crate::nanocodex2::voice_state::Status>,
+    /// A harness relaunch is queued or connecting; prompts wait for it.
+    harness_relaunching: bool,
+    /// The newest harness launch waiting for the connection slot.
+    queued_relaunch: Option<Box<local::agent::LocalLaunch>>,
     agent: Option<Nanocodex>,
     startup_attach: bool,
     pending_resume: Option<(tokio::task::AbortHandle, PaneId)>,
@@ -1607,7 +1611,7 @@ impl DriverRuntime {
     }
 
     fn start_submission(&mut self, pane: PaneId, id: TurnId, prompt: Submission) {
-        if self.recovery.is_some() {
+        if self.recovery.is_some() || self.harness_relaunching {
             self.pending_submission = Some((pane, id, prompt));
             return;
         }
@@ -1821,6 +1825,21 @@ impl DriverRuntime {
             };
             (pane, agent_id, mutation, result)
         });
+    }
+
+    /// Starts the queued harness relaunch once no connection is in flight.
+    fn start_queued_relaunch(&mut self) -> Option<String> {
+        if !self.connection.is_empty() {
+            return None;
+        }
+        let launch = self.queued_relaunch.take()?;
+        match self.local_switch(ConnectionPurpose::Startup, *launch) {
+            Ok(_) => None,
+            Err(error) => {
+                self.harness_relaunching = false;
+                Some(error)
+            }
+        }
     }
 
     fn spawn_connection(&mut self, purpose: ConnectionPurpose, target: RetryTarget) {
@@ -2379,6 +2398,8 @@ async fn run_inner(
         feature_completions: HashMap::new(),
         feature_turns: HashSet::new(),
         local_voice_status: None,
+        harness_relaunching: false,
+        queued_relaunch: None,
         pending_voice: None,
         voice_selection: Default::default(),
         voice_tasks: JoinSet::new(),
@@ -2598,6 +2619,15 @@ async fn run_inner(
     routing_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while !stopping {
+        if let Some(error) = runtime.start_queued_relaunch() {
+            request_render(
+                app.update(AppEvent::NotifyError {
+                    pane: PaneId::Main,
+                    error,
+                }),
+                &mut scheduler,
+            );
+        }
         runtime.update_tree_history(
             app.root(PaneId::Main)
                 .is_some_and(RootNode::subagent_overlay_open),
@@ -3514,6 +3544,9 @@ async fn run_inner(
                                     root.set_capabilities(local.capabilities());
                                 }
                             }
+                            if runtime.queued_relaunch.is_none() {
+                                runtime.harness_relaunching = false;
+                            }
                             if matches!(purpose, ConnectionPurpose::Bug(_)) {
                                 runtime.detach_bug_source();
                             }
@@ -3695,6 +3728,12 @@ async fn run_inner(
                             runtime.start_history_prefetch(pane);
                         }
                         ConnectionResult::Agent { purpose, result: Err(failure) } => {
+                            // A failed relaunch keeps the running agent; a newer
+                            // queued selection still holds its prompts.
+                            let relaunch_queued = runtime.queued_relaunch.is_some();
+                            if !relaunch_queued {
+                                runtime.harness_relaunching = false;
+                            }
                             runtime.pending_voice = None;
                             request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
                             let message = format!("Could not connect to the managed agent: {}", failure.error);
@@ -3749,6 +3788,7 @@ async fn run_inner(
                                 .await?;
                             }
                             if matches!(purpose, ConnectionPurpose::Startup)
+                                && !relaunch_queued
                                 && let Some((pane, id, _)) = runtime.pending_submission.take()
                             {
                                 let record = runtime.local_record(LocalEvent::WorkerTurnFinished {
@@ -4534,8 +4574,15 @@ async fn apply_feature_update(
                 return Ok(false);
             };
             let _ = local;
-            // The current launch stays until the rebuilt agent connects (adopt).
-            if let Err(error) = runtime.local_switch(ConnectionPurpose::Startup, *launch) {
+            // Prompts typed now belong to the selected harness: hold them until
+            // its agent is adopted. Relaunches run one at a time behind any
+            // connection in flight (they share the local build slot), and the
+            // newest selection replaces an older queued one. The current
+            // launch stays until the rebuilt agent connects (adopt), so a
+            // failed relaunch keeps the running agent.
+            runtime.harness_relaunching = true;
+            runtime.queued_relaunch = Some(launch);
+            if let Some(error) = runtime.start_queued_relaunch() {
                 request_render(
                     app.update(AppEvent::NotifyError {
                         pane: PaneId::Main,
@@ -6641,6 +6688,8 @@ mod tests {
             feature_completions: HashMap::new(),
             feature_turns: HashSet::new(),
             local_voice_status: None,
+            harness_relaunching: false,
+            queued_relaunch: None,
             agent: None,
             startup_attach: false,
             pending_resume: None,
