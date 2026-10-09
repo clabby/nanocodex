@@ -2293,6 +2293,10 @@ impl RootNode {
                 )) => {}
                 Some(ActionsEffect::Submit(command))
                     if command.split_whitespace().next() == Some("/copy") => {}
+                // FEATURE-HOOK: wp2 the side thread collapses or splits from its own pane.
+                Some(ActionsEffect::Trigger(Action::LocalCommand("collapse" | "split"))) => {}
+                Some(ActionsEffect::Submit(command))
+                    if matches!(command.split_whitespace().next(), Some("/collapse" | "/split")) => {}
                 Some(_) => {
                     self.overlay = None;
                     self.notification = Some(Notification::plain("Use /btw for questions and /close to leave; other controls belong to the main thread".into(), Color::Yellow));
