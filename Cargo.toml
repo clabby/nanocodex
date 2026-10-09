@@ -226,6 +226,12 @@ split-debuginfo = "unpacked"
 [profile.dev.package."*"]
 debug = false
 
+# Hashing debug executables must not run each SHA intrinsic through unoptimized
+# SIMD wrappers. Optimize the small hashing dependency; workspace code stays
+# unoptimized with normal incremental compilation and useful backtraces.
+[profile.dev.package."sha2:0.11.0"]
+opt-level = 3
+
 # Display math runs during interactive debug builds. Keep the small native
 # parser/layout/raster stack optimized so a cold formula is ready in one frame.
 [profile.dev.package.ratatex]
