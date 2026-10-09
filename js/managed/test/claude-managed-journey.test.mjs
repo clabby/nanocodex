@@ -299,7 +299,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       assert.deepEqual(wireNames,['_exec','_wait']);
       const catalog=body.tools.find(tool=>tool.name.replace(/^_/,'')==='exec').description;
       const admits=name=>catalog.includes('"name":"'+name+'"');
-      for(const legacy of ['Task','TaskOutput','TaskStop'])assert.equal(admits(legacy),false,'legacy delegation is absent');
+      for(const legacy of ['Task','TaskOutput','TaskStop','Bash','BashOutput'])assert.equal(admits(legacy),false,'legacy capabilities are absent');
       upstream.push({wire,request:calls,model:body.model,tool_names:names,wire_tool_names:wireNames,message_count:body.messages.length,
         tool_uses:body.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='tool_use').map(block=>block.name):[]),
         tool_result_count:body.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='tool_result'):[]).length,
@@ -333,6 +333,27 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       const disabledChild = encodedHistory.includes('Try disabled canonical child');
       const code = source => sse({type:'tool_use',id:`exec-${calls}`,name:'exec',input:{code:source}},'tool_use',`message-${calls}`);
       const use = (name, input) => code(nestedCode(name,input));
+      if (encodedHistory.includes('CANONICAL_COMMAND_PROBE')) {
+        assert.ok(admits('exec_command') && admits('write_stdin'));
+        if (!result) return code(`
+          const result = await tools.exec_command({cmd:"printf CANONICAL_COMMAND_OK",yield_time_ms:1000,max_output_tokens:1000});
+          if (result.exit_code !== 0 || result.output !== "CANONICAL_COMMAND_OK") throw new Error(JSON.stringify(result));
+          let stale = false, staleReceipt;
+          try { staleReceipt = await tools.write_stdin({session_id:987654321,chars:"",yield_time_ms:1000,max_output_tokens:1000}); stale = /unknown or stale/.test(JSON.stringify(staleReceipt)); }
+          catch (error) { staleReceipt = String(error); stale = /unknown or stale/.test(staleReceipt); }
+          if (!stale) throw new Error("unexpected stale receipt: " + JSON.stringify(staleReceipt));
+          for (const name of ["Bash", "BashOutput"]) {
+            let unavailable = false;
+            try { await tools[name]({command:"printf MUST_NOT_RUN"}); }
+            catch (error) { unavailable = /TOOL_NOT_AVAILABLE|not a function|not available|unavailable|unknown tool/.test(String(error)); }
+            if (!unavailable) throw new Error(name + " remains callable");
+          }
+          text("CANONICAL_COMMAND_RECEIPT");
+        `);
+        assert.equal(result.is_error ?? false, false, JSON.stringify(result));
+        assert.match(JSON.stringify(result.content), /CANONICAL_COMMAND_RECEIPT/);
+        return sse({type:'text',text:'CLAUDE_TOOL_DONE_CANONICAL_COMMAND'},'end_turn',`message-${calls}`);
+      }
       if (hostedJourney && encodedHistory.includes(hostedJourney.marker)
         && (body.model===hostedJourney.rootModel || (hostedJourney.childHarness==='claude' && body.model===hostedJourney.childModel))) {
         if (hostedJourney.childHarness==='claude' && body.model===hostedJourney.childModel && body.model!==hostedJourney.rootModel) {
@@ -477,13 +498,13 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
           controller.enqueue(new TextEncoder().encode(`event: message_start\ndata: ${JSON.stringify({type:'message_start',message:{id:'cancel-fixture',role:'assistant',model:body.model,content:[],usage:{input_tokens:10,output_tokens:0}}})}\n\n`));
         } }),{headers:{'content-type':'text/event-stream'}});
       }
-      assert.ok(admits('Bash'));assert.ok(admits('Write'));assert.ok(admits('Read'));
+      assert.ok(admits('exec_command'));assert.ok(admits('Write'));assert.ok(admits('Read'));
       if(prompt.includes('Write durable proof')){writes++;return use('Write',{file_path:'/brain/proof.txt',content:'NATIVE_CLAUDE_DURABLE_PROOF'});}
       if(prompt.includes('Read durable proof')){
         assert.ok(JSON.stringify(body.messages).includes(summaries?'NATIVE_SUMMARY':'NATIVE_CLAUDE_DURABLE_PROOF'),'prior native history/summary persisted');
         return use('Read',{file_path:'/brain/proof.txt'});
       }
-      return use('Bash',{command:prompt.includes('Check denied file')?'test ! -e /brain/denied.txt && echo NO_UNAUTHORIZED_FILE':'cat /brain/proof.txt',workdir:'/brain'});
+      return use('exec_command',{cmd:prompt.includes('Check denied file')?'test ! -e /brain/denied.txt && echo NO_UNAUTHORIZED_FILE':'cat /brain/proof.txt',workdir:'/brain',yield_time_ms:1000,max_output_tokens:1000});
     }
     const response = await claudeProvider(request); if(response)return response;
     return new Response('Unexpected external fixture request '+url.origin+url.pathname,{status:502});
@@ -678,7 +699,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     assert.equal((await call('/v1/agents')).summaries[agent].presentation.done,false);
     await turn(agent,'Read durable proof','journey-read');
     await mf.dispose(); mf=new Miniflare(options);
-    await turn(agent,'Run Bash durable proof','journey-bash');
+    await turn(agent,'Run exec_command durable proof','journey-exec-command');
     {
       // Attachments: images and inline PDFs reach Claude as native blocks.
       const media=(await call('/v1/agents','POST',{settings:{model:'claude-opus-4-6',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201)).agent_id;
@@ -754,7 +775,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       assert.doesNotMatch(afterVoice,/Realtime conversation started/,'queued context is consumed exactly once');
       trace.push({claude_media_voice:{blocks:sent.map(block=>block.type),voice_route:delegated.route,stopped:stopped.stopped}});
     }
-    const history=await call(`/v1/agents/${agent}/events/history?after=0&limit=256`);assert.match(JSON.stringify(history),/Write|Read|Bash/);
+    const history=await call(`/v1/agents/${agent}/events/history?after=0&limit=256`);assert.match(JSON.stringify(history),/Write|Read|exec_command/);
     await call(`/v1/agents/${agent}/durability`,'POST',undefined,409);
     await call(`/v1/agents/${agent}/forks`,'POST',undefined,409,{'idempotency-key':'claude-fork-denial'});
     // Script the external model for the requested operation, without coupling
@@ -766,6 +787,14 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     await mf.dispose(); mf=new Miniflare(options);
     await turn(agent,'Read durable proof after summary','journey-after-summary');
     assert.equal(writes,1,'compaction/reopen never repeats prior effect');
+    const commandsOnly=(await call('/v1/agents','POST',{configuration:{tools:['exec_command','write_stdin']}},201)).agent_id;
+    await turn(commandsOnly,'CANONICAL_COMMAND_PROBE','journey-canonical-command');
+    for (const name of ['Bash','BashOutput']) {
+      const legacy=(await call('/v1/agents','POST',{configuration:{tools:[name]}},201)).agent_id;
+      const beforeLegacy=calls;
+      assert.match(JSON.stringify(await turn(legacy,'Legacy shell must fail before inference','journey-removed-'+name,'failed')),/configuration names an unavailable tool/);
+      assert.equal(calls,beforeLegacy);
+    }
     const noTools=(await call('/v1/agents','POST',{configuration:{tools:[]}},201)).agent_id;
     await turn(noTools,'Try forbidden Write','journey-no-tools');
     await turn(agent,'Check denied file','journey-denied-file');
@@ -824,7 +853,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     assert.equal((await call(`/v1/agents/${agent}/turns/journey-cancel`)).state,'cancelled');
     await call(`/v1/agents/${canonical}/turns`,'POST',{input:'Delegate canonical Claude child',id:'journey-canonical-child'},200);
     assert.equal(canonicalWrites,1,'completed canonical child not replayed after restart');
-    await turn(agent,'Run Bash durable proof after cancellation','journey-after-cancel');assert.equal(holds,1,'cancelled request not replayed');
+    await turn(agent,'Run exec_command durable proof after cancellation','journey-after-cancel');assert.equal(holds,1,'cancelled request not replayed');
 
     {
       // HTTP + GPT Realtime delegation both steer one active Rust/WASM Claude turn.
@@ -929,7 +958,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     await call('/__fixture/openai','POST',undefined,204);catalogOutage=true;
     const mixed=await call('/v1/models');assert.equal(mixed.partial,true);assert.equal(mixed.availability.claude.error,'claude_models_unavailable');
     assert.deepEqual(mixed.data.map(model=>model.id),['gpt-6-astra','gpt-6.1-sol','gpt-6-luna']);
-    await turn(agent,'Run Bash durable proof in mixed account','journey-mixed-provider-pin');assert.equal(responsesAttempts,0,'Claude inference/sidebar cannot borrow OAI credential');
+    await turn(agent,'Run exec_command durable proof in mixed account','journey-mixed-provider-pin');assert.equal(responsesAttempts,0,'Claude inference/sidebar cannot borrow OAI credential');
     const beforeGptMcp=mcpStarts();
     const gptMcp=(await call('/v1/agents','POST',{settings:{model:'gpt-6.1-sol',thinking:'low',reasoning_mode:'standard',fast_mode:false}},201)).agent_id;
     await turn(gptMcp,'GPT_MCP_DISCOVERY_PROBE','journey-gpt-mcp');
@@ -1032,7 +1061,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     assert.ok((await call('/v1/models')).data.some(row=>row.id==='claude-sonnet-4-6'));
     const validationTrace=await (await claudeProvider(new Request('https://claude-fixture.invalid/trace?scenario=profile-uncertain'))).json();assert.equal(validationTrace.exchange,1);assert.equal(validationTrace.profile,2);
     assert.deepEqual(providerErrors,[],"all provider fixtures matched the real public journeys");
-    console.info('CLAUDE_MANAGED_JOURNEY',{calls,summaries,writes,canonicalWrites,codexWrites,nestedWrites,sidebarCalls,holds,responsesAttempts,DOReopens:5,framingRequests,activeSteerRequests:activeSteerRequests.length,modelTools:['exec','wait'],nestedTools:['Write','Read','Bash'],actualModels:catalog.data.map(m=>m.id),staleSelectionDenied:true,gatewayOnlyDefault:gatewayOnly.default_model,unsupportedOnlyAvailable:unsupportedOnly.availability.claude.available,exactToolAllowlist:true});
+    console.info('CLAUDE_MANAGED_JOURNEY',{calls,summaries,writes,canonicalWrites,codexWrites,nestedWrites,sidebarCalls,holds,responsesAttempts,DOReopens:5,framingRequests,activeSteerRequests:activeSteerRequests.length,modelTools:['exec','wait'],nestedTools:['Write','Read','exec_command','write_stdin'],actualModels:catalog.data.map(m=>m.id),staleSelectionDenied:true,gatewayOnlyDefault:gatewayOnly.default_model,unsupportedOnlyAvailable:unsupportedOnly.availability.claude.available,exactToolAllowlist:true});
   } finally {
     releaseActiveSteer?.();
     releaseHostedChild?.();

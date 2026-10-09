@@ -11372,7 +11372,7 @@ export class DurableAgentSession extends DurableComputerObject {
       const removedClaudeTask = isClaude && configuredNames?.find(name => ["Task", "TaskOutput", "TaskStop"].includes(name));
       if (removedClaudeTask) throw new Error(`Claude agent capability ${removedClaudeTask} was removed; use the canonical subagent tools instead`);
       const configuredTools = configuredNames === undefined ? selectedTools : selectedTools.filter(tool => configuredNames.includes(tool.name));
-      if (configuredNames?.some(name => !selectedTools.some(tool => tool.name === name) && !(isClaude && ["Bash", "BashOutput", "Read", "Write", "Edit", "ToolSearch", "ToolExecute", "MCPToolSearch", "MCPExecute"].includes(name)))) throw new Error("configuration names an unavailable tool");
+      if (configuredNames?.some(name => !selectedTools.some(tool => tool.name === name) && !(isClaude && ["Read", "Write", "Edit", "ToolSearch", "ToolExecute", "MCPToolSearch", "MCPExecute"].includes(name)))) throw new Error("configuration names an unavailable tool");
       preparedTools = multiplayer || isClaude
         ? undefined
         : await createDefaultManagedTools(
@@ -11455,7 +11455,7 @@ export class DurableAgentSession extends DurableComputerObject {
         && this.env.NANOCODEX_SESSION_MODEL_EGRESS !== undefined && this.#credentialBinding?.strategy === "session_v1";
       if (isClaude || alternateClaude) {
         claudeTools = await createManagedClaudeTools({ filesystem: computer.filesystem, prepareFilesystem: ensureEnvironmentReady,
-          bash: namespaceRuntime?.tools.find(tool => tool.name === "exec_command") ?? brainTool, poll: namespaceRuntime?.tools.find(tool => tool.name === "write_stdin"), tools: configuredTools, allowedNames: configuredNames, providers: hostedProviders, mcp: !accountToolsEnabled(configuration) ? {} : managedMcp,
+          execCommand: namespaceRuntime?.tools.find(tool => tool.name === "exec_command") ?? brainTool, writeStdin: namespaceRuntime?.tools.find(tool => tool.name === "write_stdin"), tools: configuredTools, allowedNames: configuredNames, providers: hostedProviders, mcp: !accountToolsEnabled(configuration) ? {} : managedMcp,
           loadServers: accountToolsEnabled(configuration) ? loadAccountMcpServers : undefined,
           authorize: authorizeClaude });
       }
@@ -11465,8 +11465,8 @@ export class DurableAgentSession extends DurableComputerObject {
       }
       const claudeInstructions = [
             "You are the durable Nanocodex assistant running the native Claude Messages backend on Cloudflare Workers. Run tool actions through Code Mode exec using tools.*; use wait to observe yielded cells.",
-            "Use only the capabilities actually declared for this session. tools.Bash({command, workdir}) executes a shell command. tools.Read({file_path}), tools.Write({file_path, content}), and tools.Edit({file_path, old_string, new_string}) operate on /brain files. BashOutput polls an exact retained native shell session, if available. No process sandbox starts attached.",
-            computer.instructions.replaceAll("exec_command", "Bash").replaceAll("write_stdin", "BashOutput"),
+            "Use only the capabilities actually declared for this session. tools.exec_command({cmd, workdir}) executes a shell command. tools.Read({file_path}), tools.Write({file_path, content}), and tools.Edit({file_path, old_string, new_string}) operate on /brain files. tools.write_stdin({session_id, chars, yield_time_ms}) polls an exact retained native shell session, if available. No process sandbox starts attached.",
+            computer.instructions,
             "Use durable /brain for file work first. Native commands, package installation, builds, tests and servers require a suitable Hand: follow the placement and recovery order below before mounting cf_sandbox. A Hand's logical root already maps to its workspace: never append the host absolute workspace to workdir. Polls remain pinned to the original Hand. Never claim a build, installation, booking or payment succeeded merely because it started.",
             HAND_EXECUTION_INSTRUCTIONS,
             HEADED_CUA_INSTRUCTIONS,

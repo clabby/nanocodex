@@ -83,7 +83,8 @@ exclusive fields on `Agent.create`.
 ### Explicit Claude runtime
 
 `Claude.create` is an additive Messages backend with explicit host-owned auth
-and a Claude-only tool array, using the existing durability store contract.
+and an explicit host tool array, using the existing durability store contract.
+Host tools can share the `exec_command` and `write_stdin` contracts with Codex.
 It does not silently switch managed providers, install Codex tools, or supply
 a subscription sign-in screen. Managed account connection is documented in the
 [managed Claude guide](../../docs/CLAUDE_MANAGED.md). See the [Claude JavaScript guide](../../docs/CLAUDE_JAVASCRIPT.md)
