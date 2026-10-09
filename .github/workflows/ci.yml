@@ -150,13 +150,19 @@ jobs:
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true'
         # The ci profile serializes and retries these host IPC tests.
-        run: cargo nextest run --locked --profile ci -p nanocodex-bin --lib -E 'test(/^nanocodex2::/) & test(hand)'
+        # Hand modules live in the Hand daemon and shared executable packages.
+        run: >-
+          cargo nextest run --locked --profile ci
+          -p nanocodex-bin -p nanocodex-bin-shared -p nanocodex-hand-daemon --lib
+          -E '(package(nanocodex-bin) & test(/^nanocodex2::/) & test(hand))
+          | ((package(nanocodex-bin-shared) | package(nanocodex-hand-daemon)) & test(hand))'
       - name: Build the CLI and Hand journey executables
         # Journeys that start the Hand by its installed nanocodex2 name get the
         # nanocodex-hand binary there; it forwards CLI commands to nanocodex.
         shell: bash
         run: |
-          cargo build --locked -p nanocodex-bin --bins
+          # The default workspace members are the CLI and the Hand daemon.
+          cargo build --locked --bins
           cp target/debug/nanocodex-hand target/debug/nanocodex2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -309,18 +315,22 @@ jobs:
         shell: pwsh
         env:
           NANOCODEX_COMPUTER: "off"
-        run: cargo nextest run --locked --profile ci --package nanocodex-bin --lib -E 'test(/^nanocodex2::/)'
+        run: >-
+          cargo nextest run --locked --profile ci
+          --package nanocodex-bin --package nanocodex-bin-shared --package nanocodex-hand-daemon --lib
+          -E '(package(nanocodex-bin) & test(/^nanocodex2::/)) | package(nanocodex-bin-shared) | package(nanocodex-hand-daemon)'
       - name: Build the native controller and account Hand
         shell: pwsh
         env:
           NANOCODEX_COMPUTER: "off"
         run: |
-          cargo build --locked --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo
+          cargo build --locked --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test native Windows Hand task policy
         shell: pwsh
         run: >-
-          cargo nextest run --locked --profile ci --package nanocodex-bin --lib
+          cargo nextest run --locked --profile ci
+          --package nanocodex-bin --package nanocodex-bin-shared --package nanocodex-hand-daemon --lib
           -E 'test(windows_hand) | test(update::automatic::tests::windows_schedule)'
       - name: Run real CLI/app sharing against a local account server
         # Temporarily disabled: CI tests are paused.

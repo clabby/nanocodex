@@ -38,6 +38,7 @@ function workspace(t) {
   crate("crates/vm", "nanocodex-vm", { "nanocodex-oai-api": "../oai-api", "nanocodex-oai-tools": "../nanocodex-oai-tools" });
   crate("crates/phone", "nanocodex-phone");
   crate("bin/nanocodex", "nanocodex-bin", { "nanocodex-vm": "../../crates/vm" });
+  crate("bin/hand", "nanocodex-hand-daemon");
   write("README.md");
   execFileSync("cargo", ["generate-lockfile", "--offline"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
   git("init", "-q");
@@ -213,4 +214,13 @@ test("draft service changes retain their HTTP and browser consumers while genera
     assert.equal(selected.raw.tests, "false", path);
     assert.equal(selected.raw.heavy, "false", path);
   }
+});
+
+test("a Hand daemon change selects the Linux/macOS and Windows Hand jobs", t => {
+  const w = workspace(t);
+  const before = w.git("rev-parse", "HEAD");
+  w.write("bin/hand/src/lib.rs", "// Hand daemon edit\n");
+  const hand = w.select("push", { before, after: w.commit() });
+  assert.deepEqual(hand.jobs, only("hands", "windows", "rust", "rust_extra", "policy"));
+  assert.equal(hand.raw.packages, "nanocodex-hand-daemon");
 });

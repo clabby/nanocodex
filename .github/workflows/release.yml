@@ -165,17 +165,20 @@ jobs:
         run: |
           # Release-stage Hand identity: computed from the Hand package closure
           # before compiling, verified against the Hand's Cargo dep-info after.
+          features=nanocodex-bin/tempo
           payload=()
           if [[ -n "${NANOCODEX_LINUX_SCREEN_BUNDLE:-}" ]]; then
+            # Distributable Linux Hands embed the helper payload named above.
+            features+=",nanocodex-hand-daemon/embedded-screen-helpers"
             payload=(--payload "linux-screen-helpers=$NANOCODEX_LINUX_SCREEN_BUNDLE")
           fi
           NANOCODEX_HAND_IDENTITY="$(scripts/release/hand-source-identity.py compute \
-            --target ${{ matrix.target }} --profile release --features tempo \
+            --target ${{ matrix.target }} --profile release --features "$features" \
             ${payload[@]+"${payload[@]}"} --report "$RUNNER_TEMP/hand-identity-inputs.json")"
           export NANOCODEX_HAND_IDENTITY
           echo "Hand source identity: $NANOCODEX_HAND_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
           cargo build --locked --release --timings \
-            --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo \
+            --package nanocodex-bin --package nanocodex-hand-daemon --features "$features" \
             --target ${{ matrix.target }}
           scripts/release/hand-source-identity.py verify \
             --report "$RUNNER_TEMP/hand-identity-inputs.json" \
@@ -269,7 +272,7 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
           STABLE_GIT_COMMIT: ${{ github.sha }}
         run: |
-          cargo build --locked --release --timings --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo
+          cargo build --locked --release --timings --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign payload when Authenticode is configured
         shell: pwsh

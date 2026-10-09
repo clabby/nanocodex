@@ -118,18 +118,21 @@ jobs:
           cargo clean --package krun-init-blob --profile nightly --target ${{ matrix.target }}
           # Release-stage Hand identity: computed from the Hand package closure
           # before compiling, verified against the Hand's Cargo dep-info after.
+          features=nanocodex-bin/tempo
           payload=()
           if [[ -n "${NANOCODEX_LINUX_SCREEN_BUNDLE:-}" ]]; then
+            # Distributable Linux Hands embed the helper payload named above.
+            features+=",nanocodex-hand-daemon/embedded-screen-helpers"
             payload=(--payload "linux-screen-helpers=$NANOCODEX_LINUX_SCREEN_BUNDLE")
           fi
           NANOCODEX_HAND_IDENTITY="$(scripts/release/hand-source-identity.py compute \
-            --target ${{ matrix.target }} --profile nightly --features tempo \
+            --target ${{ matrix.target }} --profile nightly --features "$features" \
             ${payload[@]+"${payload[@]}"} --report "$RUNNER_TEMP/hand-identity-inputs.json")"
           export NANOCODEX_HAND_IDENTITY
           echo "Hand source identity: $NANOCODEX_HAND_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
           VERGEN_GIT_SHA="$BUILD_SHA" \
             cargo build --locked --profile nightly --timings \
-              --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo \
+              --package nanocodex-bin --package nanocodex-hand-daemon --features "$features" \
               --target ${{ matrix.target }}
           scripts/release/hand-source-identity.py verify \
             --report "$RUNNER_TEMP/hand-identity-inputs.json" \
@@ -326,8 +329,10 @@ jobs:
         shell: pwsh
         env:
           TAG_NAME: ${{ inputs.pr && format('pr-{0}', inputs.pr) || 'nightly' }}
+          # Both executables report the exact commit they were built from.
+          VERGEN_GIT_SHA: ${{ env.BUILD_SHA }}
         run: |
-          cargo build --locked --profile nightly --timings --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo
+          cargo build --locked --profile nightly --timings --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign payload when Authenticode is configured
         shell: pwsh
