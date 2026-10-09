@@ -26,7 +26,7 @@ pub(crate) struct ServiceStatus {
     pub(crate) installed: bool,
     pub(crate) loaded: bool,
     pid: Option<u32>,
-    executable: Option<PathBuf>,
+    pub(crate) executable: Option<PathBuf>,
     task: &'static str,
 }
 
