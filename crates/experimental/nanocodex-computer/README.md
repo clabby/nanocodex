@@ -14,6 +14,19 @@ The opt-in Linux Sky host runs without the Codex CLI; it requires a compatible
 upstream runtime and an X11/Xwayland desktop. Native protected-target
 checks and OS permissions still apply.
 
+The managed macOS host defaults CUA app and tab `getAXState()` and
+`getAXStateAndScreenshot()` observations to full current accessibility trees.
+An explicit `{ disableDiffing: false }` opts into upstream diffs. The host's REPL
+bootstrap applies this default again after reset and documents the override;
+the signed upstream bundle is unchanged. Fresh element indices are still
+required after actions, and asynchronous app updates can invalidate them.
+
+Run the live observation regression on a provisioned macOS host with
+`pnpm test:computer:snapshots --provider /absolute/path/to/cua-provider`.
+It builds a synthetic native app, clicks its counter through MCP, and checks
+full observations, silent reads, screenshots, and REPL reset. Requests, results,
+and screenshots are retained in ignored `output/cua-snapshots/`.
+
 `ComputerConfig::discover_or_install()` uses the upstream provisioning path on
 supported hosts. `NANOCODEX_COMPUTER=/absolute/path/to/launcher` selects an explicit
 MCP launcher; `off`, `none`, or `0` disables discovery. Otherwise discovery checks

@@ -7,6 +7,7 @@
   },
   "scripts": {
     "test:computer": "turbo run test --filter=nanocodex-computer",
+    "test:computer:snapshots": "python3 scripts/tests/cua-snapshot-journey.py",
     "install:computer": "cargo run --locked -p nanocodex2-bin --bin nanocodex2 -- computer setup",
     "predev": "portless proxy start --port ${PORTLESS_PORT:-443}",
     "dev": "turbo run dev --filter=nanocodex-web --filter=@nanocodex/connect-playground",

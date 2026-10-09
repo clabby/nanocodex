@@ -844,6 +844,7 @@ mod mac {
     }
 
     const HOST_MODULES: &[(&str, &str)] = &[
+        ("cua-banner.mjs", include_str!("cua-banner.mjs")),
         ("direct-cua-host.mjs", include_str!("direct-cua-host.mjs")),
         (
             "direct-browser-host.mjs",
