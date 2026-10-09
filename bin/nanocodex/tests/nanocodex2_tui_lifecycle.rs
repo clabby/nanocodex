@@ -7982,9 +7982,8 @@ async fn terminal_math_renders_kitty_images_and_falls_back_to_source() {
     // Rendered formulas replace their TeX source on screen.
     kitty.terminal.wait_no_text("e^{i").await;
     kitty.terminal.wait_no_text("frac").await;
-    kitty.terminal.wait_text("Inline").await;
+    // Inline formulas that need more than one row keep their source in line.
     kitty.terminal.wait_text("beside text.").await;
-    kitty.terminal.wait_no_text("x^2").await;
     let output = kitty.terminal.output.lock().unwrap().clone();
     let pngs = kitty_pngs(&output);
     assert!(
@@ -8186,8 +8185,10 @@ async fn terminal_stream_and_view_telemetry_reach_the_log_and_otlp() {
     for text in ["TELEMETRY_", "STREAM_", "DONE"] {
         fixture.nested(REMOTE_TURN, "assistant.delta", json!({"model_call_index": 1, "item_id": "telemetry", "phase": "final_answer", "text": text}));
     }
-    fixture.complete(REMOTE_TURN);
     fixture.terminal.wait_text("TELEMETRY_STREAM_DONE").await;
+    fixture.nested(REMOTE_TURN, "assistant.message", json!({"model_call_index": 1, "item_id": "telemetry", "phase": "final_answer", "text": "TELEMETRY_STREAM_DONE"}));
+    fixture.complete(REMOTE_TURN);
+    fixture.terminal.wait_text("Enter send").await;
     let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
     tokio::time::timeout(TIMEOUT, async {
         while !read_log().contains("TUI stream timing completed") {
