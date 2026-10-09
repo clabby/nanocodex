@@ -334,6 +334,11 @@ Hosted WebSocket diagnostics are always enabled in Workers Logs. The
 `transport.socket.opened`, `transport.request.sent`,
 `transport.request.first_message`, `transport.request.first_output`, and
 `transport.request.finished` describe each socket/request lifecycle.
+The managed `session_id`, `thread_id`, and `turn_id` retain owner correlation;
+`runtime_session_id`, `runtime_turn_id`, and child `agent_id` distinguish concurrent
+agent operations. Group `model_call_index` by runtime session and turn.
+Completion uses an observed response ID when available, otherwise a uniquely
+attributable operation; oversized provider envelopes are never parsed just for diagnostics.
 `first_message` and `first_output` include an allowlisted `provider_event_type`;
 `first_output` also identifies its `output_kind`. This historical output marker
 includes empty item announcements, so it is not a first-token measurement.
