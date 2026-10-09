@@ -1344,8 +1344,10 @@ test("live child continuation preserves schema, history, routing, and spawning a
     assert.equal((await Subagents.list(agent, { includeCompleted: true })).agents[0].task,
       "Return another object with ok equal to 2.");
     await agent.session.shutdown();
-    assert.equal(routes.size, 0, "shutdown releases child routes");
-    assert.deepEqual(lifecycleEvents.filter(({ type }) => type === "release").map(({ sessionId }) => sessionId), [childSessionId]);
+    // Durable teardown detaches the live binding but keeps the child's
+    // authorization and pinned route for restoration; only close releases.
+    assert.deepEqual([...routes.keys()], [childSessionId], "durable teardown preserves the child route");
+    assert.equal(lifecycleEvents.some(({ type }) => type === "release"), false, "teardown is not a release");
     assert.equal(storage.subagents.size, 0);
     assert.equal(storage.subagentCheckpoints.size, 0);
     const persisted = [...storage.records.values(), ...storage.states.map(({ payload }) => payload)].join("\n");
@@ -1457,7 +1459,8 @@ test("closing one live child preserves sibling history and its pinned route", { 
     assert.equal(classifierCalls, 2, "continuing the sibling reuses its live route");
     assert.equal(modelCalls, 6);
     await agent.session.shutdown();
-    assert.equal(routes.size, 0);
+    // Teardown keeps the retained sibling's pinned route; the closed child stays released.
+    assert.deepEqual([...routes.keys()], [retainedSession]);
     assert.equal(storage.subagents.size, 0);
     assert.equal(storage.subagentCheckpoints.size, 0);
     agent = await create(module, durableOwner(storage), options);
