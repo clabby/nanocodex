@@ -171,6 +171,7 @@ export async function create(options = {}) {
         }
         harnesses = await prepareHarnesses(options.harnesses, events.emit, {
           subagentSessions, subagentRouting: internalRuntime?.subagentRouting, codeEvaluator,
+          cloudflareReservation,
         });
         activateHost(host);
         await host.ready();

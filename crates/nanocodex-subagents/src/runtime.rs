@@ -58,6 +58,10 @@ pub(super) struct ChildSession {
     pub(super) evicted: bool,
     /// Automatic restart resumes since this child last finished a turn.
     pub(super) resume_attempts: u32,
+    /// Bounded tool calls observed during the current or interrupted turn.
+    pub(super) in_flight_calls: Vec<durable::InFlightCall>,
+    /// Observed calls dropped by the retention bound this turn.
+    pub(super) in_flight_omitted: u32,
     /// Journal-restored children need a fresh host binding before execution.
     announce: bool,
 }
@@ -1300,6 +1304,68 @@ impl Registry {
         }));
     }
 
+    /// Journals bounded tool calls observed during a child's turn until the
+    /// turn settles, so a restart can name the calls it must reconcile.
+    async fn track_in_flight(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+        kind: &AgentEventKind,
+        payload: &Option<Arc<serde_json::value::RawValue>>,
+    ) {
+        #[derive(serde::Deserialize)]
+        struct Call {
+            call_id: String,
+            #[serde(default)]
+            tool: String,
+            #[serde(default)]
+            arguments: Option<Value>,
+        }
+        let Some(call) = payload
+            .as_ref()
+            .and_then(|payload| serde_json::from_str::<Call>(payload.get()).ok())
+        else {
+            return;
+        };
+        {
+            let mut state = self.state.lock().await;
+            let Some(session) = state
+                .scopes
+                .get_mut(root_session_id)
+                .and_then(|scope| scope.sessions.get_mut(&id))
+            else {
+                return;
+            };
+            match kind {
+                AgentEventKind::ToolCall => {
+                    let evicted = durable::retain_call(
+                        &mut session.in_flight_calls,
+                        durable::InFlightCall::new(
+                            &call.call_id,
+                            &call.tool,
+                            call.arguments.as_ref(),
+                        ),
+                    );
+                    session.in_flight_omitted = session.in_flight_omitted.saturating_add(evicted);
+                }
+                // Kept, not removed: a result reaches the restored history only
+                // once a later checkpoint commits it.
+                AgentEventKind::ToolResult => {
+                    let Some(existing) = session
+                        .in_flight_calls
+                        .iter_mut()
+                        .find(|existing| existing.call_id == call.call_id)
+                    else {
+                        return;
+                    };
+                    existing.result_recorded = true;
+                }
+                _ => return,
+            }
+        }
+        self.changed();
+    }
+
     async fn running_harness(&self, root_session_id: &str, id: AgentId) -> Option<HarnessHandle> {
         self.state
             .lock()
@@ -1426,18 +1492,30 @@ impl Registry {
         for id in ids {
             // Restate the binding task: a resumed child must finish it, not
             // summarize partial progress as its result.
-            let task = self
+            let (task, evidence) = self
                 .state
                 .lock()
                 .await
                 .scopes
                 .get(root_session_id)
                 .and_then(|scope| scope.sessions.get(&id))
-                .map(|session| session.binding_task.clone());
-            let message = match task {
-                Some(task) => format!("{}\n\nDelegated task:\n{task}", durable::RESUME_MESSAGE),
-                None => durable::RESUME_MESSAGE.to_owned(),
-            };
+                .map(|session| {
+                    (
+                        Some(session.binding_task.clone()),
+                        durable::in_flight_evidence(
+                            &session.in_flight_calls,
+                            session.in_flight_omitted,
+                        ),
+                    )
+                })
+                .unwrap_or_default();
+            let mut message = durable::RESUME_MESSAGE.to_owned();
+            if let Some(evidence) = evidence {
+                message = format!("{message}\n\n{evidence}");
+            }
+            if let Some(task) = task {
+                message = format!("{message}\n\nDelegated task:\n{task}");
+            }
             let result = self
                 .send_message(
                     root_session_id,
@@ -1652,6 +1730,8 @@ impl Registry {
                 last_used: 0,
                 evicted: false,
                 resume_attempts: 0,
+                in_flight_calls: Vec::new(),
+                in_flight_omitted: 0,
                 announce: false,
             },
         )?;
@@ -1691,6 +1771,12 @@ impl Registry {
                 None
             } else {
                 let revision = session.next_instruction_revision.checked_add(1)?;
+                // Only the automatic resume continues the interrupted turn and
+                // its unknown calls; any other new turn starts without them.
+                if !matches!(session.status, AgentStatus::Interrupted) {
+                    session.in_flight_calls.clear();
+                    session.in_flight_omitted = 0;
+                }
                 session.next_instruction_revision = revision;
                 session.active_instruction_revision = Some(revision);
                 session.active = true;
@@ -1765,6 +1851,8 @@ impl Registry {
             session.steering = false;
             // The turn settled in this runtime, so restart recovery made progress.
             session.resume_attempts = 0;
+            session.in_flight_calls.clear();
+            session.in_flight_omitted = 0;
             let submitted_output = session.submitted_output.take();
             // Acceptance belongs to this turn even if cancellation/close wins settlement.
             // Keep its evidence, without claiming the interrupted execution completed.
@@ -2709,6 +2797,8 @@ impl ChildSession {
             last_used: 0,
             evicted: true,
             resume_attempts: 0,
+            in_flight_calls: Vec::new(),
+            in_flight_omitted: 0,
             announce: true,
         }
     }
@@ -2778,6 +2868,9 @@ pub(super) fn forward_events(
                 event.kind,
                 AgentEventKind::ModelCallStarted | AgentEventKind::ToolCall
             );
+            let kind = event.kind;
+            let payload = matches!(kind, AgentEventKind::ToolCall | AgentEventKind::ToolResult)
+                .then(|| event.payload.clone());
             if !send_update(
                 &updates,
                 &root_session_id,
@@ -2786,8 +2879,13 @@ pub(super) fn forward_events(
             ) {
                 return;
             }
-            if progress && let Some(registry) = registry.upgrade() {
-                registry.capture_progress(&root_session_id, id);
+            if let Some(registry) = registry.upgrade() {
+                registry
+                    .track_in_flight(&root_session_id, id, &kind, &payload)
+                    .await;
+                if progress {
+                    registry.capture_progress(&root_session_id, id);
+                }
             }
         }
         if let Some(registry) = registry.upgrade() {
@@ -3392,6 +3490,8 @@ mod tests {
             last_used: 0,
             evicted: false,
             resume_attempts: 0,
+            in_flight_calls: Vec::new(),
+            in_flight_omitted: 0,
             announce: false,
         }
     }

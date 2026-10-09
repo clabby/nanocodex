@@ -806,6 +806,39 @@ The harness records first assistant text, durable completion, source hashes and
 raw traces under ignored `output/managed-api-ttft/`; it does not measure live
 inference, network geography or production cold activation.
 
+Durability changes use curl-backed public HTTP journeys:
+
+```sh
+corepack pnpm --filter nanocodex-managed-service test:durability:curl
+NANOCODEX_ORIGIN=https://your-managed-origin.example \
+  corepack pnpm --filter nanocodex-managed-service test:durability:curl:live
+```
+
+The live journey requires `NANOCODEX_API_KEY` in the environment. It creates fresh
+synthetic agents and files in their `/brain`, uses live inference, and retains
+the agents for inspection. It disconnects after admission, retries the same
+idempotency key, verifies SSE cursor replay and expected rejections, and reuses
+an existing child and grandchild after real idle teardown. It also restarts a
+test agent during an effect, verifies no duplicate file append, delegates new
+work to the same child, cancels a later turn, and verifies another turn succeeds.
+`NANOCODEX_JOURNEY_SCENARIO=idle` or `interruption` selects one journey. Idle is
+measured after the last admission replay, which renews the preparation lease
+without changing `last_active`.
+
+The local journey uses real workerd, SQLite, HTTP, curl, and a synthetic Hand
+publisher, with fixtures for account identity and model inference. It forces
+process loss and same-isolate Durable Object restart, checks bounded root and
+child recovery, and exercises Hand receipt reconciliation, missing proof,
+dispatch deadlines, and publisher replacement. It never restarts personal Hands.
+Requests, response headers, JSON/SSE bodies, assertions, and runtime traces live
+under ignored `output/managed-curl-*`. The live runner accepts
+`NANOCODEX_JOURNEY_OUTPUT` for another evidence directory and sends its bearer to
+curl through stdin rather than recording it in command arguments.
+Set `NANOCODEX_TEST_MODEL`, and optionally both `NANOCODEX_TEST_CHILD_HARNESS`
+and `NANOCODEX_TEST_CHILD_MODEL`, to exercise another available model or a mixed
+harness tree. CI runs the local curl journeys and uploads their request/response
+evidence as `managed-curl-durability`.
+
 - SMS OTP/account and API-key routes establish the account identity that owns
   agents, organizations, connectors, memory, and history.
 - `/v1/agents` lists or creates agents. `/v1/agent-runs` creates an agent and

@@ -83,6 +83,7 @@ export async function createClaude(options, load, type, harnessDefaults) {
   try { harnesses = await prepareHarnesses(options.harnesses, events.emit, { ...harnessDefaults,
     subagentSessions: internalRuntime?.subagentSessions, subagentRouting: internalRuntime?.subagentRouting,
     toolProviders: internalRuntime?.toolProviders, codeEvaluator,
+    cloudflareReservation: reservation,
     codeEffectJournal: internalRuntime?.codeEffectJournal, traceTool: internalRuntime?.traceTool,
   }); }
   catch (error) { stopJournalEvents?.(); host.dispose(); throw error; }

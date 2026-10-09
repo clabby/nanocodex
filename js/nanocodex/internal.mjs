@@ -589,9 +589,24 @@ const hostBridge = Object.freeze({
     if (!cloudflareHostMayBindSubagent(host)) return;
     const existing = hostSessions.get(sessionId);
     if (existing && existing !== host) {
-      throw new Error(`Nanocodex subagent session ID is already active: ${sessionId}`);
+      const current = cloudflareHostReservations.get(host);
+      const previous = cloudflareHostReservations.get(existing);
+      const head = pendingCloudflareAgentSessions.get(rootSessionId) ?? activeAgentSessions.get(rootSessionId);
+      // DO eviction can leave the predecessor's JavaScript registrations in
+      // the Worker isolate. Only reconstruction of that exact owner and root
+      // may take over its durable children, just as it takes over the root.
+      if (!current || !previous || current === previous || current !== head
+        || current.ownerId !== previous.ownerId
+        || current.sessionId !== rootSessionId || previous.sessionId !== rootSessionId) {
+        throw new Error(`Nanocodex subagent session ID is already active: ${sessionId}`);
+      }
     }
     host.bindSubagentSession(sessionId, JSON.parse(contextJson), hostContextRef);
+    const reservation = cloudflareHostReservations.get(host);
+    if (existing && existing !== host && reservation && !reservation.committed
+      && !reservation.predecessorChildHosts.has(sessionId)) {
+      reservation.predecessorChildHosts.set(sessionId, { host, previous: existing });
+    }
     hostSessions.set(sessionId, host);
   },
   // `detach` marks a runtime teardown: the child stays restorable from its
@@ -881,6 +896,7 @@ export function prepareCloudflareAgentSession(sessionId, ownerId) {
     committed: false,
     predecessor: undefined,
     predecessorHost: undefined,
+    predecessorChildHosts: new Map(),
     host: undefined,
     released: false,
   };
@@ -946,6 +962,7 @@ export function commitCloudflareAgentSession(reservation, beforeCommit) {
   reservation.committed = true;
   reservation.predecessor = undefined;
   reservation.predecessorHost = undefined;
+  reservation.predecessorChildHosts.clear();
 }
 
 function adoptAgentSession(reservation, sessionId) {
@@ -986,6 +1003,15 @@ export function releaseAgentSession(reservation) {
       }
     }
   }
+  // Failed reconstruction restores registrations only while the predecessor
+  // still owns the root. Never overwrite a newer generation's child binding.
+  for (const [sessionId, { host, previous }] of reservation.predecessorChildHosts ?? []) {
+    const current = hostSessions.get(sessionId);
+    if ((current === undefined || current === host) && cloudflareHostMayBindSubagent(previous)) {
+      hostSessions.set(sessionId, previous);
+    }
+  }
+  reservation.predecessorChildHosts?.clear();
 }
 
 function cloudflareSessionOwner(reservation, sessionId) {

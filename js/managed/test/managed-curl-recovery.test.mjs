@@ -1,0 +1,394 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { execFileSync, fork, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { builtinModules } from 'node:module';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
+import { build } from 'esbuild';
+import { accountProxyWorker } from '../benchmark/account-proxy.mjs';
+
+// Public HTTP recovery journey: every API call is the curl executable against
+// the normal account ingress, Managed API and Egress workers on persisted
+// workerd SQLite/R2. The model provider and one synthetic effect endpoint are
+// the only stubs. Owner loss is SIGKILL of the whole workerd process group at
+// an exact provider boundary, never dispose() or private SQL/IPC seeding.
+const root = fileURLToPath(new URL('../../..', import.meta.url));
+const owner = '11111111-1111-4111-8111-111111111155';
+const settings = { model: 'gpt-6.1-sol', thinking: 'low', reasoning_mode: 'standard', fast_mode: false };
+const flags = ['nodejs_compat', 'durable_object_io_tasks_prevent_eviction', 'enable_request_signal'];
+const exhausted = /MANAGED_RECOVERY_EXHAUSTED[\s\S]*outcome unknown/;
+
+// Synthetic identity bootstrap only (as benchmark/curl-ttft.mjs); behavior
+// under test is reached exclusively through the public /v1 routes.
+const bootstrap = `import managed from './src/index.ts';export * from './src/index.ts';
+import {ensureAccount,createApiKey} from './src/account-auth.ts';
+export default {async fetch(request,env,ctx){const path=new URL(request.url).pathname;
+if(path==='/__fixture/identity'){await ensureAccount(env,'${owner}',true);
+ const auth=await(await env.NANOCODEX_USERS.getByName('${owner}').fetch('https://user.internal/authorization')).json();
+ return Response.json(await createApiKey(env,{kind:'api_key',userId:'${owner}',...auth.grant,subjectId:'fixture:${owner}',credentialId:'fixture'},'synthetic-curl-recovery'));}
+if(path==='/__fixture/chatgpt'){const expires_at=(Math.ceil(Date.now()/1000)+3600)*1000;
+ const claims={exp:Math.ceil(expires_at/1000),'https://api.openai.com/auth':{chatgpt_account_id:'synthetic-account',chatgpt_account_is_fedramp:false}};
+ const jwt=btoa(JSON.stringify({alg:'none'})).replaceAll('=','')+'.'+btoa(JSON.stringify(claims)).replaceAll('=','')+'.fixture';
+ return env.NANOCODEX.fetch('https://broker.internal/users/${owner}/credentials/chatgpt',{method:'PUT',headers:{'content-type':'application/json'},
+  body:JSON.stringify({access_token:jwt,refresh_token:'synthetic-refresh',account_id:'synthetic-account',expires_at,fedramp:false})});}
+return managed.fetch(request,env,ctx);}};`;
+
+// Production WebSocket transport. Socket-local history follows
+// previous_response_id; CONTROL (the parent test) owns every decision.
+const providerSource = `export default {async fetch(request, env) {
+  const url = new URL(request.url);
+  if (url.origin !== 'https://chatgpt.com' || request.headers.get('upgrade') !== 'websocket') return env.CONTROL.fetch(request);
+  if (request.headers.get('chatgpt-account-id') !== 'synthetic-account') throw new Error('fixture ChatGPT account mismatch');
+  const [client, server] = Object.values(new WebSocketPair()); server.accept();
+  let history = [];
+  server.addEventListener('close', () => server.close(1000));
+  server.addEventListener('message', async event => {
+    const body = JSON.parse(event.data);
+    if (body.type !== 'response.create') throw new Error('Unexpected provider frame ' + body.type);
+    history = body.previous_response_id ? [...history, ...(body.input ?? [])] : [...(body.input ?? [])];
+    const response = await env.CONTROL.fetch('https://control.internal/model', { method: 'POST',
+      body: JSON.stringify({ model: body.model, previous_response_id: body.previous_response_id ?? null, history }) });
+    for (const frame of await response.json()) server.send(JSON.stringify(frame));
+  });
+  return new Response(null, { status: 101, webSocket: client });
+}};`;
+
+async function bundle(output, name, source, cwd) {
+  const wasm = new Set();
+  const result = await build({ stdin: { contents: source, resolveDir: cwd }, bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
+    external: ['cloudflare:*', 'node:*'], alias: { 'node-rsa': join(root, 'js/nanocodex/tools/browser/unsupportedNodeRsa.mjs') }, logLevel: 'silent',
+    plugins: [{ name: 'compiled-wasm', setup(b) {
+      b.onResolve({ filter: /\.\/just-bash-lazy\.mjs$/ }, a => ({ path: resolve(a.resolveDir, a.path), external: true }));
+      b.onResolve({ filter: /^[a-z][a-z_]*(?:\/[a-z_]+)?$/ }, a => builtinModules.includes(a.path) ? { path: 'node:' + a.path, external: true } : undefined);
+      b.onResolve({ filter: /\.wasm(?:\?module)?$|^nanocodex\/wasm$/ }, a => {
+        const path = a.path === 'nanocodex/wasm' ? join(root, 'js/nanocodex/pkg-web/nanocodex_bg.wasm') : resolve(a.resolveDir, a.path.replace(/\?module$/, ''));
+        wasm.add(path); return { path, external: true };
+      });
+    } }] });
+  const code = result.outputFiles[0].text;
+  const requires = [...new Set([...code.matchAll(/__require\("(node:[^"]+)"\)/g)].map(m => m[1]))];
+  const prelude = requires.map((n, i) => `import * as builtin${i} from ${JSON.stringify(n)};`).join('\n')
+    + `\nconst requireMap={${requires.map((n, i) => `${JSON.stringify(n)}:builtin${i}`).join(',')}};const require=name=>{if(!requireMap[name])throw new Error('Unexpected require '+name);return requireMap[name];};\n`;
+  const path = join(output, name + '.mjs'); await writeFile(path, prelude + code);
+  const lazy = [...code.matchAll(/import\("([^"]*just-bash-lazy\.mjs)"\)/g)].map(m => m[1]);
+  return [{ type: 'ESModule', path }, ...[...new Set(lazy)].map(path => ({ type: 'ESModule', path })), ...[...wasm].map(path => ({ type: 'CompiledWasm', path }))];
+}
+
+test('curl recovers managed work across workerd SIGKILL without duplicate effects and stops at the durable budget', { timeout: 240_000 }, async () => {
+  const output = join(root, 'output/managed-curl-recovery', new Date().toISOString().replaceAll(':', '-') + '-' + randomUUID().slice(0, 8));
+  await mkdir(join(output, 'curl'), { recursive: true });
+  const git = args => { try { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim(); } catch { return 'unavailable'; } };
+  await writeFile(join(output, 'run.json'), JSON.stringify({ command: [process.execPath, ...process.argv.slice(1)], cwd: process.cwd(), git_head: git(['rev-parse', 'HEAD']),
+    git_status: git(['status', '--short']), node: process.version, curl: execFileSync('curl', ['--version'], { encoding: 'utf8' }).split('\n')[0], started_at: new Date().toISOString() }, null, 2));
+  const workers = [await accountProxyWorker(root),
+    { name: 'managed', modulesRoot: '/', modules: await bundle(output, 'managed', bootstrap, join(root, 'js/managed')), compatibilityDate: '2026-07-29', compatibilityFlags: flags,
+      bindings: { MANAGED_AGENT_DIRECT_CREDENTIALS: 'true' }, serviceBindings: { NANOCODEX: 'egress', NANOCODEX_SESSION_MODEL_EGRESS: { name: 'egress', entrypoint: 'SessionModelEgress' } },
+      durableObjects: Object.fromEntries([['NANOCODEX_AUTH', 'NonceStorage'], ['NANOCODEX_USERS', 'UserAccount'], ['NANOCODEX_ORGANIZATIONS', 'Organization'], ['NANOCODEX_API_KEYS', 'ApiKeyRecord'],
+        ['NANOCODEX_SESSIONS', 'DurableAgentSession'], ['NANOCODEX_ACCOUNT_TOOLS', 'AccountHostedTools'], ['NANOCODEX_VM_HOST_POOLS', 'VmHostPool'], ['NANOCODEX_MEMORY', 'MemoryScope']]
+        .map(([binding, className]) => [binding, { className, useSQLite: true }])),
+      r2Buckets: ['NANOCODEX_HISTORY', 'NANOCODEX_WORKSPACES'], outboundService: 'provider' },
+    { name: 'egress', modulesRoot: '/', modules: await bundle(output, 'egress', `export * from './src/egress.ts';export {default} from './src/egress.ts';`, join(root, 'js/egress')),
+      compatibilityDate: '2026-07-29', compatibilityFlags: ['nodejs_compat', 'enable_request_signal'],
+      bindings: { ENVIRONMENT: 'test', CREDENTIAL_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY' }, serviceBindings: { MANAGED_AGENT_OWNERSHIP: { name: 'managed', entrypoint: 'ManagedAgentOwnership' } },
+      durableObjects: Object.fromEntries([['USER_CREDENTIALS', 'UserCredentialBroker'], ['AGENT_SUBJECTS', 'AgentSubjectDirectory'], ['USER_CONNECTORS', 'UserConnectorBroker'],
+        ['MCP_CONNECTIONS', 'McpConnectionDirectory'], ['SPOTIFY_RATE_LIMITS', 'SpotifyRateLimit'], ['GMAIL_PUSH_MAILBOXES', 'GmailPushMailbox']].map(([binding, className]) => [binding, { className, useSQLite: true }])),
+      outboundService: 'provider' },
+    { name: 'provider', modules: true, script: providerSource, compatibilityDate: '2026-07-29' }];
+  await writeFile(join(output, 'workers.json'), JSON.stringify(workers));
+
+  // ---- External stub boundary (the parent owns all provider decisions) ----
+  const modelCalls = [], effects = [], unexpected = [], kills = [], discovery = [];
+  let processNumber = 0, fixture, base, token, dead = Promise.resolve();
+  const respond = (output, end) => { const id = 'resp_' + randomUUID();
+    return [{ type: 'response.created', response: { id, status: 'in_progress' } },
+      ...output.filter(item => item.type === 'message').map(item => ({ type: 'response.output_text.delta', output_index: 0, delta: item.content[0].text })),
+      { type: 'response.completed', response: { id, status: 'completed', ...(end ? { end_turn: true } : {}), output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } }]; };
+  const say = text => respond([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }], true);
+  const exec = (callId, source) => respond([{ type: 'custom_tool_call', name: 'exec', call_id: callId, input: source }], false);
+  // Most specific first: a follow-up turn's history still contains its predecessor's marker.
+  const markers = ['CURL_WIDE_TASK', 'CURL_ROOT_WIDE', 'CURL_FOLLOWUP_TASK', 'CURL_CHILD_FOLLOWUP', 'CURL_CHILD_TASK', 'CURL_LOOP_TASK', 'CURL_BUDGET_NEXT', 'CURL_LOOP_NEXT', 'CURL_BUDGET', 'CURL_EFFECTS', 'CURL_ROOT_SPAWN', 'CURL_ROOT_LOOP'];
+  const baselines = {};
+  const delegate = (task, marker) => [
+    () => exec(marker + '-spawn', 'text(await tools.spawn_agent(' + JSON.stringify({ role: 'Curl child', task, model: 'sol', thinking: 'low', output_contract: { kind: 'string' } }) + '));'),
+    () => exec(marker + '-wait', 'text(await tools.wait_agent({agent_ids:[1],timeout_ms:20000}));'),
+  ];
+  const decide = ({ history }) => {
+    const user = JSON.stringify(history.filter(item => item.role === 'user'));
+    const scenario = markers.find(marker => user.includes(marker));
+    const outputs = history.filter(item => /_call_output$/.test(item.type ?? ''));
+    const users = history.filter(item => item.role === 'user' || item.role === 'developer');
+    // Concrete identity of the child's interrupted call (id + effect target),
+    // not notice wording: only the runtime can supply it after restoration.
+    const namesLostCall = user.includes('curl-child-command') && user.includes('effects.example/effect/C');
+    const namesWideCall = user.includes('curl-wide-cell/code-10') && user.includes('effects.example/effect/E');
+    modelCalls.push({ process: processNumber, scenario, tool_outputs: outputs.length, names_lost_call: namesLostCall, names_wide_call: namesWideCall,
+      listed_wide_calls: new Set(user.match(/curl-wide-cell(?:\/code-\d+)?(?=;)/g) ?? []).size, at: new Date().toISOString(), last_output: outputs.at(-1),
+      items: history.map(item => item.type === 'message' || !item.type ? 'message:' + item.role : item.type + (item.call_id ? ':' + item.call_id : '')), instruction_messages: users.length, last_instruction: JSON.stringify(users.at(-1)?.content ?? null).slice(0, 1200) });
+    // A restored child sees one more runtime instruction than its first
+    // request. Like a real model, this stub only avoids repeating an effect
+    // when its input concretely names the interrupted call; a generic
+    // "something may have happened" notice is not enough to act on.
+    const resumed = users.length > (baselines[scenario] ??= users.length);
+    const since = history.findLastIndex(item => (item.role === 'user' || item.role === 'developer') && JSON.stringify(item.content).includes(scenario));
+    const fresh = history.slice(since + 1).filter(item => /_call_output$/.test(item.type ?? '')).length;
+    switch (scenario) {
+      case 'CURL_BUDGET': return 'kill'; // the model call is in flight; no durable progress
+      case 'CURL_BUDGET_NEXT': return say('BUDGET_NEXT_OK');
+      case 'CURL_EFFECTS': return outputs.length === 0 ? exec('curl-effects-cell',
+        'const a = await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/A"});\n'
+        + 'const b = await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/B"});\ntext(JSON.stringify({a, b}));') : say('EFFECTS_DONE');
+      case 'CURL_ROOT_SPAWN': return delegate('CURL_CHILD_TASK: run the synthetic effect once using exec_command, then submit_result.', 'curl-root')[outputs.length]?.() ?? say('ROOT_DONE');
+      case 'CURL_CHILD_TASK': return resumed && namesLostCall ? outputs.length === 0 ? exec('curl-child-resumed', 'text(await tools.submit_result({output:"CHILD_RESUMED_WITHOUT_REPEAT"}));') : say('CHILD_RESUMED')
+        : outputs.length === 0 ? exec('curl-child-command', 'text(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/C"}));')
+        : outputs.length === 1 ? exec('curl-child-submit', 'text(await tools.submit_result({output:"CHILD_OK"}));') : say('CHILD_OK');
+      case 'CURL_ROOT_LOOP': return delegate('CURL_LOOP_TASK: answer once.', 'curl-loop')[outputs.length]?.() ?? say('LOOP_ROOT_DONE');
+      case 'CURL_LOOP_TASK': return 'kill'; // every child inference dies with its owner
+      case 'CURL_LOOP_NEXT': return say('LOOP_NEXT_OK');
+      // More observed calls than the retention bound, then two owner losses.
+      case 'CURL_ROOT_WIDE': return delegate('CURL_WIDE_TASK: run the synthetic batch, then apply effect E once.', 'curl-wide')[outputs.length]?.() ?? say('WIDE_ROOT_DONE');
+      case 'CURL_WIDE_TASK': {
+        if (!resumed) return outputs.length === 0 ? exec('curl-wide-cell', 'for (let i = 1; i <= 9; i++) await tools.exec_command({cmd:"printf " + i});\n'
+          + 'text(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/E"}));') : say('WIDE_UNEXPECTED');
+        const resumedCalls = modelCalls.filter(call => call.scenario === 'CURL_WIDE_TASK' && call.tool_outputs === 0).length - 1;
+        if (resumedCalls === 1) return 'kill'; // second loss before the resumed child does anything
+        return !namesWideCall ? exec('curl-wide-repeat', 'text(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/E"}));')
+          : outputs.length === 0 ? exec('curl-wide-resumed', 'text(await tools.submit_result({output:"WIDE_RESUMED_WITHOUT_REPEAT"}));') : say('WIDE_RESUMED');
+      }
+      // Explicit delegation to the same, already completed child after restart.
+      case 'CURL_CHILD_FOLLOWUP': return [
+        () => exec('curl-followup-send', 'text(await tools.send_agent_message({agent_id:1,purpose:"delegate",message:"CURL_FOLLOWUP_TASK: apply effect D once with exec_command, then submit_result."}));'),
+        () => exec('curl-followup-wait', 'text(await tools.wait_agent({agent_ids:[1],timeout_ms:20000}));'),
+      ][fresh]?.() ?? say('FOLLOWUP_ROOT_DONE');
+      case 'CURL_FOLLOWUP_TASK': return [
+        () => exec('curl-followup-command', 'text(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/D"}));'),
+        () => exec('curl-followup-submit', 'text(await tools.submit_result({output:"FOLLOWUP_OK"}));'),
+      ][fresh]?.() ?? say('FOLLOWUP_OK');
+      default: unexpected.push({ kind: 'model', user: user.slice(0, 2000) }); return say('UNEXPECTED');
+    }
+  };
+  const sockets = new Set();
+  const control = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const call = JSON.parse(raw), url = new URL(call.url);
+    const send = (status, body, type = 'application/json') => { res.writeHead(status, { 'content-type': type }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
+    if (url.href === 'https://control.internal/model') {
+      const decision = decide(JSON.parse(call.body));
+      if (decision === 'kill') return void kill('model call in flight: ' + modelCalls.at(-1).scenario);
+      return send(200, decision);
+    }
+    if (url.hostname === 'effects.example') {
+      const name = url.pathname.split('/').pop();
+      effects.push({ process: processNumber, name, method: call.method, at: new Date().toISOString() });
+      // B and the child's C reach the external system, then the owner dies
+      // before any receipt can return: the outcome is genuinely unknown.
+      if (name === 'B' || (['C', 'E'].includes(name) && effects.filter(effect => effect.name === name).length === 1)) return void kill('effect ' + name + ' dispatched, response never returned');
+      return send(200, 'EFFECT_' + name + '_APPLIED\n', 'text/plain');
+    }
+    if (url.origin === 'https://chatgpt.com' && call.body?.includes('"gpt-6-luna"')) {
+      return send(200, { id: 'title', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Synthetic recovery' }] }], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } });
+    }
+    // Default hosted MCP catalog discovery is optional background work; it
+    // stays offline here and is recorded, never answered with fabricated tools.
+    if (call.method === 'POST' && /\/mcp\/?$|^https:\/\/mcp\./.test(call.url)) { discovery.push(call.url); return send(503, { error: 'synthetic offline' }); }
+    unexpected.push({ kind: 'http', method: call.method, url: call.url });
+    send(404, { error: 'unexpected synthetic external request' });
+  });
+  control.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  await new Promise(resolvePromise => control.listen(0, '127.0.0.1', resolvePromise));
+  const controlBase = `http://127.0.0.1:${control.address().port}`;
+
+  const start = () => dead.then(() => new Promise((resolvePromise, reject) => {
+    const number = ++processNumber;
+    const child = fork(fileURLToPath(new URL('./fixtures/managed-curl-recovery-process.mjs', import.meta.url)), [output, controlBase], { detached: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    for (const stream of ['stdout', 'stderr']) child[stream].on('data', chunk => void appendFile(join(output, `workerd-${number}.log`), chunk));
+    child.once('error', reject); child.once('exit', code => reject(new Error('fixture exited before ready: ' + code)));
+    child.once('message', message => { child.removeAllListeners('exit'); fixture = { child, number, exited: new Promise(r => child.once('exit', r)) }; base = message.ready; resolvePromise(); });
+  }));
+  async function kill(reason) {
+    const current = fixture; if (!current) return; fixture = undefined;
+    process.kill(-current.child.pid, 'SIGKILL'); dead = current.exited;
+    kills.push({ process: current.number, reason, at: new Date().toISOString() }); await dead;
+  }
+  const waitFor = async (label, predicate, timeout = 30_000, interval = 50) => {
+    const deadline = Date.now() + timeout;
+    for (;;) { const value = await predicate(); if (value) return value; if (Date.now() > deadline) throw new Error('timed out waiting for ' + label); await delay(interval); }
+  };
+
+  // ---- curl: bearer travels on stdin config, never argv or saved evidence ----
+  let sequence = 0;
+  async function curl(label, path, { method = 'GET', body, headers = {}, expected, sse, maxTime = 30 } = {}) {
+    const name = `${String(++sequence).padStart(3, '0')}-${label}`, file = join(output, 'curl', name);
+    if (body !== undefined) await writeFile(file + '.request.json', JSON.stringify(body, null, 2));
+    const args = ['--silent', '--show-error', '--no-buffer', '--max-time', String(maxTime), '--request', method, '--dump-header', file + '.headers', '--config', '-',
+      '-H', 'Content-Type: application/json', ...Object.entries(headers).flatMap(([key, value]) => ['-H', `${key}: ${value}`]),
+      ...(body === undefined ? [] : ['--data-binary', '@' + file + '.request.json']), new URL(path, base).href];
+    const started = Date.now(), child = spawn('curl', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdin.end(`header = ${JSON.stringify('Authorization: Bearer ' + token)}\n`);
+    let stdout = '', stderr = '', buffer = ''; const frames = [];
+    child.stdout.on('data', chunk => { stdout += chunk; if (!sse) return; buffer += chunk;
+      for (let end; (end = buffer.indexOf('\n\n')) >= 0;) { const frame = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+        const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+        if (data) { const value = JSON.parse(data); frames.push(value); if (sse(value)) child.kill('SIGTERM'); } } });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const exit = await new Promise(r => child.on('close', (code, signal) => r({ code, signal })));
+    const head = await readFile(file + '.headers', 'utf8').catch(() => '');
+    const status = Number([...head.matchAll(/^HTTP\/\S+ (\d+)/gm)].at(-1)?.[1] ?? 0);
+    await writeFile(file + '.response', stdout);
+    let value; try { value = JSON.parse(stdout); } catch { value = stdout; }
+    await appendFile(join(output, 'transcript.jsonl'), JSON.stringify({ name, process: fixture?.number, command: ['curl', ...args], stdin: 'header = "Authorization: Bearer <redacted synthetic API key>"',
+      status, exit, stderr, duration_ms: Date.now() - started, expected: expected ?? null, request: body ?? null, response: sse ? { frames } : value }) + '\n');
+    if (expected !== undefined) assert.equal(status, expected, `${name}: ${stderr} ${stdout.slice(0, 2000)}`);
+    return { status, value, frames };
+  }
+  const turnState = async (label, agent, turn) => (await curl(label, `/v1/agents/${agent}/turns/${turn}`, { expected: 200 })).value;
+  const terminal = async (label, agent, turn) => waitFor(label + ' terminal', async () => {
+    const value = await turnState(label, agent, turn);
+    return ['completed', 'failed', 'cancelled'].includes(value.state) ? value : undefined;
+  }, 30_000, 200);
+  const history = async (label, agent) => (await curl(label, `/v1/agents/${agent}/events/history?after=0&limit=256`, { expected: 200 })).value;
+  const summary = {};
+
+  try {
+    await start();
+    const identity = await fetch(new URL('/__fixture/identity', base), { method: 'POST' });
+    token = (await identity.json()).token; assert.ok(token, 'synthetic API key');
+    assert.equal((await fetch(new URL('/__fixture/chatgpt', base), { method: 'POST' })).status, 204);
+    const unauthorized = await (async () => { const saved = token; token = 'synthetic-invalid'; try { return await curl('unauthenticated-run-rejected', '/v1/agent-runs', { method: 'POST', body: { input: 'CURL_BUDGET', settings }, headers: { 'Idempotency-Key': randomUUID() } }); } finally { token = saved; } })();
+    assert.equal(unauthorized.status, 401); assert.equal(modelCalls.length, 0, 'rejected admission never reaches the provider');
+
+    // 1. Repeated abrupt loss of the same unfinished model call consumes the
+    // persisted budget: three provider invocations, then a durable terminal.
+    const budgetKey = randomUUID(), budgetBody = { input: 'CURL_BUDGET: synthetic recovery budget probe.', settings };
+    const admitted = (await curl('budget-admit', '/v1/agent-runs', { method: 'POST', body: budgetBody, headers: { 'Idempotency-Key': budgetKey }, expected: 201 })).value;
+    const budget = { agent: admitted.agent_id, turn: admitted.turn_id };
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await waitFor(`budget kill ${attempt}`, () => kills.length === attempt && !fixture);
+      assert.equal(modelCalls.filter(call => call.scenario === 'CURL_BUDGET').length, attempt);
+      await start();
+      // Any public request reconstructs the Session; its constructor resumes
+      // retained work (production would also fire the persisted alarm).
+      const observed = await turnState(`budget-after-loss-${attempt}`, budget.agent, budget.turn);
+      assert.ok(!['completed', 'cancelled'].includes(observed.state), JSON.stringify(observed));
+    }
+    const stopped = await terminal('budget-terminal', budget.agent, budget.turn);
+    assert.equal(stopped.state, 'failed', JSON.stringify(stopped)); assert.match(JSON.stringify(stopped), exhausted);
+    assert.equal(modelCalls.filter(call => call.scenario === 'CURL_BUDGET').length, 3, 'exactly three automatic attempts reach the provider');
+    const replay = await curl('budget-idempotent-replay', '/v1/agent-runs', { method: 'POST', body: budgetBody, headers: { 'Idempotency-Key': budgetKey } });
+    assert.equal(replay.value.turn_id, budget.turn, JSON.stringify(replay.value));
+    assert.equal(modelCalls.filter(call => call.scenario === 'CURL_BUDGET').length, 3, 'replaying the original request never re-dispatches');
+    const next = (await curl('budget-next-turn', `/v1/agents/${budget.agent}/turns`, { method: 'POST', body: { input: 'CURL_BUDGET_NEXT: the session still serves new work.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    const nextDone = await terminal('budget-next-terminal', budget.agent, next.turn_id);
+    assert.equal(nextDone.state, 'completed', JSON.stringify(nextDone));
+    summary.budget = { stopped, provider_attempts: 3, next: nextDone.state };
+
+    // 2. A Code Mode cell completes effect A (durable receipt), dispatches B,
+    // then the owner dies. Recovery replays A's receipt and reports B unknown.
+    const effectsRun = (await curl('effects-admit', '/v1/agent-runs', { method: 'POST', body: { input: 'CURL_EFFECTS: apply A then B exactly once.', settings }, headers: { 'Idempotency-Key': randomUUID() }, expected: 201 })).value;
+    await waitFor('effect B owner loss', () => kills.length === 4 && !fixture);
+    assert.deepEqual(effects.map(effect => effect.name), ['A', 'B']);
+    await start();
+    // Reconnect like a client whose stream died with the server.
+    const reconnect = await curl('effects-reconnect-sse', `/v1/agents/${effectsRun.agent_id}/events?cursor=${BigInt(effectsRun.accepted_cursor) - 1n}`, { headers: { Accept: 'text/event-stream' }, maxTime: 30,
+      sse: value => ['turn_completed', 'turn_failed', 'turn_cancelled'].includes(value.type) && value.turn_id === effectsRun.turn_id });
+    assert.equal(reconnect.status, 200);
+    const effectsDone = await terminal('effects-terminal', effectsRun.agent_id, effectsRun.turn_id);
+    const effectsHistory = await history('effects-history', effectsRun.agent_id);
+    assert.deepEqual(effects.map(effect => effect.name), ['A', 'B'], 'no effect is dispatched twice');
+    summary.effects = { terminal: effectsDone.state, model_calls: modelCalls.filter(call => call.scenario === 'CURL_EFFECTS') };
+    assert.equal(effectsDone.state, 'completed', JSON.stringify(effectsDone));
+    assert.match(JSON.stringify(effectsHistory), /outcome unknown/, 'the recovered cell reports the unproved effect as unknown');
+    assert.match(JSON.stringify(effectsHistory), /EFFECT_A_APPLIED/, 'the recovered cell replays the durable A receipt');
+
+    // 3. A nested child is active (its effect C is in flight) when the owner
+    // dies. Recovery must reach a bounded terminal without re-running C.
+    const childRun = (await curl('child-admit', '/v1/agent-runs', { method: 'POST', body: { input: 'CURL_ROOT_SPAWN: delegate one synthetic effect to a child.', settings }, headers: { 'Idempotency-Key': randomUUID() }, expected: 201 })).value;
+    await waitFor('child effect C owner loss', () => kills.length === 5 && !fixture);
+    await start();
+    const childDone = await terminal('child-terminal', childRun.agent_id, childRun.turn_id);
+    const childHistory = await history('child-history', childRun.agent_id);
+    const childCalls = modelCalls.filter(call => call.scenario === 'CURL_CHILD_TASK');
+    summary.child = { terminal: childDone, model_calls: modelCalls.filter(call => ['CURL_ROOT_SPAWN', 'CURL_CHILD_TASK'].includes(call.scenario)) };
+    assert.equal(effects.filter(effect => effect.name === 'C').length, 1, 'the restored child does not repeat its interrupted effect C');
+    assert.equal(childCalls[0].names_lost_call, false, 'before loss the child input has no interrupted-call evidence');
+    assert.ok(childCalls.some(call => call.process === 6 && call.instruction_messages > childCalls[0].instruction_messages && call.names_lost_call),
+      'the restored child input names its interrupted call (call id and arguments) as outcome unknown');
+    assert.equal(childDone.state, 'completed', JSON.stringify(childDone));
+    assert.match(JSON.stringify(childHistory), /CHILD_RESUMED_WITHOUT_REPEAT/, 'the root observes the restored child result');
+
+    // 3b. Restart the idle process, then explicitly delegate new work to the
+    // same restored child (mirrors the live 'no Nanocodex host is active' report).
+    // Same workerd process: the owner-only public drill ctx.abort()s the
+    // Session isolate (as eviction/deploy would) while module globals survive.
+    const restarted = await curl('child-public-restart', `/v1/agents/${childRun.agent_id}/restart`, { method: 'POST', expected: 202 });
+    assert.equal(restarted.value.restarting, true);
+    await delay(500); // the drill aborts the object 100ms after acknowledging
+    const followup = (await curl('followup-turn', `/v1/agents/${childRun.agent_id}/turns`, { method: 'POST', body: { input: 'CURL_CHILD_FOLLOWUP: delegate effect D to the same child.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    const followupDone = await terminal('followup-terminal', childRun.agent_id, followup.turn_id);
+    const followupHistory = JSON.stringify(await history('followup-history', childRun.agent_id));
+    summary.followup = { terminal: followupDone, effects_d: effects.filter(effect => effect.name === 'D').length, host_inactive: /no Nanocodex host is active/.test(followupHistory),
+      model_calls: modelCalls.filter(call => ['CURL_CHILD_FOLLOWUP', 'CURL_FOLLOWUP_TASK'].includes(call.scenario)) };
+    assert.doesNotMatch(followupHistory, /no Nanocodex host is active/, 'restored child must have a live host for explicit delegation');
+    assert.equal(followupDone.state, 'completed', JSON.stringify(followupDone));
+    assert.equal(effects.filter(effect => effect.name === 'D').length, 1, 'delegated child effect runs exactly once');
+    assert.match(followupHistory, /FOLLOWUP_OK/);
+    const delegated = modelCalls.find(call => call.scenario === 'CURL_FOLLOWUP_TASK');
+    assert.doesNotMatch(delegated.last_instruction, /curl-child-command/, 'an explicit new delegation does not carry stale interrupted-call evidence');
+
+    // 3c. A child observes more calls than the retained bound, its effect E
+    // is in flight, and its owner is lost twice (once during its resume).
+    const wideRun = (await curl('wide-admit', '/v1/agent-runs', { method: 'POST', body: { input: 'CURL_ROOT_WIDE: delegate a wide batch to a child.', settings }, headers: { 'Idempotency-Key': randomUUID() }, expected: 201 })).value;
+    const wideBase = kills.length;
+    await waitFor('wide effect E owner loss', () => kills.length === wideBase + 1 && !fixture);
+    await start(); await turnState('wide-after-loss-1', wideRun.agent_id, wideRun.turn_id);
+    await waitFor('wide resumed child owner loss', () => kills.length === wideBase + 2 && !fixture);
+    await start(); await turnState('wide-after-loss-2', wideRun.agent_id, wideRun.turn_id);
+    const wideDone = await terminal('wide-terminal', wideRun.agent_id, wideRun.turn_id);
+    const wideCalls = modelCalls.filter(call => call.scenario === 'CURL_WIDE_TASK');
+    summary.wide = { terminal: wideDone.state, effects_e: effects.filter(effect => effect.name === 'E').length,
+      child_calls: wideCalls.map(({ process, tool_outputs, names_wide_call, listed_wide_calls, instruction_messages }) => ({ process, tool_outputs, names_wide_call, listed_wide_calls, instruction_messages })) };
+    const resumedWide = wideCalls.filter(call => call.tool_outputs === 0).slice(1);
+    assert.equal(resumedWide.length, 2, 'the child resumed after each owner loss');
+    for (const call of resumedWide) {
+      assert.ok(call.names_wide_call, 'every resume names the still-unknown effect call, including after a second loss');
+      assert.equal(call.listed_wide_calls, 8, 'evidence stays bounded to eight calls');
+    }
+    assert.match(JSON.stringify(await history('wide-history', wideRun.agent_id)), /\b3 additional observed call/, 'evicted completed calls are counted, never silently dropped');
+    assert.equal(effects.filter(effect => effect.name === 'E').length, 1, 'effect E is never dispatched again');
+    assert.equal(wideDone.state, 'completed', JSON.stringify(wideDone));
+
+    // 4. A child whose every inference dies with its owner exhausts bounded
+    // automatic recovery; the root reaches a terminal and the agent stays usable.
+    const loopRun = (await curl('loop-admit', '/v1/agent-runs', { method: 'POST', body: { input: 'CURL_ROOT_LOOP: delegate to a child that keeps losing its owner.', settings }, headers: { 'Idempotency-Key': randomUUID() }, expected: 201 })).value;
+    const loopBase = kills.length;
+    for (let loss = 1; ; loss++) {
+      const outcome = await waitFor(`loop owner loss ${loss} or terminal`, async () => {
+        if (kills.length >= loopBase + loss) return 'killed';
+        const value = fixture && (await curl(`loop-poll-${loss}`, `/v1/agents/${loopRun.agent_id}/turns/${loopRun.turn_id}`)).value;
+        return ['completed', 'failed', 'cancelled'].includes(value?.state) ? 'terminal' : undefined;
+      }, 30_000, 200);
+      if (outcome === 'terminal') break;
+      assert.ok(loss <= 6, 'automatic recovery must be bounded');
+      await start();
+    }
+    const loopDone = await terminal('loop-terminal', loopRun.agent_id, loopRun.turn_id);
+    const loopHistory = await history('loop-history', loopRun.agent_id);
+    const loopCalls = modelCalls.filter(call => call.scenario === 'CURL_LOOP_TASK');
+    summary.loop = { terminal: loopDone, child_provider_attempts: loopCalls.length, root_calls: modelCalls.filter(call => call.scenario === 'CURL_ROOT_LOOP') };
+    assert.ok(loopCalls.length <= 4, 'one initial child inference plus at most three automatic resumes: ' + loopCalls.length);
+    assert.ok(['completed', 'failed'].includes(loopDone.state), JSON.stringify(loopDone));
+    assert.match(JSON.stringify([loopDone, loopHistory]), /recovery exhausted|outcome unknown/);
+    const loopNext = (await curl('loop-next-turn', `/v1/agents/${loopRun.agent_id}/turns`, { method: 'POST', body: { input: 'CURL_LOOP_NEXT: still usable after exhaustion.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    assert.equal((await terminal('loop-next-terminal', loopRun.agent_id, loopNext.turn_id)).state, 'completed');
+    assert.deepEqual(unexpected, []);
+  } finally {
+    await writeFile(join(output, 'trace.json'), JSON.stringify({ summary, kills, model_calls: modelCalls, effects, unexpected, offline_mcp_discovery: discovery.length }, null, 2));
+    await kill('test cleanup');
+    for (const socket of sockets) socket.destroy();
+    await new Promise(r => control.close(r));
+    console.log(JSON.stringify({ evidence: output, kills: kills.length, effects: effects.map(effect => effect.name), model_calls: modelCalls.length }));
+  }
+});

@@ -132,6 +132,112 @@ pub(super) struct PersistedAgent {
     /// Latest committed boundary of a native (for example Claude) backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) native_checkpoint: Option<PersistedNative>,
+    /// Bounded tool calls observed during the unfinished turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) in_flight_calls: Vec<InFlightCall>,
+    /// Observed calls dropped by the retention bound.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) in_flight_omitted: u32,
+}
+
+/// Bounded evidence of one tool call observed during a turn. It is kept
+/// until the turn settles (no checkpoint pruning), so after a restart it may
+/// or may not also be in the restored history. It is never replayed and is
+/// not a receipt journal; it only names calls whose outcome must be reconciled.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct InFlightCall {
+    /// Full provider identity, used to match its result.
+    pub(super) call_id: String,
+    pub(super) tool: String,
+    /// Display-bounded argument summary.
+    pub(super) arguments: String,
+    /// A result was observed before the restart.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) result_recorded: bool,
+}
+
+/// Calls retained per turn. Calls with an observed result are evicted before
+/// calls still running; every eviction is counted and reported.
+pub(super) const MAX_IN_FLIGHT_CALLS: usize = 8;
+const MAX_IN_FLIGHT_FIELD_BYTES: usize = 240;
+
+impl InFlightCall {
+    pub(super) fn new(call_id: &str, tool: &str, arguments: Option<&Value>) -> Self {
+        let arguments = match arguments {
+            Some(Value::String(text)) => text.clone(),
+            Some(value) => value.to_string(),
+            None => String::new(),
+        };
+        Self {
+            call_id: call_id.to_owned(),
+            tool: bounded(tool),
+            arguments: bounded(&arguments),
+            result_recorded: false,
+        }
+    }
+}
+
+/// Appends a call, evicting the oldest call with an observed result first,
+/// else the oldest call. Returns how many calls were evicted.
+pub(super) fn retain_call(calls: &mut Vec<InFlightCall>, call: InFlightCall) -> u32 {
+    calls.retain(|existing| existing.call_id != call.call_id);
+    calls.push(call);
+    let mut evicted = 0;
+    while calls.len() > MAX_IN_FLIGHT_CALLS {
+        let index = calls
+            .iter()
+            .position(|existing| existing.result_recorded)
+            .unwrap_or(0);
+        calls.remove(index);
+        evicted += 1;
+    }
+    evicted
+}
+
+fn bounded(text: &str) -> String {
+    if text.len() <= MAX_IN_FLIGHT_FIELD_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_IN_FLIGHT_FIELD_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// Model-visible list of calls whose outcome a restart made unknown.
+pub(super) fn in_flight_evidence(calls: &[InFlightCall], omitted: u32) -> Option<String> {
+    if calls.is_empty() && omitted == 0 {
+        return None;
+    }
+    let mut lines = calls
+        .iter()
+        .map(|call| {
+            let state = if call.result_recorded {
+                "a result was observed before the restart"
+            } else {
+                "started; no result was observed"
+            };
+            format!(
+                "- {} (call_id {}; {state}): {}",
+                call.tool,
+                bounded(&call.call_id),
+                call.arguments
+            )
+        })
+        .collect::<Vec<_>>();
+    if omitted > 0 {
+        lines.push(format!(
+            "- {omitted} additional observed call(s) omitted; this is not a complete history."
+        ));
+    }
+    Some(format!(
+        "Tool calls observed during the interrupted turn. Some may already appear in your \
+         restored history; any that do not may or may not have taken effect. This summary is \
+         not a receipt: consult your retained history and reconcile tool receipts or external \
+         effects before repeating any of them:\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// Portable form of [`ChildSnapshot::Native`], decoded only by its family.
@@ -239,6 +345,8 @@ pub(super) fn persist_agent(
         resume_attempts: session.resume_attempts,
         checkpoint,
         native_checkpoint,
+        in_flight_calls: session.in_flight_calls.clone(),
+        in_flight_omitted: session.in_flight_omitted,
     }
 }
 
@@ -274,22 +382,29 @@ pub(super) fn restored_session(
         && (agent.turn_in_flight
             || matches!(agent.status, AgentStatus::Running | AgentStatus::Pending));
     let exhausted = in_flight && recoverable && agent.resume_attempts >= MAX_RESUME_ATTEMPTS;
+    let evidence = in_flight_evidence(&agent.in_flight_calls, agent.in_flight_omitted);
     let status = if terminal {
         AgentStatus::Closed
     } else if exhausted {
-        AgentStatus::Failed {
-            error: format!(
-                "subagent recovery exhausted: the runtime restarted during each of the last \
-                 {MAX_RESUME_ATTEMPTS} automatic resumes of this turn. Inspect child evidence \
-                 before delegating a recovery; do not replay task side effects."
-            ),
+        let mut error = format!(
+            "subagent recovery exhausted: the runtime restarted during each of the last \
+             {MAX_RESUME_ATTEMPTS} automatic resumes of this turn. Inspect child evidence \
+             before delegating a recovery; do not replay task side effects."
+        );
+        if let Some(evidence) = &evidence {
+            error.push_str("\n\n");
+            error.push_str(evidence);
         }
+        AgentStatus::Failed { error }
     } else if in_flight && !recoverable {
-        AgentStatus::Failed {
-            error: "subagent could not be restored after a runtime restart: no portable \
-                    checkpoint was available"
-                .to_owned(),
+        let mut error = "subagent could not be restored after a runtime restart: no portable \
+                         checkpoint was available"
+            .to_owned();
+        if let Some(evidence) = &evidence {
+            error.push_str("\n\n");
+            error.push_str(evidence);
         }
+        AgentStatus::Failed { error }
     } else if in_flight {
         AgentStatus::Interrupted
     } else {
@@ -312,5 +427,10 @@ pub(super) fn restored_session(
         session.binding_task = task;
     }
     session.resume_attempts = resume_attempts;
+    // Retain until the turn settles: a second loss before then is still unknown.
+    if in_flight {
+        session.in_flight_calls = agent.in_flight_calls;
+        session.in_flight_omitted = agent.in_flight_omitted;
+    }
     Ok((session, resume, (!recoverable && !terminal) || exhausted))
 }

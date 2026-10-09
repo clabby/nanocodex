@@ -9,6 +9,7 @@ import { resolveTools } from './tool-configuration.mjs';
 export async function prepareHarnesses(harnesses, emit, {
   createCodexHost = createBrowserHost,
   subagentSessions, subagentRouting, toolProviders, codeEffectJournal, traceTool, codeEvaluator,
+  cloudflareReservation,
 } = {}) {
   if (harnesses === undefined) return { close() {} };
   if (!harnesses || typeof harnesses !== 'object' || Array.isArray(harnesses)
@@ -28,7 +29,7 @@ export async function prepareHarnesses(harnesses, emit, {
       if (options.durability !== undefined || options.durabilityId !== undefined || options.sessionId !== undefined || options.harnesses !== undefined) throw new TypeError('child harness capabilities must be ephemeral and cannot contain nested harnesses');
       const config = toClaudeConfig(options);
       const host = createClaudeHost({ ...options, onEvent: emit, subagentSessions, subagentRouting, codeEffectJournal, traceTool });
-      const id = registerDefinitionHost(host);
+      const id = registerDefinitionHost(host, cloudflareReservation);
       hosts.push([id, host]);
       const parallelSafeTools = host.parallelSafeTools();
       result.claude = { ...config, hostDefinitionId: id, authHostId: id, tools: JSON.parse(host.toolDefinitions()),
@@ -43,7 +44,7 @@ export async function prepareHarnesses(harnesses, emit, {
       if (createCodexHost === createBrowserHost && typeof globalThis.Worker !== 'function' && options.codeEvaluator === undefined) throw new TypeError('Codex harness Code Mode requires an explicit codeEvaluator outside a browser Worker host');
       const { tools } = resolveTools(options.tools, { defaultSubagents: false });
       const host = createCodexHost({ ...transport, hostAuth: transport.hostAuth === true, tools, workspace: options.workspace, toolMode: options.toolMode ?? 'code-only', codeEvaluator: options.codeEvaluator, onEvent: emit, subagentSessions, subagentRouting, toolProviders, codeEffectJournal, traceTool });
-      const id = registerDefinitionHost(host);
+      const id = registerDefinitionHost(host, cloudflareReservation);
       hosts.push([id, host]);
       await host.ready();
       result.codex = toWasmConfig({ ...options, ...transport, apiKey: transport.apiKey ?? 'host-managed', hostDefinitionId: id });

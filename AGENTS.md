@@ -16,6 +16,11 @@
 - Finish each E2E run with reproducible evidence: the command, inputs, expected
   and observed outcomes, and an inspectable trace, transcript, log, screenshot,
   or recording where relevant. A passing test name alone is not evidence.
+- For managed API durability work, reproduce and verify behavior with `curl`
+  against public HTTP routes. Retain request bodies, response headers, SSE or
+  JSON responses, and assertions under ignored `output/`. Exercise durable
+  admission, disconnect/retry, recovery, and subsequent usable work; client SDK
+  or CLI checks supplement this HTTP evidence.
 - Continuously look for ways to improve the developer experience in CI. Inspect
   the relevant jobs' actual results, duration, failures, and artifacts; favor
   fast, reliable user-journey feedback, actionable failure output, and easy

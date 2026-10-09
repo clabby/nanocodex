@@ -721,6 +721,28 @@ jobs:
           pnpm --filter @nanocodex/x-api run typecheck
           pnpm exec turbo run build --filter nanocodex-connect-protocol
           pnpm --filter nanocodex-managed-service run prepare:code-evaluator
+      - name: Exercise managed durability through curl
+        id: managed_curl
+        timeout-minutes: 5
+        run: pnpm --filter nanocodex-managed-service run test:durability:curl
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && steps.managed_curl.outcome != 'skipped'
+        with:
+          name: managed-curl-durability
+          path: |
+            output/managed-curl-recovery/*/run.json
+            output/managed-curl-recovery/*/trace.json
+            output/managed-curl-recovery/*/workerd-*.log
+            output/managed-curl-recovery/*/README.md
+            output/managed-curl-recovery/*/curl/**
+            output/managed-curl-hand-recovery/*/result.json
+            output/managed-curl-hand-recovery/*/checks.json
+            output/managed-curl-hand-recovery/*/README.md
+            output/managed-curl-hand-recovery/*/runtime.log
+            output/managed-curl-hand-recovery/*/hand-wire.json
+            output/managed-curl-hand-recovery/*/curl/**
+            output/managed-curl-hand-recovery/*/hand/*.log
+          if-no-files-found: error
       - name: Exercise single-Hand upgrade and routing
         timeout-minutes: 5
         run: |

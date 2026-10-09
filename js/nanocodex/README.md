@@ -344,6 +344,11 @@ after reconstruction. If three consecutive automatic resumes are lost before the
 child's turn settles, its next reconstruction reports `subagent recovery exhausted`
 and stops automatic recovery. The child retains its history and can receive an
 explicit delegation after any uncertain tool effects have been reconciled.
+Recovery also carries a bounded summary of observed tool calls from the
+interrupted turn, including call identities and whether a result was observed.
+The summary is evidence for reconciliation, not a receipt or permission to
+repeat an effect. Calls may already appear in the restored history, and omitted
+entries are counted; an empty summary does not prove that no tools ran.
 Child messages remain in the separate task-tree journal,
 not the root conversation stream. Children of roots without durability live only
 for the lifetime of the runtime. Obsolete child checkpoint tables from older

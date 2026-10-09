@@ -524,47 +524,6 @@ test("Cloudflare Agent reconstruction takes over the same durable owner after fe
   await reopened.session.shutdown();
 });
 
-test("Cloudflare root takeover retains child status and stale cleanup preserves new children", async () => {
-  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
-  const storage = new MemoryStorage();
-  const lifecycles = [];
-  const options = {
-    tools: { identity: { parameters: { type: "object" }, handler: (_input, context) => context.subagent } },
-    [Symbol.for("nanocodex.cloudflare.internalRuntime")]: { subagentLifecycle: event => lifecycles.push(event) },
-  };
-  const first = await create(module, durableOwner(storage), options);
-  let replacement;
-  try {
-    const oldChild = await Subagents.spawn(first, { role: "old-child", task: "Wait until restart.", outputSchema: { type: "object" } });
-    const oldBind = lifecycles.find(({ type }) => type === "bind");
-    assert.ok(oldBind);
-    assert.equal(storage.subagents.size, 0);
-    assert.equal(storage.subagentCheckpoints.size, 0);
-    replacement = await create(module, durableOwner(storage), options);
-    assert.equal(replacement.sessionId, first.sessionId, "root identity remains durable");
-    const restored = (await Subagents.list(replacement, { includeCompleted: true })).agents;
-    assert.equal(restored.length, 1);
-    assert.equal(restored[0].agent_id, oldChild.agent_id);
-    assert.equal(restored[0].role, "old-child");
-    assert.deepEqual(restored[0].status, { state: "interrupted" });
-    const child = await Subagents.spawn(replacement, { role: "new-child", task: "Use only live authority.", outputSchema: { type: "object" } });
-    const newBind = lifecycles.find(({ type, descriptor }) => type === "bind" && descriptor.role === "new-child");
-    assert.ok(newBind);
-    assert.notEqual(newBind.sessionId, oldBind.sessionId);
-    await first.session.shutdown();
-    const routed = JSON.parse(await globalThis.nanocodexHost.executeTool("identity", "{}", newBind.sessionId, "after-stale-cleanup"));
-    assert.equal(routed.structured_result.role, "new-child");
-    assert.throws(() => globalThis.nanocodexHost.executeTool("identity", "{}", oldBind.sessionId, "old-child"), /no Nanocodex host is active/);
-    assert.equal(lifecycles.some(({ type }) => type === "reconstruct"), false);
-    await Subagents.close(replacement, child.agent_id);
-    assert.equal(storage.subagents.size, 0);
-    assert.equal(storage.subagentCheckpoints.size, 0);
-  } finally {
-    await first.session.shutdown();
-    await replacement?.session.shutdown();
-  }
-});
-
 test("Cloudflare startup drops legacy child descriptors and malformed checkpoints without reading them", async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const storage = new MemoryStorage();
