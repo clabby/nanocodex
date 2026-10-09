@@ -413,12 +413,19 @@ async fn run_linux_installer(
         destination.label()
     );
     let binary = match artifacts {
-        Some(directory) => ["nanocodex2", "nanocodex"]
+        // The Hand only: an installed version names it nanocodex2, a build
+        // directory nanocodex-hand. The CLI (nanocodex) is never a Hand.
+        Some(directory) => ["nanocodex2", "nanocodex-hand"]
             .iter()
             .map(|name| directory.join(name))
             .find(|path| path.is_file())
             .map_or_else(
-                || Err(eyre::eyre!("Missing nanocodex in {}", directory.display())),
+                || {
+                    Err(eyre::eyre!(
+                        "Missing the Hand (nanocodex2 or nanocodex-hand) in {}",
+                        directory.display()
+                    ))
+                },
                 |path| fs::read(path).wrap_err("Could not read the Linux Hand binary"),
             )?,
         None => {
