@@ -543,9 +543,10 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     const tools = createCodeTools(Object.keys(declaredTools), (name, input) => declaredTools[name](input));
     const EXIT = Symbol("exit");
 
-    function text(value) {
+    // Same as the sandboxed evaluators: text("label:", value) keeps every value.
+    function text(...values) {
       controller.signal.throwIfAborted();
-      content.push({ type: "input_text", text: stringify(value) });
+      content.push({ type: "input_text", text: values.length > 1 ? values.map(stringify).join(" ") : stringify(values[0]) });
     }
     function image(value, detail) {
       controller.signal.throwIfAborted();

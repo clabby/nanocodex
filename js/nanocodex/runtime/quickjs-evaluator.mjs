@@ -205,7 +205,11 @@ const tools = (${createCodeTools.toString()})(
   (name, input) => __nanocodex_call_tool(name, JSON.stringify(input ?? null)).then(__nanocodex_decode),
 );
 const ALL_TOOLS = Object.freeze(typeof __nanocodex_catalog === "undefined" ? undefined : JSON.parse(__nanocodex_catalog));
-const text = (value) => __nanocodex_emit("text", JSON.stringify(__nanocodex_stringify(value)));
+// Models often label values as text("label:", value); keep every argument
+// visible instead of silently dropping all but the first.
+const text = (...values) => __nanocodex_emit("text", JSON.stringify(values.length > 1
+  ? values.map(__nanocodex_stringify).join(" ")
+  : __nanocodex_stringify(values[0])));
 const image = (value, detail) => {
   const item = normalizeImage(value, detail);
   __nanocodex_emit("image", JSON.stringify({ value: item, detail: item.detail }));

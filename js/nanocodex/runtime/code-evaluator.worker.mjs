@@ -34,7 +34,11 @@ async function evaluate({ source, storedEntries = [], toolDefinitions = [], tool
   const storedWrites = new Map();
   const callableTools = createCodeTools(toolNames, callTool);
 
-  const text = (value) => post("output", { kind: "text", value: stringify(value) });
+  // Models often label values as text("label:", value); keep every argument.
+  const text = (...values) => post("output", {
+    kind: "text",
+    value: values.length > 1 ? values.map(stringify).join(" ") : stringify(values[0]),
+  });
   const image = (value, detail) => {
     const item = normalizeImage(value, detail);
     post("output", { kind: "image", value: item, detail: item.detail });

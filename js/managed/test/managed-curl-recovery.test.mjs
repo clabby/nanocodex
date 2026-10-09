@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { build } from 'esbuild';
 import { accountProxyWorker } from '../benchmark/account-proxy.mjs';
+import { claudeProvider } from '../../egress/test/claude-provider.fixture.mjs';
 
 // Public HTTP recovery journey: every API call is the curl executable against
 // the normal account ingress, Managed API and Egress workers on persisted
@@ -19,6 +20,7 @@ import { accountProxyWorker } from '../benchmark/account-proxy.mjs';
 const root = fileURLToPath(new URL('../../..', import.meta.url));
 const owner = '11111111-1111-4111-8111-111111111155';
 const settings = { model: 'gpt-6.1-sol', thinking: 'low', reasoning_mode: 'standard', fast_mode: false };
+const claudeSettings = { ...settings, model: 'claude-sonnet-4-6' };
 const flags = ['nodejs_compat', 'durable_object_io_tasks_prevent_eviction', 'enable_request_signal'];
 const exhausted = /MANAGED_RECOVERY_EXHAUSTED[\s\S]*outcome unknown/;
 
@@ -110,7 +112,7 @@ test('curl recovers managed work across workerd SIGKILL without duplicate effect
   const say = text => respond([{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }], true);
   const exec = (callId, source) => respond([{ type: 'custom_tool_call', name: 'exec', call_id: callId, input: source }], false);
   // Most specific first: a follow-up turn's history still contains its predecessor's marker.
-  const markers = ['CURL_WIDE_TASK', 'CURL_ROOT_WIDE', 'CURL_FOLLOWUP_TASK', 'CURL_CHILD_FOLLOWUP', 'CURL_CHILD_TASK', 'CURL_LOOP_TASK', 'CURL_BUDGET_NEXT', 'CURL_LOOP_NEXT', 'CURL_BUDGET', 'CURL_EFFECTS', 'CURL_ROOT_SPAWN', 'CURL_ROOT_LOOP'];
+  const markers = ['CURL_CLAUDE_CHILD', 'CURL_WIDE_TASK', 'CURL_ROOT_WIDE', 'CURL_FOLLOWUP_TASK', 'CURL_CHILD_FOLLOWUP', 'CURL_CHILD_TASK', 'CURL_LOOP_TASK', 'CURL_BUDGET_NEXT', 'CURL_LOOP_NEXT', 'CURL_BUDGET', 'CURL_EFFECTS', 'CURL_ROOT_SPAWN', 'CURL_ROOT_LOOP'];
   const baselines = {};
   const delegate = (task, marker) => [
     () => exec(marker + '-spawn', 'text(await tools.spawn_agent(' + JSON.stringify({ role: 'Curl child', task, model: 'sol', thinking: 'low', output_contract: { kind: 'string' } }) + '));'),
@@ -148,6 +150,7 @@ test('curl recovers managed work across workerd SIGKILL without duplicate effect
       case 'CURL_ROOT_LOOP': return delegate('CURL_LOOP_TASK: answer once.', 'curl-loop')[outputs.length]?.() ?? say('LOOP_ROOT_DONE');
       case 'CURL_LOOP_TASK': return 'kill'; // every child inference dies with its owner
       case 'CURL_LOOP_NEXT': return say('LOOP_NEXT_OK');
+      case 'CURL_CLAUDE_CHILD': return outputs.length === 0 ? exec('curl-claude-child-submit', 'text(await tools.submit_result({output:"CLAUDE_CHILD_OK"}));') : say('CLAUDE_CHILD_OK');
       // More observed calls than the retention bound, then two owner losses.
       case 'CURL_ROOT_WIDE': return delegate('CURL_WIDE_TASK: run the synthetic batch, then apply effect E once.', 'curl-wide')[outputs.length]?.() ?? say('WIDE_ROOT_DONE');
       case 'CURL_WIDE_TASK': {
@@ -170,6 +173,32 @@ test('curl recovers managed work across workerd SIGKILL without duplicate effect
       default: unexpected.push({ kind: 'model', user: user.slice(0, 2000) }); return say('UNEXPECTED');
     }
   };
+  // Anthropic Messages stub for a Claude Sonnet root that delegates to a
+  // Codex child. Like the live model, it labels values as text("label:", v)
+  // and acts only on what the previous tool_result actually showed it.
+  const claudeCalls = [];
+  const claudeSse = blocks => [
+    { type: 'message_start', message: { id: 'msg_' + randomUUID(), type: 'message', role: 'assistant', model: claudeSettings.model, content: [], usage: { input_tokens: 10, output_tokens: 0 } } },
+    ...blocks.flatMap((block, index) => block.type === 'tool_use'
+      ? [{ type: 'content_block_start', index, content_block: { ...block, input: {} } }, { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) } }, { type: 'content_block_stop', index }]
+      : [{ type: 'content_block_start', index, content_block: { type: 'text', text: '' } }, { type: 'content_block_delta', index, delta: { type: 'text_delta', text: block.text } }, { type: 'content_block_stop', index }]),
+    { type: 'message_delta', delta: { stop_reason: blocks.some(block => block.type === 'tool_use') ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+    { type: 'message_stop' },
+  ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+  const claudeExec = (id, code) => claudeSse([{ type: 'tool_use', id, name: 'exec', input: { code } }]);
+  const decideClaude = body => {
+    const results = body.messages.flatMap(message => Array.isArray(message.content) ? message.content : []).filter(block => block.type === 'tool_result');
+    const last = results.at(-1), shown = JSON.stringify(last?.content ?? null);
+    const receipt = shown.match(/CURL_CLAUDE_SPAWN: \{\\"agent_id\\":(\d+)/);
+    claudeCalls.push({ process: processNumber, tool_results: results.length, last_tool_use_id: last?.tool_use_id ?? null, shown: shown.slice(0, 2000), receipt_agent_id: receipt ? Number(receipt[1]) : null });
+    if (results.length === 0) return claudeExec('toolu_curl_claude_spawn', 'const child = await tools.spawn_agent(' + JSON.stringify({ role: 'Curl Codex child', task: 'CURL_CLAUDE_CHILD: submit the synthetic result.', harness: 'codex', model: 'gpt-6.1-sol', thinking: 'low', output_contract: { kind: 'string' } }) + ');\n'
+      + 'text("CURL_CLAUDE_SPAWN:", JSON.stringify(child));');
+    if (results.length === 1) return receipt
+      ? claudeExec('toolu_curl_claude_wait', `const done = await tools.wait_agent({agent_ids:[${receipt[1]}],timeout_ms:20000});\ntext("CURL_CLAUDE_WAIT:", done);`)
+      // A real model that cannot see its receipt probes and respawns; stop visibly instead.
+      : claudeSse([{ type: 'text', text: 'CLAUDE_SPAWN_RECEIPT_HIDDEN' }]);
+    return claudeSse([{ type: 'text', text: /CURL_CLAUDE_WAIT: .*CLAUDE_CHILD_OK/.test(shown) ? 'CLAUDE_MIXED_DONE' : 'CLAUDE_CHILD_RESULT_HIDDEN' }]);
+  };
   const sockets = new Set();
   const control = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
@@ -179,6 +208,16 @@ test('curl recovers managed work across workerd SIGKILL without duplicate effect
       const decision = decide(JSON.parse(call.body));
       if (decision === 'kill') return void kill('model call in flight: ' + modelCalls.at(-1).scenario);
       return send(200, decision);
+    }
+    if (url.origin === 'https://api.anthropic.com' && url.pathname === '/v1/models') return send(200, { data: [{ id: claudeSettings.model, display_name: 'Synthetic Claude Sonnet' }], has_more: false });
+    if (url.origin === 'https://api.anthropic.com' && url.pathname === '/v1/messages') {
+      const body = JSON.parse(call.body);
+      if (body.stream === true && JSON.stringify(body.messages).includes('CURL_CLAUDE_ROOT')) return send(200, decideClaude(body), 'text/event-stream');
+      unexpected.push({ kind: 'claude', model: body.model, stream: body.stream ?? null }); return send(400, { type: 'error', error: { type: 'invalid_request_error', message: 'unexpected synthetic Claude request' } });
+    }
+    if (/^https:\/\/(platform\.claude\.com|claude\.ai|api\.anthropic\.com)\//.test(call.url)) {
+      const response = await claudeProvider(new Request(call.url, { method: call.method, headers: call.headers, body: call.body ?? undefined }));
+      if (response) { res.writeHead(response.status, Object.fromEntries(response.headers)); return void res.end(Buffer.from(await response.arrayBuffer())); }
     }
     if (url.hostname === 'effects.example') {
       const name = url.pathname.split('/').pop();
@@ -190,6 +229,15 @@ test('curl recovers managed work across workerd SIGKILL without duplicate effect
     }
     if (url.origin === 'https://chatgpt.com' && call.body?.includes('"gpt-6-luna"')) {
       return send(200, { id: 'title', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Synthetic recovery' }] }], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } });
+    }
+    // Codex children of a Claude root use the stateless Responses HTTPS SSE
+    // transport; the same CONTROL policy decides from the full input.
+    if (url.href === 'https://chatgpt.com/backend-api/codex/responses' && call.method === 'POST') {
+      const body = JSON.parse(call.body);
+      if (body.previous_response_id) { unexpected.push({ kind: 'responses-https-previous', url: call.url }); return send(400, { error: 'stateless fixture' }); }
+      const decision = decide({ history: body.input ?? [] });
+      if (decision === 'kill') return void kill('HTTPS model call in flight: ' + modelCalls.at(-1).scenario);
+      return send(200, decision.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(''), 'text/event-stream');
     }
     // Default hosted MCP catalog discovery is optional background work; it
     // stays offline here and is recorded, never answered with fabricated tools.
@@ -259,6 +307,30 @@ test('curl recovers managed work across workerd SIGKILL without duplicate effect
     assert.equal((await fetch(new URL('/__fixture/chatgpt', base), { method: 'POST' })).status, 204);
     const unauthorized = await (async () => { const saved = token; token = 'synthetic-invalid'; try { return await curl('unauthenticated-run-rejected', '/v1/agent-runs', { method: 'POST', body: { input: 'CURL_BUDGET', settings }, headers: { 'Idempotency-Key': randomUUID() } }); } finally { token = saved; } })();
     assert.equal(unauthorized.status, 401); assert.equal(modelCalls.length, 0, 'rejected admission never reaches the provider');
+
+    // 0. Mixed Claude -> Codex delegation (live final-mixed regression): the
+    // Claude root's labeled Code Mode text must carry the actual spawn receipt
+    // into its next provider request, so it waits on that child instead of
+    // probing and spawning replacements.
+    const login = await curl('claude-login', '/v1/credentials/claude/login', { method: 'POST' });
+    assert.ok(login.status >= 200 && login.status < 300 && login.value.authorization_url, 'Claude login starts: ' + login.status);
+    const loginState = new URL(login.value.authorization_url).searchParams.get('state');
+    const connected = await curl('claude-login-complete', '/v1/credentials/claude/login/complete', { method: 'POST', body: { code: 'curl-recovery#' + loginState } });
+    assert.ok(connected.status >= 200 && connected.status < 300, 'Claude login completes: ' + connected.status + ' ' + JSON.stringify(connected.value));
+    const claudeRun = (await curl('claude-mixed-admit', '/v1/agent-runs', { method: 'POST', body: { input: 'CURL_CLAUDE_ROOT: delegate one synthetic result to a Codex child.', settings: claudeSettings }, headers: { 'Idempotency-Key': randomUUID() }, expected: 201 })).value;
+    const claudeDone = await terminal('claude-mixed-terminal', claudeRun.agent_id, claudeRun.turn_id);
+    const claudeRows = (await history('claude-mixed-history', claudeRun.agent_id)).data;
+    const rootSpawns = claudeRows.filter(row => row.agent_id === undefined && row.event?.type === 'tool.result' && row.event.payload.tool === 'spawn_agent');
+    summary.claude = { terminal: claudeDone, provider_calls: claudeCalls, root_spawn_results: rootSpawns.map(row => row.event.payload),
+      child_calls: modelCalls.filter(call => call.scenario === 'CURL_CLAUDE_CHILD').length };
+    assert.equal(claudeDone.state, 'completed', JSON.stringify(claudeDone));
+    assert.equal(rootSpawns.length, 1, 'the Claude root makes exactly one actual spawn_agent call');
+    const spawned = rootSpawns[0].event.payload.structured_result?.agent_id;
+    assert.ok(Number.isInteger(spawned), 'the public history records the admitted child id');
+    assert.equal(claudeCalls[1]?.receipt_agent_id, spawned, 'the next Claude provider request shows the labeled spawn receipt: ' + claudeCalls[1]?.shown);
+    assert.match(claudeCalls[2]?.shown ?? '', /CURL_CLAUDE_WAIT: .*CLAUDE_CHILD_OK/, 'the labeled wait result shows the Codex child output');
+    assert.equal(claudeCalls.length, 3, 'one provider request per observed step');
+    assert.match(JSON.stringify(claudeRows), /CLAUDE_MIXED_DONE/);
 
     // 1. Repeated abrupt loss of the same unfinished model call consumes the
     // persisted budget: three provider invocations, then a durable terminal.

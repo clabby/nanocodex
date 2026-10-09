@@ -122,7 +122,9 @@ Wait for both direct children to complete. Actually attempt send_agent_message t
   const agent = receipt.agent_id;
   const completed = completedOutputs(initial);
   for (const expected of [expectedA, expectedG, expectedB]) assert.ok([...completed.values()].some(value => JSON.stringify(value) === JSON.stringify(expected)), `Missing actual wait_agent output ${JSON.stringify(expected)}`);
-  assert.equal(events(initial).filter(event => event.type === 'tool.call' && event.payload.tool === 'spawn_agent').length, 3, 'Exactly three actual children');
+  const admissions = toolResults(initial, 'spawn_agent').filter(result => result.status === 'completed');
+  assert.equal(admissions.length, 3, 'Exactly three successful child admissions');
+  assert.equal(new Set(admissions.map(result => result.value?.agent_id)).size, 3, 'Three distinct admitted child IDs');
   assert.ok(toolResults(initial, 'submit_result').some(result => result.status === 'failed' && /schema/.test(String(result.value))), 'Actual invalid result rejection');
   assert.ok(toolResults(initial, 'send_agent_message').some(result => result.status === 'failed' && /unknown agent_id/.test(String(result.value))), 'Actual unknown-child rejection');
   assert.ok(toolResults(initial, 'exec_command').some(result => result.value?.exit_code === 17), 'Actual shell exit 17');
