@@ -4212,7 +4212,10 @@ async fn apply_feature_update(
         FeatureUpdate::ReplaceAgent(_)
         | FeatureUpdate::OpenPane(_)
         | FeatureUpdate::ClosePane(_)
-        | FeatureUpdate::Capabilities(_) => app.update(AppEvent::NotifyError {
+        | FeatureUpdate::Capabilities(_)
+        | FeatureUpdate::SubmitPrompt(_)
+        | FeatureUpdate::Relaunch(_)
+        | FeatureUpdate::VoiceStatus(_) => app.update(AppEvent::NotifyError {
             pane: PaneId::Main,
             error: "This feature action is not wired into the unified TUI yet".to_owned(),
         }),
