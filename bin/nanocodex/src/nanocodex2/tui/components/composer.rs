@@ -66,6 +66,8 @@ pub(crate) enum ComposerEffect {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SettingsCommand {
     Bug(String),
+    Fast(Option<bool>),
+    Cancel,
     CodeReview(crate::nanocodex2::tui::review::Command),
     Btw(String),
     CloseBtw,
@@ -86,6 +88,28 @@ pub(crate) enum SettingsCommand {
 }
 
 impl SettingsCommand {
+    pub(crate) fn available(&self, caps: crate::nanocodex2::tui::backend::Capabilities) -> bool {
+        use crate::nanocodex2::tui::features::FeatureCommand;
+        match self {
+            Self::Bug(_) => caps.bug,
+            Self::AutoRoute => caps.autoroute,
+            Self::Reload => caps.reload,
+            Self::SetDone(_) => caps.done,
+            Self::Screen => caps.screen,
+            Self::Voice(_) => caps.voice_managed || caps.voice_realtime,
+            Self::Feature(command) => match command {
+                FeatureCommand::McpLogin(_) | FeatureCommand::McpReload(_) => caps.mcp,
+                FeatureCommand::Benchmark(_) => caps.eval,
+                FeatureCommand::Branches => caps.branches,
+                FeatureCommand::Collapse | FeatureCommand::Split => caps.collapse_split,
+                FeatureCommand::Btw(_) | FeatureCommand::CloseBtw => caps.local_btw,
+                FeatureCommand::RealtimeVoice(_) => caps.voice_realtime,
+                FeatureCommand::SwitchModel(_) => caps.local,
+            },
+            _ => true,
+        }
+    }
+
     pub(super) fn parse(input: &str) -> Option<Self> {
         if let Some(command) = crate::nanocodex2::tui::review::parse(input) {
             return Some(Self::CodeReview(command));
@@ -93,6 +117,17 @@ impl SettingsCommand {
         let mut parts = input.split_whitespace();
         let command = parts.next()?;
         match command {
+            "/fast" => Some(match (parts.next(), parts.next()) {
+                (None, None) => Self::Fast(None),
+                (Some("on"), None) => Self::Fast(Some(true)),
+                (Some("off"), None) => Self::Fast(Some(false)),
+                _ => Self::Invalid("Usage: /fast [on|off]".into()),
+            }),
+            "/cancel" => Some(if parts.next().is_some() {
+                Self::Invalid("Usage: /cancel".into())
+            } else {
+                Self::Cancel
+            }),
             "/btw" => Some(Self::Btw(
                 input.trim_start()[command.len()..].trim().to_owned(),
             )),
@@ -136,10 +171,22 @@ impl SettingsCommand {
                 (Some("login"), Some(name), None) => Self::Feature(
                     crate::nanocodex2::tui::features::FeatureCommand::McpLogin(name.to_owned()),
                 ),
-                (Some("reload"), name, None) => Self::Feature(
-                    crate::nanocodex2::tui::features::FeatureCommand::McpReload(name.map(str::to_owned)),
-                ),
-                _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload <server>".into()),
+                (Some("reload"), name, None) => {
+                    Self::Feature(crate::nanocodex2::tui::features::FeatureCommand::McpReload(
+                        name.map(str::to_owned),
+                    ))
+                }
+                _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload [server]".into()),
+            }),
+            // FEATURE-HOOK: wp2 local /btw collapse/split and the branch navigator
+            "/collapse" | "/split" | "/branches" => Some(if parts.next().is_some() {
+                Self::Invalid(format!("Usage: {command}"))
+            } else {
+                Self::Feature(match command {
+                    "/collapse" => crate::nanocodex2::tui::features::FeatureCommand::Collapse,
+                    "/split" => crate::nanocodex2::tui::features::FeatureCommand::Split,
+                    _ => crate::nanocodex2::tui::features::FeatureCommand::Branches,
+                })
             }),
             "/benchmark" => Some(Self::Feature(
                 crate::nanocodex2::tui::features::FeatureCommand::Benchmark(
@@ -252,6 +299,7 @@ pub(crate) enum ComposerEvent {
 }
 
 pub(crate) struct Composer {
+    capabilities: crate::nanocodex2::tui::backend::Capabilities,
     draft: String,
     images: Vec<PastedImage>,
     next_image: u64,
@@ -429,6 +477,7 @@ impl Composer {
 
     pub(crate) fn new(workspace: &Path, thinking: ReasoningEffort) -> Self {
         Self {
+            capabilities: Default::default(),
             draft: String::new(),
             images: Vec::new(),
             next_image: 1,
@@ -478,8 +527,11 @@ impl Composer {
                 self.history.detach();
                 // Only resolve image paths after routing to the composer:
                 // pasted paths in search dialogs must remain ordinary text.
-                if let Some(data) = super::super::clipboard::pasted_image_data_url(&text) {
+                if let Some((data, caption)) =
+                    crate::nanocodex2::tui::clipboard::pasted_image_data_url(&text)
+                {
                     self.insert_image(data);
+                    self.insert(caption);
                 } else {
                     self.insert(&text);
                 }
@@ -1157,7 +1209,25 @@ impl Composer {
         ComposerUpdate::effect(ComposerEffect::Queue(prompt), true)
     }
 
+    pub(crate) fn set_capabilities(
+        &mut self,
+        capabilities: crate::nanocodex2::tui::backend::Capabilities,
+    ) {
+        self.capabilities = capabilities;
+    }
+
     fn take_local_command(&mut self) -> Option<ComposerUpdate> {
+        if self.draft.trim_start().starts_with('/')
+            && !self.capabilities.command_available(&self.draft)
+        {
+            let command = self.draft.split_whitespace().next().unwrap_or("");
+            let error = self.capabilities.unavailable(command);
+            self.replace_draft(String::new());
+            return Some(ComposerUpdate::effect(
+                ComposerEffect::Settings(SettingsCommand::Invalid(error)),
+                true,
+            ));
+        }
         if !self.images.is_empty() {
             if self.draft.split_whitespace().next() == Some("/review") {
                 return Some(ComposerUpdate::effect(

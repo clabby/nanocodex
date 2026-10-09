@@ -526,7 +526,9 @@ fn emit(value: &Value) {
 
 pub(crate) async fn serve(command: DeviceHand) -> Result<(), ManagedError> {
     if command.service_protocol {
-        emit(&json!({"serviceProtocol": 1, "version": env!("CARGO_PKG_VERSION")}));
+        emit(
+            &json!({"serviceProtocol": 1, "version": env!("CARGO_PKG_VERSION"), "handIdentity": env!("NANOCODEX_HAND_IDENTITY")}),
+        );
         return Ok(());
     }
     if command.request_permissions || command.check_permissions {

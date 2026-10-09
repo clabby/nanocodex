@@ -6969,7 +6969,11 @@ async fn terminal_tool_batches_fold_into_classic_summaries() {
     let dump = |label: &str, fixture: &Fixture| {
         let contents = fixture.terminal.screen.lock().unwrap().screen().contents();
         if let Some(dir) = &evidence {
-            std::fs::write(Path::new(dir).join(format!("{label}.screen.txt")), &contents).unwrap();
+            std::fs::write(
+                Path::new(dir).join(format!("{label}.screen.txt")),
+                &contents,
+            )
+            .unwrap();
         }
         contents
     };
@@ -6977,45 +6981,179 @@ async fn terminal_tool_batches_fold_into_classic_summaries() {
     // Sequential calls are separated by real time so they do not read as parallel.
     async fn call(fixture: &mut Fixture, id: &str, tool: &str, arguments: Value) {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        fixture.nested(REMOTE_TURN, "tool.call", json!({"call_id": id, "tool": tool, "arguments": arguments}));
+        fixture.nested(
+            REMOTE_TURN,
+            "tool.call",
+            json!({"call_id": id, "tool": tool, "arguments": arguments}),
+        );
     }
-    fn finish(fixture: &mut Fixture, id: &str, tool: &str, status: &str, duration_ns: u64, result: Value) {
+    fn finish(
+        fixture: &mut Fixture,
+        id: &str,
+        tool: &str,
+        status: &str,
+        duration_ns: u64,
+        result: Value,
+    ) {
         fixture.nested(REMOTE_TURN, "tool.result", json!({"call_id": id, "tool": tool, "status": status, "duration_ns": duration_ns, "result": result}));
     }
 
-    fixture.nested(REMOTE_TURN, "assistant.message", comment("c-one", "I'll look around the workspace first."));
+    fixture.nested(
+        REMOTE_TURN,
+        "assistant.message",
+        comment("c-one", "I'll look around the workspace first."),
+    );
     call(&mut fixture, "cell1", "exec", json!("const [files, readme] = await Promise.all([tools.Glob({pattern: \"*.md\"}), tools.Read({file_path: \"/ws/README.md\"})]);\nawait tools.Bash({command: \"ls -la\"});\ntext(\"README_FIRST_LINE\");")).await;
     // Glob and Read run in parallel; Bash follows them.
-    call(&mut fixture, "cell1/code-0", "Glob", json!({"pattern": "GLOB_PATTERN_*.md"})).await;
+    call(
+        &mut fixture,
+        "cell1/code-0",
+        "Glob",
+        json!({"pattern": "GLOB_PATTERN_*.md"}),
+    )
+    .await;
     fixture.nested(REMOTE_TURN, "tool.call", json!({"call_id": "cell1/code-1", "tool": "Read", "arguments": {"file_path": "/ws/README.md"}}));
     fixture.terminal.wait_text("2 calls").await;
     let running = dump("running", &fixture);
-    assert!(running.lines().any(|line| line.contains("Tools  2 calls")), "{running}");
-    assert!(running.contains("◌ Glob") && running.contains("◌ Read"), "{running}");
+    assert!(
+        running.lines().any(|line| line.contains("Tools  2 calls")),
+        "{running}"
+    );
+    assert!(
+        running.contains("◌ Glob") && running.contains("◌ Read"),
+        "{running}"
+    );
     tokio::time::sleep(Duration::from_millis(40)).await;
-    finish(&mut fixture, "cell1/code-0", "Glob", "completed", 40_000_000, json!({"filenames": ["README.md"], "numFiles": 1}));
-    finish(&mut fixture, "cell1/code-1", "Read", "completed", 41_000_000, json!({"content": "RAW_README_CONTENT"}));
-    call(&mut fixture, "cell1/code-2", "Bash", json!({"command": "ls -la", "description": "List workspace"})).await;
-    finish(&mut fixture, "cell1/code-2", "Bash", "completed", 10_000_000, json!({"stdout": "RAW_LS_OUTPUT", "exit_code": 0}));
-    finish(&mut fixture, "cell1", "exec", "completed", 95_000_000, json!([{"type": "input_text", "text": "README_FIRST_LINE # Demo project"}]));
+    finish(
+        &mut fixture,
+        "cell1/code-0",
+        "Glob",
+        "completed",
+        40_000_000,
+        json!({"filenames": ["README.md"], "numFiles": 1}),
+    );
+    finish(
+        &mut fixture,
+        "cell1/code-1",
+        "Read",
+        "completed",
+        41_000_000,
+        json!({"content": "RAW_README_CONTENT"}),
+    );
+    call(
+        &mut fixture,
+        "cell1/code-2",
+        "Bash",
+        json!({"command": "ls -la", "description": "List workspace"}),
+    )
+    .await;
+    finish(
+        &mut fixture,
+        "cell1/code-2",
+        "Bash",
+        "completed",
+        10_000_000,
+        json!({"stdout": "RAW_LS_OUTPUT", "exit_code": 0}),
+    );
+    finish(
+        &mut fixture,
+        "cell1",
+        "exec",
+        "completed",
+        95_000_000,
+        json!([{"type": "input_text", "text": "README_FIRST_LINE # Demo project"}]),
+    );
 
-    fixture.nested(REMOTE_TURN, "assistant.message", comment("c-two", "Now checking for TODOs and the missing file."));
+    fixture.nested(
+        REMOTE_TURN,
+        "assistant.message",
+        comment("c-two", "Now checking for TODOs and the missing file."),
+    );
     call(&mut fixture, "cell2", "exec", json!("await tools.Grep({pattern: \"TODO\"}); text(await tools.Bash({command: \"cat MISSING_FILE.txt\"}));")).await;
-    call(&mut fixture, "cell2/code-0", "Grep", json!({"pattern": "TODO", "path": "/ws"})).await;
-    finish(&mut fixture, "cell2/code-0", "Grep", "completed", 3_000_000, json!({"filenames": ["README.md"], "numFiles": 1}));
-    call(&mut fixture, "cell2/code-1", "Bash", json!({"command": "cat MISSING_FILE.txt", "description": "Read missing file"})).await;
-    finish(&mut fixture, "cell2/code-1", "Bash", "failed", 11_000_000, json!({"stderr": "MISSING_FILE_ERROR: No such file or directory", "exit_code": 1}));
-    finish(&mut fixture, "cell2", "exec", "completed", 24_000_000, json!([{"type": "input_text", "text": "exit_code: 1"}]));
+    call(
+        &mut fixture,
+        "cell2/code-0",
+        "Grep",
+        json!({"pattern": "TODO", "path": "/ws"}),
+    )
+    .await;
+    finish(
+        &mut fixture,
+        "cell2/code-0",
+        "Grep",
+        "completed",
+        3_000_000,
+        json!({"filenames": ["README.md"], "numFiles": 1}),
+    );
+    call(
+        &mut fixture,
+        "cell2/code-1",
+        "Bash",
+        json!({"command": "cat MISSING_FILE.txt", "description": "Read missing file"}),
+    )
+    .await;
+    finish(
+        &mut fixture,
+        "cell2/code-1",
+        "Bash",
+        "failed",
+        11_000_000,
+        json!({"stderr": "MISSING_FILE_ERROR: No such file or directory", "exit_code": 1}),
+    );
+    finish(
+        &mut fixture,
+        "cell2",
+        "exec",
+        "completed",
+        24_000_000,
+        json!([{"type": "input_text", "text": "exit_code: 1"}]),
+    );
 
-    fixture.nested(REMOTE_TURN, "assistant.message", comment("c-three", "Delegating a review, then sweeping files."));
+    fixture.nested(
+        REMOTE_TURN,
+        "assistant.message",
+        comment("c-three", "Delegating a review, then sweeping files."),
+    );
     call(&mut fixture, "cell3", "exec", json!("const a = await tools.spawn_agent({role: \"Reviewer\", task: \"Review README\"}); await tools.wait_agent({agent_ids: [a.agent_id]}); for (const f of files) await tools.Read({file_path: f});")).await;
-    call(&mut fixture, "cell3/code-0", "spawn_agent", json!({"role": "Reviewer", "task": "Review README"})).await;
-    finish(&mut fixture, "cell3/code-0", "spawn_agent", "completed", 5_000_000, json!({"agent_id": 7, "status": "running"}));
-    call(&mut fixture, "cell3/code-1", "wait_agent", json!({"agent_ids": [7]})).await;
-    finish(&mut fixture, "cell3/code-1", "wait_agent", "completed", 1_500_000_000, json!({"agents": [{"agent_id": 7, "status": "completed", "output": "README is fine"}]}));
+    call(
+        &mut fixture,
+        "cell3/code-0",
+        "spawn_agent",
+        json!({"role": "Reviewer", "task": "Review README"}),
+    )
+    .await;
+    finish(
+        &mut fixture,
+        "cell3/code-0",
+        "spawn_agent",
+        "completed",
+        5_000_000,
+        json!({"agent_id": 7, "status": "running"}),
+    );
+    call(
+        &mut fixture,
+        "cell3/code-1",
+        "wait_agent",
+        json!({"agent_ids": [7]}),
+    )
+    .await;
+    finish(
+        &mut fixture,
+        "cell3/code-1",
+        "wait_agent",
+        "completed",
+        1_500_000_000,
+        json!({"agents": [{"agent_id": 7, "status": "completed", "output": "README is fine"}]}),
+    );
     for index in 2..10 {
         let id = format!("cell3/code-{index}");
-        call(&mut fixture, &id, "Read", json!({"file_path": format!("/ws/SWEEP_FILE_{index}.md")})).await;
+        call(
+            &mut fixture,
+            &id,
+            "Read",
+            json!({"file_path": format!("/ws/SWEEP_FILE_{index}.md")}),
+        )
+        .await;
         let (status, result) = if index == 4 {
             ("failed", json!({"error": "SWEEP_READ_DENIED"}))
         } else {
@@ -7023,7 +7161,14 @@ async fn terminal_tool_batches_fold_into_classic_summaries() {
         };
         finish(&mut fixture, &id, "Read", status, 1_000_000, result);
     }
-    finish(&mut fixture, "cell3", "exec", "completed", 1_610_000_000, json!([{"type": "input_text", "text": "review done"}]));
+    finish(
+        &mut fixture,
+        "cell3",
+        "exec",
+        "completed",
+        1_610_000_000,
+        json!([{"type": "input_text", "text": "review done"}]),
+    );
     fixture.nested(REMOTE_TURN, "assistant.message", json!({"model_call_index": 2, "item_id": "final", "phase": "final_answer", "text": "FINAL_ANSWER: one TODO."}));
     fixture.complete(REMOTE_TURN);
     fixture.terminal.wait_text("FINAL_ANSWER").await;
@@ -7032,17 +7177,49 @@ async fn terminal_tool_batches_fold_into_classic_summaries() {
 
     let folded = dump("folded", &fixture);
     for expected in [
-        "✓ Tools  3 calls", "README_FIRST_LINE # Demo project", "GLOB_PATTERN_*.md", "/ws/README.md", "$ ls -la",
-        "× Tools  2 calls · 1 failed", "MISSING_FILE_ERROR", "TODO",
-        "Tools  10 calls · 1 failed", "Spawned", "Waited on", "SWEEP_READ_DENIED", "5 more · Ctrl+O",
+        "✓ Tools  3 calls",
+        "README_FIRST_LINE # Demo project",
+        "GLOB_PATTERN_*.md",
+        "/ws/README.md",
+        "$ ls -la",
+        "× Tools  2 calls · 1 failed",
+        "MISSING_FILE_ERROR",
+        "TODO",
+        "Tools  10 calls · 1 failed",
+        "Spawned",
+        "Waited on",
+        "SWEEP_READ_DENIED",
+        "5 more · Ctrl+O",
     ] {
-        assert!(folded.contains(expected), "folded summary lacks {expected:?}\n{folded}");
+        assert!(
+            folded.contains(expected),
+            "folded summary lacks {expected:?}\n{folded}"
+        );
     }
     // Glob and Read overlap, so they share a parallel branch; Bash closes the batch.
-    assert!(folded.lines().any(|line| line.contains("├─┬") && line.contains("Glob")), "{folded}");
-    assert!(folded.lines().any(|line| line.contains("└──") && line.contains("ls -la")), "{folded}");
-    for raw in ["RAW_README_CONTENT", "RAW_LS_OUTPUT", "RAW_SWEEP_CONTENT", "SWEEP_FILE_2", "Local"] {
-        assert!(!folded.contains(raw), "folded summary leaked {raw:?}\n{folded}");
+    assert!(
+        folded
+            .lines()
+            .any(|line| line.contains("├─┬") && line.contains("Glob")),
+        "{folded}"
+    );
+    assert!(
+        folded
+            .lines()
+            .any(|line| line.contains("└──") && line.contains("ls -la")),
+        "{folded}"
+    );
+    for raw in [
+        "RAW_README_CONTENT",
+        "RAW_LS_OUTPUT",
+        "RAW_SWEEP_CONTENT",
+        "SWEEP_FILE_2",
+        "Local",
+    ] {
+        assert!(
+            !folded.contains(raw),
+            "folded summary leaked {raw:?}\n{folded}"
+        );
     }
 
     fixture.terminal.input("\x0f");
@@ -7053,18 +7230,24 @@ async fn terminal_tool_batches_fold_into_classic_summaries() {
     fixture.terminal.wait_no_text("RAW_SWEEP_CONTENT").await;
     fixture.terminal.wait_no_text("Tools  3 calls").await;
     let hidden = dump("hidden", &fixture);
-    for kept in ["I’ll look around the workspace first.", "Now checking for TODOs", "FINAL_ANSWER"] {
+    for kept in [
+        "I’ll look around the workspace first.",
+        "Now checking for TODOs",
+        "FINAL_ANSWER",
+    ] {
         assert!(hidden.contains(kept), "hidden mode lost {kept:?}\n{hidden}");
     }
     for gone in ["Tools", "MISSING_FILE", "Glob"] {
-        assert!(!hidden.contains(gone), "hidden mode leaked {gone:?}\n{hidden}");
+        assert!(
+            !hidden.contains(gone),
+            "hidden mode leaked {gone:?}\n{hidden}"
+        );
     }
     fixture.terminal.input("\x0f");
     fixture.terminal.wait_text("5 more · Ctrl+O").await;
     fixture.terminal.wait_text("Tools  3 calls").await;
     dump("refolded", &fixture);
 }
-
 
 #[tokio::test]
 async fn terminal_code_details_show_available_source_without_placeholder_blocks() {
@@ -7076,22 +7259,962 @@ async fn terminal_code_details_show_available_source_without_placeholder_blocks(
     ] {
         let mut fixture = Fixture::start_with_active(true).await;
         fixture.terminal.input("\x0f");
-        fixture.nested(REMOTE_TURN, "tool.call", json!({
-            "call_id": "source-cell", "tool": "exec", "arguments": arguments
-        }));
-        fixture.nested(REMOTE_TURN, "tool.result", json!({
-            "call_id": "source-cell", "tool": "exec", "status": "completed",
-            "duration_ns": 1, "result": [{"type": "input_text", "text": "CELL_RESULT_MARKER"}]
-        }));
+        fixture.nested(
+            REMOTE_TURN,
+            "tool.call",
+            json!({
+                "call_id": "source-cell", "tool": "exec", "arguments": arguments
+            }),
+        );
+        fixture.nested(
+            REMOTE_TURN,
+            "tool.result",
+            json!({
+                "call_id": "source-cell", "tool": "exec", "status": "completed",
+                "duration_ns": 1, "result": [{"type": "input_text", "text": "CELL_RESULT_MARKER"}]
+            }),
+        );
         fixture.complete(REMOTE_TURN);
         fixture.terminal.wait_text("CELL_RESULT_MARKER").await;
         fixture.terminal.wait_text("Enter send").await;
         let screen = fixture.terminal.screen.lock().unwrap().screen().contents();
-        assert_eq!(screen.contains("SOURCE_MARKER"), has_source, "{label}: {screen}");
-        assert!(!screen.contains("<source unavailable>"), "{label}: {screen}");
+        assert_eq!(
+            screen.contains("SOURCE_MARKER"),
+            has_source,
+            "{label}: {screen}"
+        );
+        assert!(
+            !screen.contains("<source unavailable>"),
+            "{label}: {screen}"
+        );
         if !has_source {
             assert!(!screen.contains("javascript"), "{label}: {screen}");
         }
         eprintln!("CODE SOURCE {label}\n{screen}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Responsiveness journey: real PTY input-to-visible latency while an attached
+// agent streams commentary, reasoning, and large Tools groups into a long
+// transcript. Run explicitly:
+//   NANOCODEX_TUI_PERF_OUT=/path/report.json cargo test -p nanocodex-bin \
+//     --test nanocodex2_tui_lifecycle terminal_perf_ -- --ignored --nocapture
+// Optional: NANOCODEX_TUI_PERF_INTERVAL_US (live event pacing, default 2000),
+// NANOCODEX_TUI_PERF_HISTORY (preloaded cycles, default 120),
+// NANOCODEX_TUI_PERF_CALLS (calls per live Tools group, default 24).
+
+#[derive(Clone)]
+struct PerfEmitter {
+    events: mpsc::UnboundedSender<Value>,
+    history: Arc<Mutex<Vec<Value>>>,
+    cursor: Arc<std::sync::atomic::AtomicU64>,
+    sent: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PerfEmitter {
+    fn from_fixture(fixture: &Fixture) -> Self {
+        Self {
+            events: fixture.events.clone(),
+            history: fixture.history.clone(),
+            cursor: Arc::new(std::sync::atomic::AtomicU64::new(fixture.cursor)),
+            sent: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Same wire shape as Fixture::nested, safe to call from the live loader
+    /// and the test body concurrently (the history lock orders cursors).
+    fn nested(&self, turn: &str, kind: &str, payload: Value) {
+        let mut history = self.history.lock().unwrap();
+        let cursor = self.cursor.fetch_add(1, Ordering::SeqCst) + 1;
+        let value = json!({"type": "event", "cursor": cursor.to_string(), "turn_id": turn,
+            "event": {"protocol_version": 1, "request_id": AGENT, "seq": cursor,
+                "type": kind, "payload": payload}});
+        history.push(value.clone());
+        let _ = self.events.send(value);
+        drop(history);
+        self.sent.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn perf_env(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+/// One agent "step": commentary, a Code Mode cell with a large nested Tools
+/// group, reasoning summary deltas, then streamed commentary deltas.
+async fn perf_cycle(
+    emitter: &PerfEmitter,
+    label: &str,
+    step: usize,
+    calls: usize,
+    deltas: usize,
+    pace: Duration,
+    stop: &AtomicBool,
+) -> bool {
+    async fn tick(pace: Duration) {
+        if !pace.is_zero() {
+            tokio::time::sleep(pace).await;
+        }
+    }
+    emitter.nested(REMOTE_TURN, "assistant.message", json!({
+        "model_call_index": 1, "item_id": format!("{label}-c{step}"), "phase": "commentary",
+        "text": format!("{label}_{step:04} reviewing module {step}.\nThe second line explains the plan for step {step} in detail.\nA third line keeps the history tall.")
+    }));
+    tick(pace).await;
+    let cell = format!("{label}-cell{step}");
+    emitter.nested(REMOTE_TURN, "tool.call", json!({
+        "call_id": cell, "tool": "exec",
+        "arguments": format!("for (const f of files) await tools.Read({{file_path: f}}); // {label} {step}")
+    }));
+    for call in 0..calls {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        tick(pace).await;
+        let id = format!("{cell}/code-{call}");
+        let (tool, arguments, result) = if call % 3 == 2 {
+            (
+                "Bash",
+                json!({"command": format!("rg -n {label}_{step:04}_{call:03} src"), "description": "Search sources"}),
+                json!({"stdout": format!("src/lib.rs:{call}: step_{step}_{call}\n").repeat(4), "exit_code": 0}),
+            )
+        } else {
+            (
+                "Read",
+                json!({"file_path": format!("/ws/src/{label}_{step:04}_{call:03}.rs")}),
+                json!({"content": format!("fn module_{step}_{call}() {{}}\n").repeat(20)}),
+            )
+        };
+        emitter.nested(
+            REMOTE_TURN,
+            "tool.call",
+            json!({"call_id": id, "tool": tool, "arguments": arguments}),
+        );
+        tick(pace).await;
+        emitter.nested(REMOTE_TURN, "tool.result", json!({
+            "call_id": id, "tool": tool, "status": "completed", "duration_ns": 2_000_000u64, "result": result
+        }));
+    }
+    tick(pace).await;
+    emitter.nested(
+        REMOTE_TURN,
+        "tool.result",
+        json!({
+            "call_id": cell, "tool": "exec", "status": "completed", "duration_ns": 50_000_000u64,
+            "result": [{"type": "input_text", "text": format!("{label} cell {step} done")}]
+        }),
+    );
+    for delta in 0..deltas {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        tick(pace).await;
+        if delta % 4 == 0 {
+            emitter.nested(REMOTE_TURN, "reasoning.summary.delta", json!({
+                "model_call_index": 2 + step as u64, "text": format!("thinking about {label}_{step:04}_{:03}. ", calls + delta + 2)
+            }));
+        } else {
+            emitter.nested(REMOTE_TURN, "assistant.delta", json!({
+                "model_call_index": 1, "item_id": format!("{label}-d{step}"), "phase": "commentary",
+                "text": format!("{label}_{step:04}_{:03} ", calls + delta + 2)
+            }));
+        }
+    }
+    true
+}
+
+fn perf_screen(screen: &Arc<Mutex<vt100::Parser>>) -> String {
+    screen.lock().unwrap().screen().contents()
+}
+
+/// Busy-poll the parsed PTY screen (200us resolution) until done() holds.
+fn perf_wait(
+    screen: &Arc<Mutex<vt100::Parser>>,
+    start: std::time::Instant,
+    limit: Duration,
+    done: impl Fn(&str) -> bool,
+) -> Option<Duration> {
+    tokio::task::block_in_place(|| {
+        loop {
+            let contents = perf_screen(screen);
+            if done(&contents) {
+                return Some(start.elapsed());
+            }
+            if start.elapsed() > limit {
+                return None;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    })
+}
+
+/// Ordered transcript position markers visible on screen: commentary
+/// "HIST_0007"/"LIVE_0003" and tool rows "HIST_0007_012" (label, step, call+1).
+/// Sorted ascending, so first()/last() are the oldest/newest visible rows.
+fn perf_markers(contents: &str) -> Vec<(u8, u32, u32)> {
+    let mut found = Vec::new();
+    for (label, rank) in [("HIST_", 0u8), ("LIVE_", 1u8)] {
+        let mut rest = contents;
+        while let Some(index) = rest.find(label) {
+            let tail = &rest[index + 5..];
+            let digits = |text: &str, count: usize| {
+                (text.len() >= count && text.as_bytes()[..count].iter().all(u8::is_ascii_digit))
+                    .then(|| text[..count].parse::<u32>().unwrap())
+            };
+            if let Some(step) = digits(tail, 4) {
+                let call = tail[4..]
+                    .strip_prefix('_')
+                    .and_then(|call| digits(call, 3))
+                    .map_or(0, |call| call + 1);
+                found.push((rank, step, call));
+            }
+            rest = tail;
+        }
+    }
+    found.sort_unstable();
+    found
+}
+
+/// utime+stime clock ticks of the TUI process and its direct children.
+fn perf_cpu_ticks(pid: u32) -> u64 {
+    fn fields(path: &Path) -> Option<(u32, u64)> {
+        let stat = std::fs::read_to_string(path).ok()?;
+        let (_, after) = stat.rsplit_once(')')?;
+        let fields: Vec<&str> = after.split_whitespace().collect();
+        let ppid = fields.get(1)?.parse().ok()?;
+        let ticks = fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?;
+        Some((ppid, ticks))
+    }
+    let mut total = fields(Path::new(&format!("/proc/{pid}/stat"))).map_or(0, |(_, ticks)| ticks);
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            if let Some((ppid, ticks)) = fields(&entry.path().join("stat"))
+                && ppid == pid
+            {
+                total += ticks;
+            }
+        }
+    }
+    total
+}
+
+fn perf_stats(samples: &[Duration]) -> Value {
+    let mut ms: Vec<f64> = samples
+        .iter()
+        .map(|sample| sample.as_secs_f64() * 1000.0)
+        .collect();
+    ms.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    let pick = |quantile: f64| {
+        if ms.is_empty() {
+            0.0
+        } else {
+            ms[((ms.len() as f64 - 1.0) * quantile).round() as usize]
+        }
+    };
+    let round = |value: f64| (value * 100.0).round() / 100.0;
+    json!({"n": ms.len(), "p50_ms": round(pick(0.5)), "p95_ms": round(pick(0.95)),
+        "max_ms": round(ms.last().copied().unwrap_or(0.0))})
+}
+
+struct PerfPhase {
+    started: std::time::Instant,
+    ticks: u64,
+    bytes: usize,
+    events: u64,
+}
+
+impl PerfPhase {
+    fn begin(fixture: &Fixture, pid: u32, emitter: &PerfEmitter) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            ticks: perf_cpu_ticks(pid),
+            bytes: fixture.terminal.output.lock().unwrap().len(),
+            events: emitter.sent.load(Ordering::Relaxed),
+        }
+    }
+
+    /// CPU percent of one core (assumes CLK_TCK=100), PTY bytes and
+    /// synchronized-update frames emitted, and events delivered in the phase.
+    fn end(&self, fixture: &Fixture, pid: u32, emitter: &PerfEmitter) -> Value {
+        let wall = self.started.elapsed().as_secs_f64();
+        let ticks = perf_cpu_ticks(pid).saturating_sub(self.ticks);
+        let output = fixture.terminal.output.lock().unwrap();
+        let emitted = &output[self.bytes.min(output.len())..];
+        let frames = emitted
+            .windows(8)
+            .filter(|window| *window == b"\x1b[?2026h")
+            .count();
+        let events = emitter.sent.load(Ordering::Relaxed) - self.events;
+        json!({"wall_s": (wall * 1000.0).round() / 1000.0,
+            "cpu_pct": ((ticks as f64 / wall) * 100.0).round() / 100.0,
+            "cpu_ticks": ticks, "pty_bytes": emitted.len(), "sync_frames": frames,
+            "events": events, "events_per_s": ((events as f64 / wall) * 10.0).round() / 10.0})
+    }
+}
+
+fn perf_type_round(terminal: &mut Terminal, round: usize, samples: &mut Vec<Duration>) {
+    let text = format!("Q{round:02}xkcdtypingprobeabcdefghijklmnopqrst");
+    let screen = terminal.screen.clone();
+    for (index, character) in text.char_indices() {
+        std::thread::sleep(Duration::from_millis(8));
+        let start = std::time::Instant::now();
+        terminal.input(&character.to_string());
+        let prefix = text[..=index].to_owned();
+        let elapsed = perf_wait(&screen, start, Duration::from_secs(5), |contents| {
+            contents.contains(&prefix)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "typed {prefix:?} never became visible:\n{}",
+                perf_screen(&screen)
+            )
+        });
+        if index >= 4 {
+            samples.push(elapsed);
+        }
+    }
+    let start = std::time::Instant::now();
+    terminal.input(&"\x7f".repeat(text.len()));
+    let head = text[..5].to_owned();
+    perf_wait(&screen, start, Duration::from_secs(5), |contents| {
+        !contents.contains(&head)
+    })
+    .unwrap_or_else(|| panic!("draft {head:?} was not erased:\n{}", perf_screen(&screen)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "responsiveness journey; run explicitly with --ignored and NANOCODEX_TUI_PERF_OUT"]
+async fn terminal_perf_input_stays_responsive_while_an_agent_streams_large_tool_groups() {
+    let history_cycles = perf_env("NANOCODEX_TUI_PERF_HISTORY", 120) as usize;
+    let live_calls = perf_env("NANOCODEX_TUI_PERF_CALLS", 24) as usize;
+    let history_calls = perf_env("NANOCODEX_TUI_PERF_HISTORY_CALLS", 8) as usize;
+    let pace = Duration::from_micros(perf_env("NANOCODEX_TUI_PERF_INTERVAL_US", 2000));
+    let mut fixture = Fixture::start_with_active(true).await;
+    let pid = fixture.terminal.child.process_id().expect("TUI pid");
+    let screen = fixture.terminal.screen.clone();
+    let emitter = PerfEmitter::from_fixture(&fixture);
+    let never = AtomicBool::new(false);
+    let mut report = serde_json::Map::new();
+
+    // Long history: many commentary blocks and Tools groups in the active turn.
+    let preload = PerfPhase::begin(&fixture, pid, &emitter);
+    let start = std::time::Instant::now();
+    for step in 0..history_cycles {
+        perf_cycle(
+            &emitter,
+            "HIST",
+            step,
+            history_calls,
+            12,
+            Duration::ZERO,
+            &never,
+        )
+        .await;
+    }
+    let last = format!("HIST_{:04}", history_cycles - 1);
+    let settle = perf_wait(&screen, start, Duration::from_secs(60), |contents| {
+        contents.contains(&last)
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    report.insert("preload".into(), json!({
+        "cycles": history_cycles, "visible_after_ms": settle.map(|elapsed| elapsed.as_millis() as u64),
+        "load": preload.end(&fixture, pid, &emitter)
+    }));
+
+    // Baseline typing with no live stream.
+    let idle = PerfPhase::begin(&fixture, pid, &emitter);
+    let mut idle_typing = Vec::new();
+    perf_type_round(&mut fixture.terminal, 0, &mut idle_typing);
+    perf_type_round(&mut fixture.terminal, 1, &mut idle_typing);
+    report.insert(
+        "idle_typing".into(),
+        json!({"latency": perf_stats(&idle_typing), "load": idle.end(&fixture, pid, &emitter)}),
+    );
+
+    // Live agent stream: commentary + reasoning + large Tools groups.
+    let stop = Arc::new(AtomicBool::new(false));
+    let loader = {
+        let emitter = emitter.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let mut step = 0;
+            while perf_cycle(&emitter, "LIVE", step, live_calls, 40, pace, &stop).await {
+                step += 1;
+            }
+            step
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let streaming = PerfPhase::begin(&fixture, pid, &emitter);
+    let mut typing = Vec::new();
+    for round in 2..6 {
+        perf_type_round(&mut fixture.terminal, round, &mut typing);
+    }
+    report.insert(
+        "streaming_typing".into(),
+        json!({"latency": perf_stats(&typing), "load": streaming.end(&fixture, pid, &emitter)}),
+    );
+
+    // Scroll into the preloaded history and back while the stream continues.
+    let scrolling = PerfPhase::begin(&fixture, pid, &emitter);
+    let mut scroll_up = Vec::new();
+    let mut scroll_down = Vec::new();
+    let mut scroll_misses = 0;
+    for _ in 0..8 {
+        let before = perf_markers(&perf_screen(&screen));
+        let start = std::time::Instant::now();
+        fixture.terminal.input("\x1b[5~");
+        // Older transcript content must enter the viewport; live appends never
+        // satisfy this, and timers/spinners carry no markers.
+        match perf_wait(&screen, start, Duration::from_secs(3), |contents| {
+            let now = perf_markers(contents);
+            match (now.first(), before.first()) {
+                (Some(now), Some(before)) => now < before,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        }) {
+            Some(elapsed) => scroll_up.push(elapsed),
+            None => {
+                scroll_misses += 1;
+                eprintln!("PageUp miss, before={before:?}:\n{}", perf_screen(&screen));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    // Expand and fold every Tools group while reading history (view change).
+    let mut toggles = Vec::new();
+    let mut toggle_misses = 0;
+    for _ in 0..6 {
+        let before = perf_screen(&screen);
+        let before_rows: Vec<String> = before.lines().take(20).map(str::to_owned).collect();
+        let start = std::time::Instant::now();
+        fixture.terminal.input("\x0f");
+        match perf_wait(&screen, start, Duration::from_secs(3), |contents| {
+            contents
+                .lines()
+                .take(20)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+                != before_rows
+        }) {
+            Some(elapsed) => toggles.push(elapsed),
+            None => toggle_misses += 1,
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
+    // Fewer PageDowns than PageUps so every step still has newer content below.
+    for _ in 0..6 {
+        let before = perf_markers(&perf_screen(&screen));
+        let start = std::time::Instant::now();
+        fixture.terminal.input("\x1b[6~");
+        match perf_wait(&screen, start, Duration::from_secs(3), |contents| {
+            let now = perf_markers(contents);
+            match (now.last(), before.last()) {
+                (Some(now), Some(before)) => now > before,
+                (Some(_), None) => true,
+                _ => false,
+            }
+        }) {
+            Some(elapsed) => scroll_down.push(elapsed),
+            None => {
+                scroll_misses += 1;
+                eprintln!(
+                    "PageDown miss, before={before:?}:\n{}",
+                    perf_screen(&screen)
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    fixture.terminal.input("\x1b[F");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    report.insert(
+        "streaming_scroll".into(),
+        json!({
+            "page_up": perf_stats(&scroll_up), "page_down": perf_stats(&scroll_down),
+            "toggle_tools": perf_stats(&toggles), "scroll_misses": scroll_misses,
+            "toggle_misses": toggle_misses, "load": scrolling.end(&fixture, pid, &emitter)
+        }),
+    );
+
+    // Queue a follow-up, move focus into and out of the queue pane.
+    let queueing = PerfPhase::begin(&fixture, pid, &emitter);
+    let start = std::time::Instant::now();
+    fixture
+        .terminal
+        .input("\x1b[200~PERF_QUEUED_FOLLOWUP\x1b[201~");
+    let paste = perf_wait(&screen, start, Duration::from_secs(5), |contents| {
+        contents.contains("PERF_QUEUED_FOLLOWUP")
+    })
+    .expect("pasted follow-up visible");
+    let start = std::time::Instant::now();
+    fixture.terminal.input("\t");
+    let queued = perf_wait(&screen, start, Duration::from_secs(5), |contents| {
+        contents.contains("queue · enter steer latest")
+    })
+    .unwrap_or_else(|| panic!("queue never appeared:\n{}", perf_screen(&screen)));
+    let mut focus = Vec::new();
+    for round in 0..6 {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let entering = round % 2 == 0;
+        let start = std::time::Instant::now();
+        fixture.terminal.input("\t");
+        focus.push(
+            perf_wait(&screen, start, Duration::from_secs(5), |contents| {
+                contents.contains("e edit") == entering
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "queue focus={entering} never rendered:\n{}",
+                    perf_screen(&screen)
+                )
+            }),
+        );
+    }
+    report.insert("streaming_queue".into(), json!({
+        "paste_visible_ms": paste.as_secs_f64() * 1000.0, "queue_visible_ms": queued.as_secs_f64() * 1000.0,
+        "focus_toggle": perf_stats(&focus), "load": queueing.end(&fixture, pid, &emitter)
+    }));
+
+    // Steering: Enter to service receipt, then the acknowledgement round trip.
+    let steering = PerfPhase::begin(&fixture, pid, &emitter);
+    let mut steer_receipt = Vec::new();
+    for index in 0..4 {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let instruction = format!("PERF_STEER_{index}");
+        let start = std::time::Instant::now();
+        fixture.terminal.prompt(&instruction, "\r");
+        let (steer, ack) = tokio::time::timeout(TIMEOUT, fixture.steers.recv())
+            .await
+            .expect("steer reached the service")
+            .unwrap();
+        steer_receipt.push(start.elapsed());
+        assert_eq!(prompt_text(&steer["input"]), instruction);
+        emitter.nested(
+            REMOTE_TURN,
+            "run.steered",
+            json!({"steer_index": index + 1, "instruction_bytes": instruction.len()}),
+        );
+        ack.send(true).unwrap();
+    }
+    report.insert("streaming_steer".into(), json!({"enter_to_service": perf_stats(&steer_receipt), "load": steering.end(&fixture, pid, &emitter)}));
+
+    // Cancel under load: first Esc shows the interrupt prompt, second reaches the service.
+    let cancelling = PerfPhase::begin(&fixture, pid, &emitter);
+    let start = std::time::Instant::now();
+    fixture.terminal.input("\x1b");
+    let prompt = perf_wait(&screen, start, Duration::from_secs(3), |contents| {
+        contents.contains("Interrupt")
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let start = std::time::Instant::now();
+    fixture.terminal.input("\x1b");
+    let cancelled = tokio::time::timeout(Duration::from_secs(5), fixture.cancellations.recv())
+        .await
+        .ok()
+        .flatten()
+        .map(|turn| {
+            assert_eq!(turn, REMOTE_TURN);
+            start.elapsed()
+        });
+    report.insert(
+        "streaming_cancel".into(),
+        json!({
+            "interrupt_prompt_ms": prompt.map(|elapsed| elapsed.as_secs_f64() * 1000.0),
+            "esc_to_service_ms": cancelled.map(|elapsed| elapsed.as_secs_f64() * 1000.0),
+            "load": cancelling.end(&fixture, pid, &emitter)
+        }),
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    let live_steps = loader.await.unwrap();
+    fixture.cursor = emitter.cursor.load(Ordering::SeqCst);
+    fixture.emit(
+        REMOTE_TURN,
+        json!({"type": "turn_cancelled", "id": REMOTE_TURN}),
+    );
+    report.insert("config".into(), json!({
+        "history_cycles": history_cycles, "history_calls": history_calls, "live_calls_per_group": live_calls,
+        "pace_us": pace.as_micros() as u64, "live_steps": live_steps,
+        "events_total": emitter.sent.load(Ordering::Relaxed),
+        "terminal": "160x32 vt100 over portable-pty", "clk_tck_assumed": 100
+    }));
+    let report = Value::Object(report);
+    println!("TUI_PERF {report}");
+    if let Some(path) = std::env::var_os("NANOCODEX_TUI_PERF_OUT") {
+        std::fs::write(path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    }
+    assert!(
+        settle.is_some(),
+        "preloaded history never reached the viewport"
+    );
+    assert!(!typing.is_empty() && !steer_receipt.is_empty());
+    assert!(
+        cancelled.is_some(),
+        "cancel never reached the service under load"
+    );
+    let scroll = &report["streaming_scroll"];
+    assert_eq!(
+        scroll["scroll_misses"], 0,
+        "scroll steps never moved the viewport under load: {scroll}"
+    );
+    assert_eq!(
+        scroll["toggle_misses"], 0,
+        "tool mode changes were not visible under load: {scroll}"
+    );
+    // Meaningful but non-flaky ceilings: a frame budget miss is tolerated, a
+    // visibly stuck composer or steer is not. Override for slow debug builds.
+    let typing_p95 = perf_env("NANOCODEX_TUI_PERF_TYPING_P95_MS", 150) as f64;
+    let typing_max = perf_env("NANOCODEX_TUI_PERF_TYPING_MAX_MS", 1000) as f64;
+    let steer_p95 = perf_env("NANOCODEX_TUI_PERF_STEER_P95_MS", 1000) as f64;
+    let streaming_typing = &report["streaming_typing"]["latency"];
+    assert!(
+        streaming_typing["p95_ms"].as_f64().unwrap() <= typing_p95
+            && streaming_typing["max_ms"].as_f64().unwrap() <= typing_max,
+        "typing lagged while the agent streamed: {streaming_typing}"
+    );
+    let steer = &report["streaming_steer"]["enter_to_service"];
+    assert!(
+        steer["p95_ms"].as_f64().unwrap() <= steer_p95,
+        "steering lagged: {steer}"
+    );
+}
+
+// Renderer parity journeys: math graphics, completion notifications, tool
+// display modes and stream/view telemetry, all through the shipped binary.
+
+fn renderer_evidence(name: &str, bytes: &[u8]) {
+    if let Some(dir) = std::env::var_os("NANOCODEX_TUI_EVIDENCE_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+}
+
+async fn attached_renderer_terminal(configure: impl FnOnce(&mut CommandBuilder)) -> Fixture {
+    let mut fixture = Fixture::start_with_active(true).await;
+    fixture.terminal = Terminal::start_with_command(&fixture.origin, true, None, configure);
+    fixture.replacement_connection().await;
+    fixture.terminal.wait_text("Enter steer").await;
+    fixture
+}
+
+fn byte_count(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+async fn wait_bytes(terminal: &Terminal, needle: &[u8]) {
+    tokio::time::timeout(TIMEOUT, async {
+        while byte_count(&terminal.output.lock().unwrap(), needle) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "terminal never emitted {:?}",
+            String::from_utf8_lossy(needle)
+        )
+    });
+}
+
+/// PNG payloads of Kitty graphics uploads: APC "ESC _ G keys ; base64 ESC \",
+/// chunked while a chunk carries m=1.
+fn kitty_pngs(output: &[u8]) -> Vec<Vec<u8>> {
+    let find = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    };
+    let mut pngs = Vec::new();
+    let mut payload = String::new();
+    let mut rest = output;
+    while let Some(start) = find(rest, b"\x1b_G") {
+        let body = &rest[start + 3..];
+        let Some(end) = find(body, b"\x1b\\") else {
+            break;
+        };
+        let command = &body[..end];
+        if let Some(separator) = command.iter().position(|byte| *byte == b';') {
+            let keys = String::from_utf8_lossy(&command[..separator]).into_owned();
+            payload.push_str(&String::from_utf8_lossy(&command[separator + 1..]));
+            if !keys.split(',').any(|key| key == "m=1") {
+                if let Ok(png) = base64::engine::general_purpose::STANDARD.decode(&payload)
+                    && png.starts_with(b"\x89PNG")
+                {
+                    pngs.push(png);
+                }
+                payload.clear();
+            }
+        }
+        rest = &body[end + 2..];
+    }
+    pngs
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_math_renders_kitty_images_and_falls_back_to_source() {
+    let reply = "Euler:\n\n\\[e^{i\\pi} + 1 = 0\\]\n\nInline \\(x^2\\) beside text.\n\n$$\\frac{a}{b}$$\n\nMATH_DONE";
+    let placeholder = "\u{10EEEE}".as_bytes();
+
+    let mut kitty = attached_renderer_terminal(|command| {
+        command.env("TERM", "xterm-kitty");
+        command.env("NANOCODEX_TUI_GRAPHICS", "kitty");
+    })
+    .await;
+    kitty.nested(
+        REMOTE_TURN,
+        "assistant.message",
+        json!({"model_call_index": 1, "item_id": "math", "phase": "final_answer", "text": reply}),
+    );
+    kitty.complete(REMOTE_TURN);
+    kitty.terminal.wait_text("MATH_DONE").await;
+    wait_bytes(&kitty.terminal, placeholder).await;
+    // Rendered formulas replace their TeX source on screen.
+    kitty.terminal.wait_no_text("e^{i").await;
+    kitty.terminal.wait_no_text("frac").await;
+    // Inline formulas that need more than one row keep their source in line.
+    kitty.terminal.wait_text("beside text.").await;
+    let output = kitty.terminal.output.lock().unwrap().clone();
+    let pngs = kitty_pngs(&output);
+    assert!(
+        pngs.len() >= 3,
+        "expected three formula uploads, got {}",
+        pngs.len()
+    );
+    renderer_evidence("math-kitty.raw", &output);
+    renderer_evidence(
+        "math-kitty.screen.txt",
+        kitty
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    for (index, png) in pngs.iter().enumerate() {
+        renderer_evidence(&format!("math-kitty-formula-{index}.png"), png);
+    }
+    // Typing stays immediate after graphics uploads.
+    let mut echoes = Vec::new();
+    for probe in ["LAGPROBEA", "LAGPROBEB", "LAGPROBEC"] {
+        let started = std::time::Instant::now();
+        kitty.terminal.input(probe);
+        kitty.terminal.wait_text(probe).await;
+        echoes.push(started.elapsed());
+    }
+    renderer_evidence(
+        "math-kitty-input-echo.txt",
+        format!("{echoes:?}\n").as_bytes(),
+    );
+    assert!(
+        echoes.iter().all(|echo| *echo < Duration::from_millis(500)),
+        "{echoes:?}"
+    );
+
+    // Every other terminal keeps the formula source readable.
+    let mut plain = attached_renderer_terminal(|_| {}).await;
+    plain.nested(
+        REMOTE_TURN,
+        "assistant.message",
+        json!({"model_call_index": 1, "item_id": "math", "phase": "final_answer", "text": reply}),
+    );
+    plain.complete(REMOTE_TURN);
+    plain.terminal.wait_text("MATH_DONE").await;
+    plain.terminal.wait_text("e^{i\\pi} + 1 = 0").await;
+    plain.terminal.wait_text("$x^2$").await;
+    plain.terminal.wait_text("\\frac{a}{b}").await;
+    let output = plain.terminal.output.lock().unwrap().clone();
+    assert_eq!(byte_count(&output, placeholder), 0);
+    assert_eq!(byte_count(&output, b"\x1b_G"), 0);
+    renderer_evidence(
+        "math-fallback.screen.txt",
+        plain
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_notifies_finished_turns_only_while_unfocused() {
+    let finished: &[u8] = b"\x1b]9;Nanocodex finished\x07";
+    let attention: &[u8] = b"\x1b]9;Nanocodex needs attention\x07";
+    let mut fixture = attached_renderer_terminal(|command| {
+        command.env("TERM_PROGRAM", "kitty");
+        command.env("NANOCODEX_TUI_GRAPHICS", "off");
+    })
+    .await;
+    fixture.terminal.input("\x1b[O");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fixture.nested(REMOTE_TURN, "assistant.message", json!({"model_call_index": 1, "item_id": "unfocused", "phase": "final_answer", "text": "UNFOCUSED_DONE"}));
+    fixture.complete(REMOTE_TURN);
+    fixture.terminal.wait_text("UNFOCUSED_DONE").await;
+    wait_bytes(&fixture.terminal, finished).await;
+
+    // A focused terminal finishes silently.
+    fixture.terminal.input("\x1b[I");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fixture.terminal.prompt("FOCUSED_PROMPT", "\r");
+    let focused = fixture.submission("FOCUSED_PROMPT").await;
+    fixture.nested(&focused, "assistant.message", json!({"model_call_index": 1, "item_id": "focused", "phase": "final_answer", "text": "FOCUSED_DONE"}));
+    fixture.complete(&focused);
+    fixture.terminal.wait_text("FOCUSED_DONE").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // A failure while away asks for attention.
+    fixture.terminal.input("\x1b[O");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fixture.terminal.prompt("FAILING_PROMPT", "\r");
+    let failing = fixture.submission("FAILING_PROMPT").await;
+    fixture.emit(
+        &failing,
+        json!({"type": "turn_failed", "id": failing, "error": "RENDERER_FAILURE"}),
+    );
+    fixture.terminal.wait_text("RENDERER_FAILURE").await;
+    wait_bytes(&fixture.terminal, attention).await;
+    let output = fixture.terminal.output.lock().unwrap().clone();
+    assert_eq!(
+        byte_count(&output, finished),
+        1,
+        "focused completion must not notify"
+    );
+    renderer_evidence("notification.raw", &output);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_hidden_tool_calls_keep_the_turn_working_and_ctrl_o_cycles() {
+    let mut fixture = attached_renderer_terminal(|command| {
+        command.env("NANOCODEX_TOOL_CALLS", "hidden");
+    })
+    .await;
+    fixture.nested(REMOTE_TURN, "tool.call", json!({"call_id": "hidden-read", "tool": "read_file", "arguments": {"path": "HIDDEN_TOOL_PATH.txt"}}));
+    fixture.nested(REMOTE_TURN, "assistant.delta", json!({"model_call_index": 1, "item_id": "visible", "phase": "final_answer", "text": "VISIBLE_AFTER_TOOL"}));
+    fixture.terminal.wait_text("VISIBLE_AFTER_TOOL").await;
+    fixture.terminal.wait_no_text("HIDDEN_TOOL_PATH").await;
+    fixture.terminal.wait_text("Enter steer").await;
+    renderer_evidence(
+        "tools-hidden.screen.txt",
+        fixture
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    // Ctrl+O: hidden -> summaries -> every detail -> hidden.
+    fixture.terminal.input("\x0f");
+    fixture.terminal.wait_text("HIDDEN_TOOL_PATH").await;
+    renderer_evidence(
+        "tools-folded.screen.txt",
+        fixture
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    fixture.terminal.input("\x0f");
+    fixture.terminal.wait_text("HIDDEN_TOOL_PATH").await;
+    renderer_evidence(
+        "tools-expanded.screen.txt",
+        fixture
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    fixture.terminal.input("\x0f");
+    fixture.terminal.wait_no_text("HIDDEN_TOOL_PATH").await;
+    fixture.nested(REMOTE_TURN, "tool.result", json!({"call_id": "hidden-read", "tool": "read_file", "status": "completed", "duration_ns": 1, "result": {"text": "file contents"}}));
+    fixture.complete(REMOTE_TURN);
+    fixture.terminal.wait_text("Enter send").await;
+    fixture.terminal.wait_no_text("HIDDEN_TOOL_PATH").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_stream_and_view_telemetry_reach_the_log_and_otlp() {
+    let traces = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let captured = traces.clone();
+    let collector = Router::new().route(
+        "/v1/traces",
+        post(move |body: axum::body::Bytes| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().extend_from_slice(&body);
+                axum::http::StatusCode::OK
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let collector_origin = format!("http://{}", listener.local_addr().unwrap());
+    let collector_task = tokio::spawn(async move {
+        axum::serve(listener, collector).await.unwrap();
+    });
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("tui.log");
+    let mut fixture = attached_renderer_terminal(|command| {
+        command.env("NANOCODEX_LOG_FILE", &log);
+        command.env("OTEL_EXPORTER_OTLP_ENDPOINT", &collector_origin);
+        command.env("RUST_LOG", "warn,nanocodex=info");
+        command.env("OTEL_LEVEL", "warn,nanocodex=info");
+    })
+    .await;
+    for text in ["TELEMETRY_", "STREAM_", "DONE"] {
+        fixture.nested(REMOTE_TURN, "assistant.delta", json!({"model_call_index": 1, "item_id": "telemetry", "phase": "final_answer", "text": text}));
+    }
+    fixture.terminal.wait_text("TELEMETRY_STREAM_DONE").await;
+    fixture.nested(REMOTE_TURN, "assistant.message", json!({"model_call_index": 1, "item_id": "telemetry", "phase": "final_answer", "text": "TELEMETRY_STREAM_DONE"}));
+    fixture.complete(REMOTE_TURN);
+    fixture.terminal.wait_text("Enter send").await;
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    tokio::time::timeout(TIMEOUT, async {
+        while !read_log().contains("TUI stream timing completed") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("stream timing never logged: {}", read_log()));
+    let text = read_log();
+    assert!(text.contains("TUI view state changed"), "{text}");
+    assert!(text.contains(AGENT), "{text}");
+    // The batch exporter flushes on its own schedule; no Jaeger is involved.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            {
+                let body = traces.lock().unwrap();
+                if byte_count(&body, b"tui.stream") > 0 && byte_count(&body, AGENT.as_bytes()) > 0 {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("OTLP collector never received the tui.stream span");
+    renderer_evidence("telemetry.log", text.as_bytes());
+    renderer_evidence("telemetry-otlp.bin", &traces.lock().unwrap());
+    collector_task.abort();
 }

@@ -49,7 +49,10 @@ pub(crate) enum Capability {
 
 /// The feature set of one running backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(clippy::struct_excessive_bools, reason = "independent capability flags")]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent capability flags"
+)]
 pub(crate) struct Capabilities {
     pub(crate) local: bool,
     pub(crate) share: bool,
@@ -168,6 +171,36 @@ impl Capabilities {
             Capability::ClaudeHost => self.claude_host,
             Capability::Eval => self.eval,
             Capability::LocalSessions => self.local_sessions,
+        }
+    }
+
+    /// Shared policy for typed commands, action search and shortcut help.
+    pub(crate) fn command_available(self, input: &str) -> bool {
+        let command = input
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('/');
+        match command {
+            "share" => self.share,
+            "sites" => self.sites,
+            "vault" => self.vault,
+            "secure-input" => self.secure_input,
+            "screen" => self.screen,
+            "autoroute" => self.autoroute,
+            "done" | "undone" => self.done,
+            "connect" | "connectors" => self.connectors,
+            "bug" => self.bug,
+            "reload" => self.reload,
+            "handoff" => self.handoff,
+            "mcp" => self.mcp,
+            "branches" => self.branches,
+            "collapse" | "split" => self.collapse_split,
+            "benchmark" => self.eval,
+            "voice" => self.voice_managed || self.voice_realtime,
+            "btw" | "close" => self.managed_btw || self.local_btw,
+            "attach" | "resume" => self.managed_sessions || self.local_sessions,
+            _ => true,
         }
     }
 

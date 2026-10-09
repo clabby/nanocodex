@@ -32,6 +32,7 @@ pub(crate) struct LocalState {
     pub(crate) launch: LocalLaunch,
     pub(crate) backend: Option<LocalBackend>,
     bridge: Option<JoinHandle<()>>,
+    retiring: tokio::task::JoinSet<eyre::Result<()>>,
     slot: Slot,
     pub(crate) submissions: events::Submissions,
     pub(crate) features: Features,
@@ -46,6 +47,83 @@ pub(crate) struct LocalConnection {
     pub(crate) session_id: String,
     pub(crate) workspace: PathBuf,
     pub(crate) settings: AgentSettings,
+    created: bool,
+    /// Replayed history of a resumed session (empty for a fresh one).
+    pub(in crate::nanocodex2::tui) history: super::history::HistoryWindow,
+}
+
+impl LocalConnection {
+    /// The pieces the driver's connection result carries.
+    pub(super) fn into_connected(self) -> super::ConnectedAgent {
+        (
+            self.agent,
+            self.events,
+            self.session_id,
+            self.workspace,
+            self.history,
+            None,
+            self.settings,
+            self.created,
+            super::ManagedActiveTurns::default(),
+        )
+    }
+}
+
+impl super::DriverRuntime {
+    /// Rebuilds the local agent for a saved session (/attach) or, with
+    /// `session: None`, a fresh one. The running agent keeps serving until the
+    /// replacement connects.
+    pub(super) fn local_relaunch(
+        &mut self,
+        purpose: super::ConnectionPurpose,
+        session: Option<&str>,
+    ) -> Result<tokio::task::AbortHandle, String> {
+        let Some(local) = self.local.as_mut() else {
+            return Err("no local session".to_owned());
+        };
+        let Some(id) = session.map(str::to_owned) else {
+            let launch = sessions::fresh(&local.launch);
+            return self.local_switch(purpose, launch);
+        };
+        // Finding and validating the saved session reads the disk: do it in the task.
+        let connecting = local.connect_with(move |base| {
+            sessions::relaunch(&base, &id).map_err(|error| format!("{error:#}"))
+        });
+        Ok(self.spawn_local_connection(purpose, connecting))
+    }
+
+    fn spawn_local_connection(
+        &mut self,
+        purpose: super::ConnectionPurpose,
+        connecting: impl std::future::Future<Output = Result<LocalConnection, String>> + Send + 'static,
+    ) -> tokio::task::AbortHandle {
+        self.connection.spawn(async move {
+            super::ConnectionResult::Agent {
+                purpose,
+                result: connecting
+                    .await
+                    .map(LocalConnection::into_connected)
+                    .map_err(|error| super::ConnectionFailure {
+                        error: nanocodex_managed::ManagedError::Configuration(error),
+                        retry: super::RetryTarget::Default,
+                    }),
+            }
+        })
+    }
+
+    /// Replaces the local agent with one built from `launch` (branch switch/edit).
+    pub(super) fn local_switch(
+        &mut self,
+        purpose: super::ConnectionPurpose,
+        launch: agent::LocalLaunch,
+    ) -> Result<tokio::task::AbortHandle, String> {
+        let Some(local) = self.local.as_mut() else {
+            return Err("no local session".to_owned());
+        };
+        local.launch = launch;
+        let connecting = local.connect();
+        Ok(self.spawn_local_connection(purpose, connecting))
+    }
 }
 
 impl LocalState {
@@ -54,6 +132,7 @@ impl LocalState {
             launch,
             backend: None,
             bridge: None,
+            retiring: tokio::task::JoinSet::new(),
             slot: Arc::default(),
             submissions: events::Submissions::default(),
             features: Features::new(),
@@ -66,10 +145,23 @@ impl LocalState {
     pub(crate) fn connect(
         &self,
     ) -> impl std::future::Future<Output = Result<LocalConnection, String>> + Send + 'static {
-        let launch = self.launch.clone();
+        self.connect_with(Ok)
+    }
+
+    /// Like [`Self::connect`], but first derives the launch from the current one with
+    /// `prepare` on the blocking pool (session lookups read the disk). The adopted
+    /// backend's launch becomes the current one.
+    pub(crate) fn connect_with(
+        &self,
+        prepare: impl FnOnce(LocalLaunch) -> Result<LocalLaunch, String> + Send + 'static,
+    ) -> impl std::future::Future<Output = Result<LocalConnection, String>> + Send + 'static {
+        let base = self.launch.clone();
         let slot = Arc::clone(&self.slot);
         let submissions = self.submissions.clone();
         async move {
+            let launch = tokio::task::spawn_blocking(move || prepare(base))
+                .await
+                .map_err(|error| format!("session lookup failed: {error}"))??;
             let (backend, agent_events) = LocalBackend::build(launch)
                 .await
                 .map_err(|error| format!("{error:#}"))?;
@@ -79,7 +171,9 @@ impl LocalState {
                 events,
                 session_id: backend.handle.session_id().to_string(),
                 workspace: backend.workspace.clone(),
-                settings: local_settings(&backend),
+                settings: settings_from_launch(&backend.launch)?,
+                created: backend.launch.resume.is_none(),
+                history: sessions::history_window(&backend.transcript, backend.handle.session_id()),
             };
             let replaced = slot
                 .lock()
@@ -94,18 +188,26 @@ impl LocalState {
     }
 
     /// Adopts the backend built by [`Self::connect`] and attaches features.
-    pub(crate) async fn adopt(&mut self, capabilities: Capabilities) {
-        let built = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+    pub(crate) fn adopt(&mut self) {
+        let built = self
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let Some((mut backend, bridge)) = built else {
             return;
         };
         if let Some(old) = self.backend.take() {
             self.features.shutdown();
-            drop(old.shutdown().await);
+            self.retiring.spawn(old.shutdown());
         }
         if let Some(old) = self.bridge.replace(bridge) {
             old.abort();
         }
+        self.launch = backend.launch.clone();
+        self.busy = false;
+        self.prompted = self.launch.resume.is_some();
+        let capabilities = backend.capabilities();
         self.features.attach(
             &mut backend,
             ContextBase {
@@ -115,6 +217,18 @@ impl LocalState {
                 _marker: std::marker::PhantomData,
             },
         );
+        // A branch edit submits its edited prompt once, on the new agent.
+        if let Some(sessions::Resume::Branch { prompt, .. }) = backend.launch.resume.as_mut() {
+            let text = std::mem::take(prompt);
+            if !text.is_empty() {
+                self.features
+                    .host()
+                    .send(super::features::FeatureUpdate::Submit { pane: None, text });
+            }
+        }
+        if let Some(sessions::Resume::Branch { prompt, .. }) = self.launch.resume.as_mut() {
+            prompt.clear();
+        }
         self.backend = Some(backend);
     }
 
@@ -162,29 +276,117 @@ impl LocalState {
         if let Some(bridge) = self.bridge.take() {
             bridge.abort();
         }
-        let pending = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let pending = self
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some((backend, bridge)) = pending {
             bridge.abort();
-            backend.shutdown().await?;
+            self.retiring.spawn(backend.shutdown());
         }
-        match self.backend.take() {
-            Some(backend) => backend.shutdown().await,
-            None => Ok(()),
+        if let Some(backend) = self.backend.take() {
+            self.retiring.spawn(backend.shutdown());
         }
+        let mut first_error = None;
+        while let Some(result) = self.retiring.join_next().await {
+            let result = result.map_err(eyre::Error::from).and_then(|result| result);
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
-fn local_settings(backend: &LocalBackend) -> AgentSettings {
-    let defaults = AgentSettings::default();
-    let model = match backend.model {
-        HarnessModel::Codex(model) => ManagedModel::Oai(model),
-        // The picker shows the hosted default until WP1 maps Claude models.
-        HarnessModel::Claude(_) => defaults.model,
-    };
-    AgentSettings {
-        model,
-        thinking: backend.launch.args.thinking(),
-        fast_mode: backend.launch.args.fast_mode(),
-        ..defaults
+pub(crate) fn settings_from_launch(launch: &LocalLaunch) -> Result<AgentSettings, String> {
+    let model = launch
+        .args
+        .harness_model()
+        .map_err(|error| error.to_string())?;
+    Ok(AgentSettings {
+        model: model
+            .as_str()
+            .parse()
+            .map_err(|error| format!("{model}: {error}"))?,
+        thinking: launch.args.thinking(),
+        fast_mode: launch.args.fast_mode(),
+        reasoning_mode: launch.args.tui_reasoning_mode(),
+    })
+}
+
+pub(crate) fn model_catalog(launch: &LocalLaunch) -> Vec<nanocodex_managed::AvailableModel> {
+    use nanocodex::{HarnessFamily, ReasoningMode, Thinking};
+    HarnessModel::for_family(HarnessFamily::Codex)
+        .chain(
+            HarnessModel::for_family(HarnessFamily::Claude)
+                .filter(|_| launch.args.local_claude_available()),
+        )
+        .filter_map(|model| {
+            let id: ManagedModel = model.as_str().parse().ok()?;
+            Some(nanocodex_managed::AvailableModel {
+                id,
+                name: model.to_string(),
+                provider: model.family().to_string(),
+                thinking: Thinking::ALL
+                    .into_iter()
+                    .filter(|effort| model.supports_thinking(*effort))
+                    .collect(),
+                fast_mode: model.supports_fast_mode(),
+                reasoning_modes: vec![ReasoningMode::Standard],
+            })
+        })
+        .collect()
+}
+
+pub(super) async fn apply_settings(
+    agent: Option<Nanocodex>,
+    current: AgentSettings,
+    mutation: super::SettingsMutation,
+) -> Result<AgentSettings, nanocodex_managed::ManagedError> {
+    use super::SettingsMutation;
+    use nanocodex_managed::ManagedError;
+    let agent = agent
+        .ok_or_else(|| ManagedError::Configuration("Wait for the local agent to connect".into()))?;
+    let mut settings = current;
+    match mutation {
+        SettingsMutation::AutoRoute => {
+            return Err(ManagedError::Configuration(
+                Capabilities::LOCAL.unavailable("Automatic routing"),
+            ));
+        }
+        SettingsMutation::Thinking(thinking) => {
+            agent
+                .set_thinking(thinking)
+                .await
+                .map_err(super::super::agent_error)?;
+            settings.thinking = thinking;
+        }
+        SettingsMutation::FastMode(enabled) => {
+            agent
+                .set_fast_mode(enabled)
+                .await
+                .map_err(super::super::agent_error)?;
+            settings.fast_mode = enabled;
+        }
+        SettingsMutation::Complete(requested) => {
+            if requested.model != current.model
+                || requested.reasoning_mode != current.reasoning_mode
+            {
+                return Err(ManagedError::Configuration(
+                    "Change the local model before the first prompt with /model".into(),
+                ));
+            }
+            agent
+                .set_thinking(requested.thinking)
+                .await
+                .map_err(super::super::agent_error)?;
+            if let Err(error) = agent.set_fast_mode(requested.fast_mode).await {
+                let _ = agent.set_thinking(current.thinking).await;
+                return Err(super::super::agent_error(error));
+            }
+            settings = requested;
+        }
     }
+    Ok(settings)
 }

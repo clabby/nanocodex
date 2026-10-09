@@ -8,6 +8,7 @@ mod empty;
 mod highlight;
 pub(crate) mod image;
 mod markdown;
+pub(crate) mod math;
 mod message;
 mod review;
 mod tool;
@@ -129,6 +130,9 @@ struct ToolGroups {
 struct LayoutCache {
     tool_groups: std::cell::RefCell<ToolGroups>,
     entries: HashMap<EntryId, CachedEntry>,
+    // A frame walks the same folded group repeatedly while placing its rows.
+    // Aggregate retained calls once, then reuse the exact layout for this frame.
+    validated_activity: std::collections::HashSet<EntryId>,
     live_tool_durations: HashMap<EntryId, u64>,
     expansion_overrides: HashMap<EntryId, bool>,
     expand_all: Option<bool>,
@@ -136,6 +140,8 @@ struct LayoutCache {
     tools_hidden: bool,
     workspace: std::path::PathBuf,
     images: image::Cache,
+    /// Last observed math renderer update; see math::updates.
+    math_updates: u64,
 }
 
 impl Default for LayoutCache {
@@ -143,7 +149,9 @@ impl Default for LayoutCache {
         Self {
             tool_groups: Default::default(),
             entries: HashMap::new(),
+            validated_activity: Default::default(),
             live_tool_durations: HashMap::new(),
+            math_updates: 0,
             expansion_overrides: HashMap::new(),
             expand_all: tool_calls_from_env().0,
             tools_hidden: tool_calls_from_env().1,
@@ -334,6 +342,7 @@ impl Transcript {
     }
 
     pub(crate) fn with_effort(effort: ReasoningEffort) -> Self {
+        highlight::prewarm();
         Self {
             model: TranscriptModel::default(),
             cache: LayoutCache::default(),
@@ -468,6 +477,7 @@ impl Transcript {
             .into_iter()
             .chain(self.retry_timer.and_then(|timer| timer.next_frame))
             .chain(self.cache.images.animation_deadline())
+            .chain(math::deadline(Instant::now()))
             .min()
     }
 
@@ -478,6 +488,7 @@ impl Transcript {
         let previous_activity = self.activity();
         let change = self.model.apply(&record);
         self.cache.tool_groups.get_mut().ranges.clear();
+        self.cache.validated_activity.clear();
         let now = Instant::now();
         self.sync_retry_timer(now, unix_milliseconds());
         let activity = self.activity();
@@ -530,6 +541,7 @@ impl Transcript {
     ) -> ComponentUpdate<TranscriptEffect> {
         let change = self.model.apply_message(perspective, update);
         self.cache.tool_groups.get_mut().ranges.clear();
+        self.cache.validated_activity.clear();
         if let Some(id) = change.removed {
             self.forget_entry(id);
         }
@@ -568,6 +580,7 @@ impl Transcript {
 
     fn agent_stream_closed(&mut self) -> ComponentUpdate<TranscriptEffect> {
         self.cache.tool_groups.get_mut().ranges.clear();
+        self.cache.validated_activity.clear();
         let previous_activity = self.activity();
         if !self.model.agent_stream_closed() {
             return ComponentUpdate::none();
@@ -997,6 +1010,7 @@ impl Transcript {
         if width == 0 || height == 0 {
             return RenderPlan::default();
         }
+        self.cache.validated_activity.clear();
         self.viewport_height = height;
         self.apply_pending_expandable_anchor(width, theme);
         self.apply_pending_scroll(width, height, theme);
@@ -1400,11 +1414,31 @@ fn is_expandable(entry: &TranscriptEntry) -> bool {
 /// Initial tool display from NANOCODEX_TOOL_CALLS, shared with the classic CLI's
 /// --tool-calls: expanded (every detail), folded (summaries, default) or hidden.
 fn tool_calls_from_env() -> (Option<bool>, bool) {
+    match INITIAL_TOOL_CALLS.load(std::sync::atomic::Ordering::Acquire) {
+        1 => return (Some(true), false),
+        2 => return (None, false),
+        3 => return (None, true),
+        _ => {}
+    }
     match std::env::var("NANOCODEX_TOOL_CALLS").as_deref() {
         Ok("expanded") => (Some(true), false),
         Ok("hidden") => (None, true),
         _ => (None, false),
     }
+}
+
+static INITIAL_TOOL_CALLS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Startup tool display from a driver flag (ncl --tool-calls). Overrides
+/// NANOCODEX_TOOL_CALLS for transcripts created afterwards.
+#[allow(dead_code, reason = "called by the local driver's --tool-calls flag")]
+pub(crate) fn set_initial_tool_calls(mode: crate::tool_calls::ToolCalls) {
+    let value = match mode {
+        crate::tool_calls::ToolCalls::Expanded => 1,
+        crate::tool_calls::ToolCalls::Folded => 2,
+        crate::tool_calls::ToolCalls::Hidden => 3,
+    };
+    INITIAL_TOOL_CALLS.store(value, std::sync::atomic::Ordering::Release);
 }
 
 impl LayoutCache {
@@ -1479,6 +1513,7 @@ impl LayoutCache {
     }
 
     fn refresh_terminal_images(&mut self) {
+        math::reupload_all();
         self.images.advance_terminal_generation();
         self.entries
             .retain(|_, entry| entry.image_state != markdown::ImageState::Pending);
@@ -1490,6 +1525,20 @@ impl LayoutCache {
     }
 
     fn poll_images(&mut self, now: Instant) -> bool {
+        let math_updates = math::updates();
+        let math_changed = math_updates != self.math_updates;
+        if math_changed {
+            // A formula finished (or the renderer started): re-layout entries
+            // that showed pending source. Visible ones re-mark pending if needed.
+            self.math_updates = math_updates;
+            math::clear_pending();
+            self.entries
+                .retain(|_, entry| entry.image_state != markdown::ImageState::Pending);
+        }
+        self.poll_terminal_images(now) || math_changed
+    }
+
+    fn poll_terminal_images(&mut self, now: Instant) -> bool {
         let result = self.images.poll(now);
         match result.layout_change {
             image::LayoutChange::Ready => {
@@ -1507,6 +1556,7 @@ impl LayoutCache {
 
     fn forget(&mut self, id: EntryId) {
         self.entries.remove(&id);
+        self.validated_activity.clear();
         self.live_tool_durations.remove(&id);
         self.expansion_overrides.remove(&id);
     }
@@ -1529,6 +1579,13 @@ impl LayoutCache {
                 .find(|entry| !entry.hidden)
                 .is_some_and(|head| head.id == entry.id)
         {
+            if self.validated_activity.contains(&entry.id)
+                && self.entries.get(&entry.id).is_some_and(|cached| {
+                    cached.activity && cached.width == width && cached.depth == depth
+                })
+            {
+                return &self.entries[&entry.id].lines;
+            }
             let EntryKind::Tool(first) = &entry.kind else {
                 unreachable!()
             };
@@ -1614,10 +1671,7 @@ impl LayoutCache {
                     ToolState::Failed => 2,
                     ToolState::Yielded => 3,
                 }] += 1;
-                duration = duration.saturating_add(
-                    live.or(call.duration_ns)
-                        .unwrap_or(0),
-                );
+                duration = duration.saturating_add(live.or(call.duration_ns).unwrap_or(0));
             }
             duration = duration.max(wrapper_duration);
             // A wrapper's children may follow an intervening message in another block.
@@ -1651,6 +1705,7 @@ impl LayoutCache {
                 crate::nanocodex2::tui::transcript::ToolState::Succeeded
             };
             let state = call.state;
+            self.validated_activity.insert(entry.id);
             if self.entries.get(&entry.id).is_some_and(|cached| {
                 cached.activity
                     && cached.revision == summary.revision
@@ -1742,6 +1797,7 @@ impl LayoutCache {
         });
         if display_changed {
             self.live_tool_durations.insert(id, duration_ns);
+            self.validated_activity.clear();
         }
         display_changed
     }
@@ -1753,6 +1809,7 @@ impl LayoutCache {
     fn toggle(&mut self, entry: &TranscriptEntry) {
         let expanded = self.expanded(entry);
         self.expansion_overrides.insert(entry.id, !expanded);
+        self.validated_activity.clear();
         self.entries.remove(&entry.id);
     }
 

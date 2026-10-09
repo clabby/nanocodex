@@ -6,6 +6,7 @@
 //! orchestration and hosted tools; this module owns only presentation, terminal
 //! interaction, and the caller-local shell convenience.
 
+pub(crate) mod backend;
 mod btw;
 mod bug;
 mod clipboard;
@@ -13,9 +14,12 @@ mod components;
 mod context;
 mod control;
 mod editor;
+pub(crate) mod features;
 mod format;
 mod history;
 mod links;
+pub(crate) mod local;
+mod notification;
 mod pane;
 mod private_input;
 mod prompt;
@@ -31,16 +35,14 @@ mod shell;
 mod sites;
 mod spinner;
 mod sudo_input;
+mod telemetry; // FEATURE-HOOK: wp3
 mod terminal;
 mod theme;
 mod tmux;
+pub(crate) mod tool_calls;
 mod transcript;
 mod vault;
 mod voice_clone;
-pub(crate) mod backend;
-pub(crate) mod features;
-pub(crate) mod local;
-pub(crate) mod tool_calls;
 pub(crate) mod voice_keys;
 
 pub(crate) use self::shared::run_shared;
@@ -511,6 +513,12 @@ enum ConnectionResult {
         pane: PaneId,
         request_id: u64,
         result: Option<Result<AgentList, ManagedError>>,
+    },
+    /// FEATURE-HOOK: wp2 local session discovery, read off the input loop.
+    LocalSessions {
+        pane: PaneId,
+        request_id: u64,
+        result: Option<Result<Vec<SessionSummary>, String>>,
     },
     RecentPrompts {
         pane: PaneId,
@@ -1622,7 +1630,10 @@ impl DriverRuntime {
                 let text = prompt.display_text().to_owned();
                 match local.with_features(|features, cx| features.user_prompt(&text, cx)) {
                     Ok(completions) if !completions.is_empty() => {
-                        self.feature_completions.entry(id).or_default().extend(completions);
+                        self.feature_completions
+                            .entry(id)
+                            .or_default()
+                            .extend(completions);
                     }
                     Ok(_) => {}
                     Err(error) => rejection = Some(error),
@@ -1697,7 +1708,8 @@ impl DriverRuntime {
     }
 
     fn refresh_routing(&mut self) {
-        if self.agent_id.is_empty()
+        if self.local.is_some()
+            || self.agent_id.is_empty()
             || !self.routing_updates.is_empty()
             || !self.settings_updates.is_empty()
         {
@@ -1738,6 +1750,15 @@ impl DriverRuntime {
         let Some((pane, agent_id, mutation)) = self.settings_queue.pop_front() else {
             return;
         };
+        if self.local.is_some() {
+            let agent = self.agent.clone();
+            let current = self.settings;
+            self.settings_updates.spawn(async move {
+                let result = local::apply_settings(agent, current, mutation).await;
+                (pane, agent_id, mutation, result)
+            });
+            return;
+        }
         let client = self.client.clone();
         let was_routed = self.routing_enabled;
         let model = self.settings.model;
@@ -1792,19 +1813,7 @@ impl DriverRuntime {
             self.connection.spawn(async move {
                 let result = connecting
                     .await
-                    .map(|connected| {
-                        (
-                            connected.agent,
-                            connected.events,
-                            connected.session_id,
-                            connected.workspace,
-                            HistoryWindow::default(),
-                            None,
-                            connected.settings,
-                            true,
-                            ManagedActiveTurns::default(),
-                        )
-                    })
+                    .map(local::LocalConnection::into_connected)
                     .map_err(|error| ConnectionFailure {
                         error: ManagedError::Configuration(error),
                         retry: target,
@@ -2191,6 +2200,58 @@ async fn reconnect_agent(
     Ok(connected)
 }
 
+/// Renderer telemetry and completion notifications shared by every TUI driver.
+pub(crate) struct Wp3Hooks {
+    stream: telemetry::StreamTelemetry,
+    view: telemetry::ViewTelemetry,
+    pub(crate) notifier: notification::Notifier,
+}
+
+impl Wp3Hooks {
+    pub(crate) fn new() -> Self {
+        Self {
+            stream: telemetry::StreamTelemetry::default(),
+            view: telemetry::ViewTelemetry::default(),
+            notifier: notification::Notifier::from_env(),
+        }
+    }
+
+    /// Record one agent event as it reaches the TUI, before it is applied.
+    pub(crate) fn received(&mut self, session_id: &str, event: telemetry::Received) {
+        if event.kind() == "turn.failed" {
+            self.notifier.turn_failed();
+        }
+        self.stream.received(session_id, event);
+    }
+
+    /// After every presented frame: frame cost, view changes and notifications.
+    pub(crate) fn presented(
+        &mut self,
+        app: &AppNode,
+        terminal: &mut TerminalSession,
+        session_id: &str,
+        render_started: Instant,
+        draw: terminal::DrawMetrics,
+    ) {
+        let main = app.main_pane();
+        let fork = app.fork_pane();
+        let focused = app.focused_pane();
+        let view = telemetry::ViewState {
+            split: fork.is_some(),
+            focus_main: focused.is_some() && focused == main,
+            screen: focused.is_none(),
+        };
+        self.view.observe(session_id, &view);
+        self.stream
+            .presented(session_id, &view, render_started, draw);
+        let busy = |pane: Option<PaneId>| {
+            pane.and_then(|pane| app.root(pane))
+                .is_some_and(RootNode::has_active_turns)
+        };
+        self.notifier.after_frame(terminal, busy(main), busy(fork));
+    }
+}
+
 pub(crate) async fn run(
     client: &ManagedClient,
     agent_id: Option<String>,
@@ -2233,20 +2294,35 @@ async fn run_inner(
     // Paint the hosted defaults immediately. New creation uses this same policy;
     // attach hydrates retained settings in connect_agent, where failures already
     // have retry semantics. Optional catalog discovery never gates startup.
-    let initial_settings = AgentSettings::default();
+    let initial_settings = local_launch
+        .as_ref()
+        .map(local::settings_from_launch)
+        .transpose()
+        .map_err(ManagedError::Configuration)?
+        .unwrap_or_default();
     let initial_effort = effort_from_thinking(initial_settings.thinking);
     let initial_reasoning_mode = reasoning_mode_from_managed(initial_settings.reasoning_mode);
     let mut root = RootNode::new(&workspace, initial_effort);
+    root.set_capabilities(if local_launch.is_some() {
+        backend::Capabilities::LOCAL
+    } else {
+        backend::Capabilities::MANAGED
+    });
     root.set_reasoning_modes(initial_reasoning_mode, initial_reasoning_mode);
     root.set_fast_mode(initial_settings.fast_mode);
     root.set_model(initial_settings.model);
+    if let Some(launch) = &local_launch {
+        root.set_model_catalog(local::model_catalog(launch));
+    }
 
     let mut app = AppNode::new(Theme::default(), workspace.clone(), root);
     let mut reload: Option<crate::nanocodex2::reload::Registration> = None;
     let mut reload_requested = false;
+    let _observability = telemetry::install_observability(); // FEATURE-HOOK: wp3
     let mut terminal = TerminalSession::enter().await.map_err(terminal_error)?;
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
+    let mut wp3 = Wp3Hooks::new(); // FEATURE-HOOK: wp3
     let (btw_events, mut btw_updates) = mpsc::unbounded_channel();
     let is_local = local_launch.is_some();
     let mut runtime = DriverRuntime {
@@ -2381,7 +2457,9 @@ async fn run_inner(
     // but wait off the input loop so it becomes available after contention clears.
     // Dropping the JoinSet also drops any uncollected registration and its lease.
     let mut reload_setup = JoinSet::new();
-    reload_setup.spawn_blocking(crate::nanocodex2::reload::register);
+    if !is_local {
+        reload_setup.spawn_blocking(crate::nanocodex2::reload::register);
+    }
     // Theme and tmux discovery must not delay the first editable frame. These
     // tasks never read stdin; the terminal event stream remains its sole owner.
     let mut presentation_setup = JoinSet::new();
@@ -2405,7 +2483,10 @@ async fn run_inner(
         runtime.next_turn = runtime.next_turn.saturating_add(1);
         let record = runtime.record_submission(id, &prompt)?;
         request_render(
-            app.update(AppEvent::Transcript { pane: PaneId::Main, record }),
+            app.update(AppEvent::Transcript {
+                pane: PaneId::Main,
+                record,
+            }),
             &mut scheduler,
         );
         runtime.start_submission(PaneId::Main, id, prompt);
@@ -2444,7 +2525,15 @@ async fn run_inner(
     let mut stopping = false;
     #[cfg(unix)]
     let mut control_server = if nanocodex_tui_control::Server::enabled() {
-        Some(nanocodex_tui_control::Server::start("managed").map_err(terminal_error)?)
+        // FEATURE-HOOK: wp2 the local TUI registers as kind "native".
+        Some(
+            nanocodex_tui_control::Server::start(if runtime.local.is_some() {
+                "native"
+            } else {
+                "managed"
+            })
+            .map_err(terminal_error)?,
+        )
     } else {
         None
     };
@@ -2641,7 +2730,8 @@ async fn run_inner(
             );
         }
         if scheduler.is_due(Instant::now()) {
-            terminal
+            let render_started = Instant::now(); // FEATURE-HOOK: wp3
+            let draw = terminal
                 .draw(|frame| {
                     app.render(frame);
                     if let Some(overlay) = &mut runtime.feature_overlay {
@@ -2652,6 +2742,7 @@ async fn run_inner(
                     }
                 })
                 .map_err(terminal_error)?;
+            wp3.presented(&app, &mut terminal, &runtime.agent_id, render_started, draw); // FEATURE-HOOK: wp3
             runtime.screen.size.send_if_modified(|size| {
                 let current = app.screen_size();
                 if *size == current {
@@ -2743,7 +2834,17 @@ async fn run_inner(
                 }
                 pending::<Option<nanocodex_tui_control::Command>>().await
             } => {
-                if let Some(command) = command { control::dispatch(command, runtime.control_bridge.as_ref().unwrap(), &runtime, &mut control_tasks); }
+                if let Some(command) = command {
+                    if runtime.local.is_some() {
+                        // FEATURE-HOOK: wp2 local control: rollout history and the in-process agent.
+                        let bridge = runtime.control_bridge.clone().unwrap();
+                        if let Some(update) = local::control::dispatch(command, &bridge, &mut runtime, &mut app, &mut control_tasks) {
+                            stopping |= apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+                        }
+                    } else {
+                        control::dispatch(command, runtime.control_bridge.as_ref().unwrap(), &runtime, &mut control_tasks);
+                    }
+                }
             }
             Some(result) = control_tasks.join_next(), if !control_tasks.is_empty() => {
                 if let Ok((command, result, settings, session)) = result {
@@ -2927,6 +3028,7 @@ async fn run_inner(
                     .transpose()
                     .map_err(terminal_error)?
                     .ok_or_else(|| terminal_error(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")))?;
+                wp3.notifier.observe_event(&event); // FEATURE-HOOK: wp3 (focus only)
                 // SECURITY: intercept BEFORE ordinary AppEvent, clipboard,
                 // screen, composer, shell, debug/control, export or history.
                 if let Some(flow) = &mut runtime.secure_input {
@@ -2998,6 +3100,7 @@ async fn run_inner(
             }, if runtime.managed_events_open => {
                 match event {
                     Some(event) => {
+                        wp3.received(&runtime.agent_id, telemetry::Received::managed(&event)); // FEATURE-HOOK: wp3
                         if let Some(bridge) = &runtime.control_bridge { let mut value=serde_json::to_value(&event).unwrap_or_default(); value["session_id"]=serde_json::json!(runtime.agent_id); bridge.publish("managed.event",value); }
                         runtime.observed_cursor.clone_from(&event.cursor);
                         if let Some(request_id) = event.data.turn_id() {
@@ -3316,6 +3419,21 @@ async fn run_inner(
                             let update = app.update(AppEvent::RecentPromptsLoaded { pane, session_id, prompts });
                             stopping |= apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
                         }
+                        ConnectionResult::LocalSessions { pane, request_id, result } => {
+                            let cancelled = runtime.session_list_cancellations.remove(&(pane, request_id))
+                                .is_none_or(|token| token.is_cancelled());
+                            if cancelled { continue; }
+                            let Some(result) = result else { continue; };
+                            let update = match result {
+                                Ok(sessions) => app.update(AppEvent::SessionsLoaded { pane, request_id, sessions }),
+                                Err(error) => app.update(AppEvent::SessionListFailed {
+                                    pane,
+                                    request_id,
+                                    error: format!("Could not load local sessions: {error}"),
+                                }),
+                            };
+                            stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+                        }
                         ConnectionResult::Sessions { pane, request_id, result } => {
                             let cancelled = runtime.session_list_cancellations.remove(&(pane, request_id))
                                 .is_none_or(|token| token.is_cancelled());
@@ -3337,8 +3455,10 @@ async fn run_inner(
                         }
                         ConnectionResult::Agent { purpose, result: Ok((agent, managed_events, agent_id, workspace, history, warning, settings, created, active_turns)) } => {
                             if let Some(local) = &mut runtime.local {
-                                let capabilities = local.capabilities();
-                                local.adopt(capabilities).await;
+                                local.adopt();
+                                if let Some(root) = app.root_mut(PaneId::Main) {
+                                    root.set_capabilities(local.capabilities());
+                                }
                             }
                             if matches!(purpose, ConnectionPurpose::Bug(_)) {
                                 runtime.detach_bug_source();
@@ -3705,6 +3825,11 @@ async fn run_inner(
                         match outcome {
                             Ok(settings) => {
                                 runtime.settings = settings;
+                                if let Some(local) = &mut runtime.local {
+                                    if let Ok(model) = settings.model.as_str().parse() {
+                                        local.launch.args.select_tui_model(model, settings.thinking, settings.fast_mode);
+                                    }
+                                }
                                 if matches!(mutation, SettingsMutation::Complete(_)) && let Some(root) = app.root_mut(pane) {
                                     let mode = reasoning_mode_from_managed(settings.reasoning_mode);
                                     root.set_reasoning_modes(mode, mode);
@@ -3733,7 +3858,7 @@ async fn run_inner(
                             Err(error) => {
                                 // Switching from routing to native settings can require two
                                 // requests. Re-read retained settings if only the first applied.
-                                if let Ok(state) = runtime.client.state(&agent_id).await {
+                                if runtime.local.is_none() && let Ok(state) = runtime.client.state(&agent_id).await {
                                     runtime.settings = state.settings;
                                     if let Some(root) = app.root_mut(pane) {
                                         let mode = reasoning_mode_from_managed(state.settings.reasoning_mode);
@@ -4304,7 +4429,11 @@ async fn apply_feature_update(
                 runtime.feature_instructions.insert(id, instruction);
             }
             if let Some(completion) = prompt.completion {
-                runtime.feature_completions.entry(id).or_default().push(completion);
+                runtime
+                    .feature_completions
+                    .entry(id)
+                    .or_default()
+                    .push(completion);
             }
             let record = runtime.record_submission(id, &submission)?;
             let update = app.update(AppEvent::Transcript { pane, record });
@@ -4314,6 +4443,23 @@ async fn apply_feature_update(
                 runtime.pending_submission = Some((pane, id, submission));
             }
             update
+        }
+        // FEATURE-HOOK: wp2 branch switch/edit reopens another session in place.
+        FeatureUpdate::Relaunch(launch) if launch.resume.is_some() => {
+            match runtime.local_switch(ConnectionPurpose::Resume(PaneId::Main), *launch) {
+                Ok(task) => runtime.pending_resume = Some((task, PaneId::Main)),
+                Err(error) => {
+                    request_render(
+                        app.update(AppEvent::NotifyError {
+                            pane: PaneId::Main,
+                            error,
+                        }),
+                        scheduler,
+                    );
+                }
+            }
+            scheduler.request_immediate(Instant::now());
+            return Ok(false);
         }
         FeatureUpdate::Relaunch(launch) => {
             let Some(local) = &mut runtime.local else {
@@ -4332,13 +4478,15 @@ async fn apply_feature_update(
             runtime.local_voice_status = status;
             app.update(AppEvent::VoiceStatus(runtime.voice_status()))
         }
-        FeatureUpdate::ReplaceAgent(_)
-        | FeatureUpdate::OpenPane(_)
-        | FeatureUpdate::ClosePane(_)
-        | FeatureUpdate::Capabilities(_) => app.update(AppEvent::NotifyError {
-            pane: PaneId::Main,
-            error: "This feature action is not wired into the unified TUI yet".to_owned(),
-        }),
+        // FEATURE-HOOK: wp2 /collapse and /split close the local side pane.
+        FeatureUpdate::ClosePane(pane) => app.close_fork(pane),
+        FeatureUpdate::Capabilities(capabilities) => {
+            if let Some(root) = app.root_mut(PaneId::Main) {
+                root.set_capabilities(capabilities);
+            }
+            scheduler.request_immediate(Instant::now());
+            return Ok(false);
+        }
     };
     apply_update(update, app, runtime, terminal, scheduler).await
 }
@@ -4373,6 +4521,36 @@ async fn apply_update(
                     );
                     continue;
                 }
+                if runtime.local.is_some() {
+                    // FEATURE-HOOK: wp2 local /btw forks the in-process agent.
+                    let Some(main) = runtime.agent.clone() else {
+                        absorb(
+                            app.update(AppEvent::ForkFailed {
+                                pane,
+                                error: "Wait for the local agent before opening /btw".into(),
+                            }),
+                            &mut effects,
+                            scheduler,
+                        );
+                        continue;
+                    };
+                    let (commands, requests) = mpsc::unbounded_channel();
+                    let task = tokio::spawn(features::btw_local::run(
+                        pane,
+                        main,
+                        runtime.settings,
+                        runtime.sequence.saturating_add(1),
+                        requests,
+                        runtime.btw_events.clone(),
+                    ));
+                    runtime.btw = Some(BtwConnection {
+                        pane,
+                        agent_id: None,
+                        commands,
+                        task,
+                    });
+                    continue;
+                }
                 let (commands, requests) = mpsc::unbounded_channel();
                 let task = tokio::spawn(btw::run(
                     pane,
@@ -4398,10 +4576,43 @@ async fn apply_update(
                 if runtime.btw.as_ref().is_some_and(|btw| btw.pane == pane)
                     && let Some(btw) = runtime.btw.take()
                 {
-                    btw.task.abort();
+                    if runtime.local.is_some() {
+                        // FEATURE-HOOK: wp2 dropping the request channel makes the local
+                        // side task cancel its turn and shut its forked agent down.
+                        drop(btw.commands);
+                    } else {
+                        btw.task.abort();
+                    }
                 }
             }
             AppEffect::Pane { pane, effect } => {
+                if runtime.local.is_some()
+                    && matches!(
+                        &effect,
+                        RootEffect::AutoRoute
+                            | RootEffect::Connectors(_)
+                            | RootEffect::Reload
+                            | RootEffect::SetDone(_)
+                            | RootEffect::Bug(_)
+                            | RootEffect::Vault(_)
+                            | RootEffect::SecureInput(_)
+                            | RootEffect::Share(_)
+                            | RootEffect::Sites(_)
+                            | RootEffect::ApproveVault(_)
+                            | RootEffect::Handoff
+                    )
+                {
+                    absorb(
+                        app.update(AppEvent::NotifyError {
+                            pane,
+                            error: backend::Capabilities::LOCAL.unavailable("This command"),
+                        }),
+                        &mut effects,
+                        scheduler,
+                    );
+                    continue;
+                }
+
                 if let RootEffect::CopyResponse(text) = effect {
                     let event = match clipboard::copy_text(&text) {
                         Ok(()) => AppEvent::NotifySuccess {
@@ -4436,6 +4647,24 @@ async fn apply_update(
                 }
                 if pane != PaneId::Main {
                     match effect {
+                        RootEffect::Feature(command) => {
+                            // FEATURE-HOOK: wp2 /collapse and /split typed in the side pane.
+                            let handled = runtime.local.as_mut().is_some_and(|local| {
+                                local.with_features(|features, cx| {
+                                    features.command(pane, &command, cx)
+                                })
+                            });
+                            if !handled {
+                                absorb(
+                                    app.update(AppEvent::NotifyError {
+                                        pane,
+                                        error: "This command needs a local agent (run ncl)".into(),
+                                    }),
+                                    &mut effects,
+                                    scheduler,
+                                );
+                            }
+                        }
                         RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
                             if runtime
                                 .btw
@@ -5177,7 +5406,26 @@ async fn apply_update(
                         if let Some(task) = runtime.session_search_tasks.remove(&pane) {
                             task.abort();
                         }
-                        if !query.trim().is_empty() {
+                        if !query.trim().is_empty() && runtime.local.is_some() {
+                            let task = runtime.session_searches.spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                let search = query.clone();
+                                let result = tokio::task::spawn_blocking(move || {
+                                    local::sessions::search(&search, 20)
+                                })
+                                .await
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result.map_err(|error| format!("{error:#}")));
+                                SessionSearchCompletion {
+                                    pane,
+                                    picker_id,
+                                    request_id,
+                                    query,
+                                    result,
+                                }
+                            });
+                            runtime.session_search_tasks.insert(pane, task);
+                        } else if !query.trim().is_empty() {
                             let client = runtime.client.clone();
                             let task = runtime.session_searches.spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -5204,6 +5452,27 @@ async fn apply_update(
                         if let Some(task) = runtime.session_search_tasks.remove(&pane) {
                             task.abort();
                         }
+                    }
+                    RootEffect::LoadSessions { request_id, .. } if runtime.local.is_some() => {
+                        // Scanning rollouts and journals reads the disk; keep it off the input loop.
+                        let workspace = runtime.workspace.clone();
+                        let cancellation = CancellationToken::new();
+                        runtime
+                            .session_list_cancellations
+                            .insert((pane, request_id), cancellation.clone());
+                        runtime.connection.spawn(async move {
+                            let list = tokio::task::spawn_blocking(move || {
+                                local::sessions::list(&workspace).map_err(|error| format!("{error:#}"))
+                            });
+                            ConnectionResult::LocalSessions {
+                                pane,
+                                request_id,
+                                result: tokio::select! {
+                                    () = cancellation.cancelled() => None,
+                                    result = list => Some(result.map_err(|error| error.to_string()).and_then(|result| result)),
+                                },
+                            }
+                        });
                     }
                     RootEffect::LoadSessions { request_id, .. } => {
                         let client = runtime.client.clone();
@@ -5258,6 +5527,18 @@ async fn apply_update(
                             &mut effects,
                             scheduler,
                         );
+                            continue;
+                        }
+                        if runtime.local.is_some() {
+                            // Local sessions resume from the rollout/journal store.
+                            match runtime.local_relaunch(ConnectionPurpose::Resume(pane), Some(&agent_id)) {
+                                Ok(resume) => runtime.pending_resume = Some((resume, pane)),
+                                Err(error) => absorb(
+                                    app.update(AppEvent::SessionLoadFailed { pane, error }),
+                                    &mut effects,
+                                    scheduler,
+                                ),
+                            }
                             continue;
                         }
                         let client = runtime.client.clone();
@@ -5332,6 +5613,10 @@ async fn apply_update(
                             fast_mode: root.composer().fast_mode(),
                         });
                         request_render(app.update(AppEvent::VoiceStatus(None)), scheduler);
+                        if let Some(local) = &mut runtime.local {
+                            // /clear starts a fresh local agent, not the resumed session.
+                            local.launch = local::sessions::fresh(&local.launch);
+                        }
                         runtime.start_new_session(settings);
                         absorb(
                             app.update(AppEvent::NewSessionReady {
@@ -5518,7 +5803,11 @@ async fn apply_update(
                         runtime.queue_settings(pane, SettingsMutation::Thinking(thinking));
                     }
                     RootEffect::SetFastMode(enabled) => {
-                        if enabled && !runtime.settings.model.supports_fast_mode() {
+                        let supports_fast = if runtime.local.is_some() {
+                            runtime.settings.model.as_str().parse::<nanocodex::HarnessModel>()
+                                .is_ok_and(nanocodex::HarnessModel::supports_fast_mode)
+                        } else { runtime.settings.model.supports_fast_mode() };
+                        if enabled && !supports_fast {
                             absorb(app.update(AppEvent::NotifyError { pane, error: "Fast mode is unavailable for this model".into() }), &mut effects, scheduler);
                             continue;
                         }

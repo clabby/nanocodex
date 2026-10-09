@@ -35,7 +35,8 @@ impl Feature for Harness {
         let model = match id.parse::<nanocodex::HarnessModel>() {
             Ok(model) => model,
             Err(error) => {
-                cx.host.error(Some(pane), format!("Unsupported model {id}: {error}"));
+                cx.host
+                    .error(Some(pane), format!("Unsupported model {id}: {error}"));
                 return true;
             }
         };

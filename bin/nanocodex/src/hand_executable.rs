@@ -93,6 +93,11 @@ pub(crate) fn hand_binary() -> io::Result<PathBuf> {
         // A build directory or bundle holds nanocodex-hand; an installed
         // version holds the Hand as nanocodex2 beside the CLI.
         candidates.push(running.with_file_name(file_name("nanocodex-hand")));
+        // An installed macOS version runs its Hand from the signed bundle
+        // beside the CLI, so privacy grants attach to the bundle identity.
+        if cfg!(target_os = "macos") {
+            candidates.push(running.with_file_name("Nanocodex.app/Contents/MacOS/nanocodex2"));
+        }
         candidates.push(running.with_file_name(file_name("nanocodex2")));
     }
     if let Some(root) = crate::launcher::running_install_root()
@@ -131,6 +136,20 @@ pub(crate) fn cli_binary() -> io::Result<PathBuf> {
         {
             candidates.push(version.join(file_name("nanocodex")));
         }
+        // A Hand stored once per identity (hand-versions/<identity>/nanocodex2
+        // or .../Nanocodex.app/Contents/MacOS/nanocodex2) serves the
+        // installation's active CLI.
+        if let Some(root) = running
+            .ancestors()
+            .find(|directory| {
+                directory
+                    .file_name()
+                    .is_some_and(|name| name == "hand-versions")
+            })
+            .and_then(Path::parent)
+        {
+            candidates.push(root.join("current").join(file_name("nanocodex")));
+        }
     }
     candidates
         .into_iter()
@@ -155,9 +174,27 @@ pub(crate) fn is_hand_role() -> bool {
     HAND_ROLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+static FORWARDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record whether the other role forwarded this process here, then remove the
+/// marker from this process's environment so no child (Hand services, tool
+/// commands, terminals, or a later forward) inherits it. Call first thing in
+/// `main`, before any thread starts.
+pub(crate) fn take_forwarded() {
+    if std::env::var_os(FORWARDED_ENV).is_some() {
+        FORWARDED.store(true, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: called once at process start, before Tokio or any other
+        // thread exists, so no concurrent environment access is possible.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var(FORWARDED_ENV);
+        }
+    }
+}
+
 /// Whether this process was forwarded here by the other role.
 pub(crate) fn forwarded() -> bool {
-    std::env::var_os(FORWARDED_ENV).is_some()
+    FORWARDED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Run `executable` with `arguments` (argv without argv\[0\]) in place of this

@@ -43,6 +43,8 @@ pub(crate) mod mcp;
 pub(crate) mod realtime_voice;
 pub(crate) mod split;
 pub(crate) mod subagents;
+// FEATURE-HOOK: wp2 terminal launcher shared with the legacy TUI until WP5.
+mod split_launch;
 
 /// Slash commands whose behaviour belongs to a feature module.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,15 +101,6 @@ pub(crate) trait FeatureOverlay: Send {
     }
 }
 
-/// A side agent a feature asks the driver to show in its own pane.
-pub(crate) struct SidePane {
-    pub(crate) title: String,
-    pub(crate) agent: Nanocodex,
-    pub(crate) events: nanocodex::AgentEvents,
-    /// Prompt to submit once the pane is open.
-    pub(crate) prompt: Option<String>,
-}
-
 /// A prompt a feature submits on the user's behalf (scheduler fire, /benchmark).
 pub(crate) struct FeaturePrompt {
     pub(crate) pane: Option<PaneId>,
@@ -123,21 +116,26 @@ pub(crate) struct FeaturePrompt {
 /// A request from a feature task to the driver.
 pub(crate) enum FeatureUpdate {
     /// Informational footer/transcript notice.
-    Notice { pane: Option<PaneId>, message: String },
+    Notice {
+        pane: Option<PaneId>,
+        message: String,
+    },
     /// Error notice (the same rendering as NotifyError).
-    Error { pane: Option<PaneId>, message: String },
+    Error {
+        pane: Option<PaneId>,
+        message: String,
+    },
     /// Submit a prompt as if typed (scheduler fires, interaction follow-ups).
     Submit { pane: Option<PaneId>, text: String },
     /// Append a local transcript record.
-    Record { pane: Option<PaneId>, event: LocalEvent },
+    Record {
+        pane: Option<PaneId>,
+        event: LocalEvent,
+    },
     /// Show a modal overlay; replaces any open feature overlay.
     OpenOverlay(Box<dyn FeatureOverlay>),
     /// Close the open feature overlay.
     CloseOverlay,
-    /// Replace the local agent (harness switch, /clear, branch switch).
-    ReplaceAgent(Box<crate::config::ConfiguredAgent>),
-    /// Open a side pane for a forked agent (local /btw).
-    OpenPane(Box<SidePane>),
     /// Close a side pane.
     ClosePane(PaneId),
     /// Re-read capabilities (a feature became available or unavailable).
@@ -199,7 +197,12 @@ pub(crate) trait Feature: Send {
     /// Take runtime pieces from a freshly built local agent and start tasks.
     fn attach(&mut self, _parts: &mut LocalParts, _cx: &FeatureContext<'_>) {}
     /// Handle a command; return false when it belongs to another feature.
-    fn command(&mut self, _pane: PaneId, _command: &FeatureCommand, _cx: &FeatureContext<'_>) -> bool {
+    fn command(
+        &mut self,
+        _pane: PaneId,
+        _command: &FeatureCommand,
+        _cx: &FeatureContext<'_>,
+    ) -> bool {
         false
     }
     fn key(&mut self, _key: &KeyEvent, _cx: &FeatureContext<'_>) -> KeyOutcome {
@@ -352,7 +355,10 @@ pub(crate) struct ContextBase<'a> {
     pub(crate) _marker: std::marker::PhantomData<&'a ()>,
 }
 
-#[allow(dead_code, reason = "kept for feature modules that persist per-workspace state")]
+#[allow(
+    dead_code,
+    reason = "kept for feature modules that persist per-workspace state"
+)]
 pub(crate) fn feature_state_dir(workspace: &std::path::Path) -> PathBuf {
     workspace.join(".nanocodex")
 }

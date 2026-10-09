@@ -6,8 +6,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    fs,
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +21,13 @@ pub(crate) struct ResumeSession {
     pub(crate) model: Option<HarnessModel>,
     pub(crate) transcript: Vec<RolloutTranscriptItem>,
     updated: u64,
+}
+
+impl ResumeSession {
+    /// Last update of the session journal, in Unix seconds.
+    pub(crate) const fn updated(&self) -> u64 {
+        self.updated
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -254,86 +260,6 @@ fn clean(value: &str) -> String {
         .filter(|c| !c.is_control())
         .take(180)
         .collect()
-}
-
-pub(crate) fn select(sessions: &[ResumeSession]) -> Result<Option<String>> {
-    use legacy_crossterm::{
-        cursor,
-        event::{self, Event, KeyCode, KeyModifiers},
-        execute,
-        terminal::{self, ClearType},
-    };
-    struct Terminal;
-    impl Drop for Terminal {
-        fn drop(&mut self) {
-            let _ = legacy_crossterm::execute!(
-                io::stdout(),
-                legacy_crossterm::terminal::LeaveAlternateScreen,
-                legacy_crossterm::cursor::Show
-            );
-            let _ = legacy_crossterm::terminal::disable_raw_mode();
-        }
-    }
-    terminal::enable_raw_mode()?;
-    let _terminal = Terminal;
-    execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide)?;
-    let mut selected = 0usize;
-    loop {
-        let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            cursor::MoveTo(0, 0),
-            terminal::Clear(ClearType::All)
-        )?;
-        write!(
-            stdout,
-            "Resume a Claude session\r\n↑/↓ select · enter resume · esc cancel\r\n\r\n"
-        )?;
-        let rows = usize::from(terminal::size()?.1.saturating_sub(4)).max(1) / 3;
-        let rows = rows.max(1);
-        let start = selected.saturating_sub(rows - 1);
-        for (index, session) in sessions.iter().enumerate().skip(start).take(rows) {
-            let workspace = session.workspace.as_ref().map_or_else(
-                || "legacy: --cwd required".into(),
-                |v| v.display().to_string(),
-            );
-            let model = session
-                .model
-                .map_or_else(|| "legacy: --model required".into(), |v| v.to_string());
-            let preview = session
-                .transcript
-                .iter()
-                .find_map(|item| match item {
-                    RolloutTranscriptItem::User(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .unwrap_or("(retained session)");
-            write!(
-                stdout,
-                "{} {}\r\n  {} · {}\r\n  {}\r\n",
-                if index == selected { ">" } else { " " },
-                clean(&session.id),
-                clean(&workspace),
-                clean(&model),
-                clean(preview)
-            )?;
-        }
-        stdout.flush()?;
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Enter => return Ok(sessions.get(selected).map(|s| s.id.clone())),
-                KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(None);
-                }
-                KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => {
-                    selected = (selected + 1).min(sessions.len().saturating_sub(1))
-                }
-                _ => {}
-            }
-        }
-    }
 }
 
 /// Read-only preview: unlike branch creation, listing never fences a live owner.

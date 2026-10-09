@@ -8,12 +8,10 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use eyre::{Result, WrapErr as _};
+use eyre::Result;
 use nanocodex::{HarnessModel, Nanocodex, OpenAi, tools::mcp::McpHandle};
 
-use crate::config::{
-    AgentArgs, ConfiguredAgent, InteractionReceiver, SessionScheduler,
-};
+use crate::config::{AgentArgs, ConfiguredAgent, InteractionReceiver, SessionScheduler};
 use crate::nanocodex2::tui::backend::Capabilities;
 use crate::subagents::ChildAgents;
 use crate::vm::VmArgs;
@@ -40,6 +38,8 @@ pub(crate) struct LocalLaunch {
     pub(crate) replaceable: bool,
     /// `--prompt`: submitted once, as soon as the agent is ready.
     pub(crate) initial_prompt: Option<String>,
+    /// A saved Codex thread to reopen (`ncl resume`, /attach).
+    pub(crate) resume: Option<super::sessions::Resume>,
 }
 
 /// A running local agent and the resources it must release on exit.
@@ -49,6 +49,9 @@ pub(crate) struct LocalBackend {
     pub(crate) model: HarnessModel,
     pub(crate) workspace: PathBuf,
     pub(crate) parts: LocalParts,
+    capabilities: Capabilities,
+    /// Visible history of a resumed session, replayed once on connect.
+    pub(crate) transcript: Vec<nanocodex::agent::rollout::RolloutTranscriptItem>,
     mpp_adapter: Option<crate::mpp::MppAdapter>,
     browser: Option<crate::browser::ConfiguredBrowser>,
     vm: Option<crate::vm::ConfiguredVm>,
@@ -76,7 +79,11 @@ impl LocalBackend {
             vm,
             model,
         } = agent;
+        let mut capabilities = Capabilities::LOCAL;
+        capabilities.voice_realtime = realtime.is_some();
+        capabilities.claude_host = matches!(model.family(), nanocodex::HarnessFamily::Claude);
         let backend = Self {
+            capabilities,
             launch,
             handle,
             model,
@@ -89,6 +96,7 @@ impl LocalBackend {
                 child_agents: child_agents.clone(),
                 subagent_updates,
             },
+            transcript: Vec::new(),
             mpp_adapter,
             browser,
             vm,
@@ -97,27 +105,17 @@ impl LocalBackend {
         (backend, events)
     }
 
-    /// Builds a fresh local agent off the input loop.
+    /// Builds the local agent off the input loop, reopening a saved session if any.
     pub(crate) async fn build(launch: LocalLaunch) -> Result<(Self, nanocodex::AgentEvents)> {
-        let workspace = launch.args.cwd().to_path_buf();
-        let agent = launch
-            .args
-            .clone()
-            .build_tui(launch.vm.clone())
-            .await
-            .wrap_err("could not start the local agent")?;
-        Ok(Self::new(launch, workspace, agent))
+        let built = super::sessions::build(&launch).await?;
+        let (mut backend, events) = Self::new(launch, built.workspace, built.agent);
+        backend.transcript = built.transcript;
+        Ok((backend, events))
     }
 
     /// Feature visibility for this agent.
     pub(crate) fn capabilities(&self) -> Capabilities {
-        let mut capabilities = Capabilities::LOCAL;
-        capabilities.voice_realtime = self.parts.realtime.is_some();
-        capabilities.claude_host = matches!(
-            self.model.family(),
-            nanocodex::HarnessFamily::Claude
-        );
-        capabilities
+        self.capabilities
     }
 
     /// Releases subagents, browser, VM and MPP resources (legacy shutdown_runtime).
