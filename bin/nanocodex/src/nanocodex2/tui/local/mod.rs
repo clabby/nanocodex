@@ -47,7 +47,7 @@ pub(crate) struct LocalConnection {
     pub(crate) workspace: PathBuf,
     pub(crate) settings: AgentSettings,
     /// Replayed history of a resumed session (empty for a fresh one).
-    pub(crate) history: super::history::HistoryWindow,
+    pub(in crate::nanocodex2::tui) history: super::history::HistoryWindow,
 }
 
 impl LocalConnection {

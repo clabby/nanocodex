@@ -298,7 +298,7 @@ pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
 
 /// The visible history of a resumed session as managed history events, so the
 /// driver projects it exactly like a managed session's durable history.
-pub(crate) fn history_window(transcript: &[RolloutTranscriptItem], request_id: &str) -> HistoryWindow {
+pub(in crate::nanocodex2::tui) fn history_window(transcript: &[RolloutTranscriptItem], request_id: &str) -> HistoryWindow {
     let mut replay = Replay {
         request_id,
         events: Vec::new(),

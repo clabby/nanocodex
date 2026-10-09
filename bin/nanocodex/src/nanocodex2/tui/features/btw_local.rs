@@ -83,7 +83,7 @@ impl Drop for Registration {
 }
 
 /// Runs one local side conversation until its pane closes.
-pub(crate) async fn run(
+pub(in crate::nanocodex2::tui) async fn run(
     pane: PaneId,
     main: Nanocodex,
     settings: AgentSettings,
