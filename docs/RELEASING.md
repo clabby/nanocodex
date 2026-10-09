@@ -48,7 +48,8 @@ platform bundle atomically and exposes the CLI as `nanocodex`, `nc`, and `ncl`
 under `$NANOCODEX_DIR/bin`; the invoked name selects the managed tree
 (`nanocodex`, `nc`) or the local agent tree (`ncl`, or `nanocodex --local`).
 `nanocodex update --branch NAME` and `nanocodex update --pr NUMBER` fetch source into a temporary
-checkout, compile the CLI and Hand locally, and install them together.
+checkout, compile the CLI and Hand locally, and install them together; when the
+built Hand reports the running Hand's identity, only the CLI changes.
 The PR must be open; the updater checks that the fetched head still matches the
 PR metadata. The source build requires Git and a working Rust toolchain, plus
 `gh` for PR selection. Locally compiled source bundles do not include the native
