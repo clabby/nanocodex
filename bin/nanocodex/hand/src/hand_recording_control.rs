@@ -18,34 +18,19 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CONCURRENCY: usize = 8;
 pub(crate) type Handler = Arc<dyn Fn(Value) -> BoxFuture<'static, Value> + Send + Sync>;
 
-#[derive(clap::Args)]
-pub(crate) struct Args {
-    /// Owner-private recording storage directory used by this Hand.
-    #[arg(long)]
-    state_dir: PathBuf,
-    /// Run this Hand's recorder locally until interrupted.
-    #[arg(long, conflicts_with = "request")]
-    serve: bool,
-    /// Native desktop observer runtime, when required by this platform.
-    #[arg(long, requires = "serve")]
-    desktop_runtime: Option<PathBuf>,
-    /// JSON control request, such as '{"operation":"status"}'.
-    #[arg(required_unless_present = "serve")]
-    request: Option<String>,
-}
-impl Args {
-    pub(crate) async fn run(&self) -> Result<()> {
-        if self.desktop_runtime.is_some() && !self.serve {
+/// Run the recorder or send it one control request.
+pub(crate) async fn run(args: &nanocodex_bin_shared::hand_args::HandRecordingArgs) -> Result<()> {
+        if args.desktop_runtime.is_some() && !args.serve {
             bail!("desktop_runtime_requires_serve");
         }
-        if self.serve {
+        if args.serve {
             return super::hand_recording::serve(
-                self.state_dir.clone(),
-                self.desktop_runtime.clone(),
+                args.state_dir.clone(),
+                args.desktop_runtime.clone(),
             )
             .await;
         }
-        let request = self
+        let request = args
             .request
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("invalid_control_request"))?;
@@ -54,10 +39,9 @@ impl Args {
         }
         let request: Value =
             serde_json::from_str(request).map_err(|_| anyhow::anyhow!("invalid_json"))?;
-        let response = request_local(&self.state_dir, request).await?;
+        let response = request_local(&args.state_dir, request).await?;
         println!("{}", serde_json::to_string(&response)?);
         Ok(())
-    }
 }
 
 pub(crate) struct ControlGuard {

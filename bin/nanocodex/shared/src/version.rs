@@ -1,8 +1,8 @@
 //! Build and version information for the Nanocodex executables.
 //!
-//! The library carries no build-time provenance. Each executable crate
+//! The libraries carry no build-time provenance. Each executable crate
 //! expands [`build_info!`](crate::build_info) at its thin entry point and passes
-//! the result to [`crate::cli_main`] or [`crate::hand_main`], so commit,
+//! the result to `nanocodex_cli::cli_main` or `nanocodex_hand_daemon::hand_main`, so commit,
 //! release-tag and Hand-identity environment variables are compile inputs of
 //! the two tiny binary targets only. Commits, branch switches and release
 //! metadata therefore relink the executables instead of recompiling the
@@ -29,7 +29,7 @@ pub struct BuildInfo {
 #[macro_export]
 macro_rules! build_info {
     () => {
-        $crate::BuildInfo {
+        $crate::version::BuildInfo {
             version: env!("CARGO_PKG_VERSION"),
             git_sha: option_env!("VERGEN_GIT_SHA"),
             tag: option_env!("TAG_NAME"),
@@ -45,12 +45,12 @@ macro_rules! build_info {
 
 /// Full revision reported by unit tests, which run without an executable.
 #[cfg(test)]
-pub(crate) const TEST_GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+const TEST_GIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
 static BUILD: OnceLock<BuildInfo> = OnceLock::new();
 
 /// Records the executable's provenance; the first call wins.
-pub(crate) fn init(build: BuildInfo) {
+pub fn init(build: BuildInfo) {
     let _ = BUILD.set(build);
 }
 
@@ -76,17 +76,17 @@ fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
 }
 
 /// Full Git commit of this build, when the build recorded one.
-pub(crate) fn git_sha() -> Option<&'static str> {
+pub fn git_sha() -> Option<&'static str> {
     non_empty(build().git_sha)
 }
 
 /// Release reuse identity of the Hand built with this CLI, when recorded.
-pub(crate) fn hand_identity() -> Option<&'static str> {
+pub fn hand_identity() -> Option<&'static str> {
     non_empty(build().hand_identity)
 }
 
 /// Whether this binary was produced by the nightly release channel.
-pub(crate) fn is_nightly() -> bool {
+pub fn is_nightly() -> bool {
     non_empty(build().tag).is_some_and(|tag| tag.contains("nightly"))
 }
 
@@ -120,7 +120,7 @@ fn leak(value: String) -> &'static str {
 }
 
 /// SemVer-compatible build identity including commit and profile.
-pub(crate) fn semver() -> &'static str {
+pub fn semver() -> &'static str {
     static VALUE: OnceLock<&'static str> = OnceLock::new();
     VALUE.get_or_init(|| {
         leak(format!(
@@ -133,14 +133,14 @@ pub(crate) fn semver() -> &'static str {
 }
 
 /// Compact CLI version displayed by `nanocodex --version`.
-pub(crate) fn short() -> &'static str {
+pub fn short() -> &'static str {
     static VALUE: OnceLock<&'static str> = OnceLock::new();
     VALUE.get_or_init(|| leak(format!("{} ({})", channel_version(), short_sha())))
 }
 
 /// Detailed CLI version displayed by the long version flag. The Commit SHA
 /// and Hand Identity lines appear only when the build recorded them.
-pub(crate) fn long() -> &'static str {
+pub fn long() -> &'static str {
     static VALUE: OnceLock<&'static str> = OnceLock::new();
     VALUE.get_or_init(|| {
         let mut lines = vec![format!("Version: {}", channel_version())];
@@ -153,4 +153,13 @@ pub(crate) fn long() -> &'static str {
         }
         leak(lines.join("\n"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn long_version_reports_the_recorded_source_revision() {
+        assert!(super::long().contains(&format!("Commit SHA: {}", super::TEST_GIT_SHA)));
+        assert!(super::long().contains("Build Profile: "));
+    }
 }

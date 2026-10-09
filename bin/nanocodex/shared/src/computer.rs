@@ -3,7 +3,7 @@ use clap::{Args, Subcommand};
 use std::{fs, path::PathBuf, process::Stdio};
 
 #[derive(Args)]
-pub(crate) struct Computer {
+pub struct Computer {
     #[command(subcommand)]
     command: Command,
 }
@@ -22,7 +22,7 @@ enum Command {
 }
 
 impl Computer {
-    pub(crate) async fn run(self) -> Result<(), String> {
+    pub async fn run(self) -> Result<(), String> {
         let Command::Setup {
             refresh,
             background,
@@ -73,7 +73,7 @@ impl Computer {
 /// (including its cross-process lock) and survives installer exit. Explicit
 /// provider selections, including `off`, never trigger a download.
 #[allow(dead_code)] // Also compiled into the managed CLI.
-pub(crate) fn setup_in_background(refresh: bool) -> Result<Option<PathBuf>, String> {
+pub fn setup_in_background(refresh: bool) -> Result<Option<PathBuf>, String> {
     if !cfg!(target_os = "macos")
         || std::env::var_os("NANOCODEX_COMPUTER").is_some_and(|value| !value.is_empty())
     {
@@ -128,7 +128,7 @@ fn setup_directory() -> Result<PathBuf, String> {
 
 /// Optional managed CUA may not hold shell, file access, or first input behind
 /// MCP startup. Explicit custom providers retain their normal error contract.
-pub(crate) async fn connect_for_startup()
+pub async fn connect_for_startup()
 -> Result<Option<nanocodex_computer::ComputerTools>, String> {
     if let Err(error) = setup_in_background(false) {
         tracing::warn!(%error, "could not start background Computer Use setup");
@@ -166,7 +166,7 @@ pub(crate) async fn connect_for_startup()
 /// Resolve the provider on use, retaining it once connected so existing realms
 /// and workspace processes survive. No action is retried after dispatch.
 #[allow(dead_code)] // Shared with the CLI installer, which does not publish tools.
-pub(crate) async fn connect_for_hand() -> Result<Option<nanocodex_computer::ComputerTools>, String>
+pub async fn connect_for_hand() -> Result<Option<nanocodex_computer::ComputerTools>, String>
 {
     if std::env::var_os("NANOCODEX_COMPUTER").is_some_and(|value| !value.is_empty()) {
         return connect_for_startup().await;

@@ -9,12 +9,12 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-pub(crate) const MAX_SECONDS: u64 = 120;
+pub const MAX_SECONDS: u64 = 120;
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Owns a microphone subprocess and its private temporary output.
 /// Dropping this value cancels capture, reaps the process, and removes the audio.
-pub(crate) struct Recorder {
+pub struct Recorder {
     child: Option<Child>,
     output: Option<NamedTempFile>,
     started_at: Instant,
@@ -22,22 +22,22 @@ pub(crate) struct Recorder {
 }
 
 /// Keeps the validated WAV alive until its consumer has finished uploading it.
-pub(crate) struct RecordedSample {
+pub struct RecordedSample {
     output: NamedTempFile,
     duration: Duration,
 }
 
 impl RecordedSample {
-    pub(crate) fn duration(&self) -> Duration {
+    pub fn duration(&self) -> Duration {
         self.duration
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         self.output.path()
     }
 
     /// Play locally. Dropping this future kills the player; no audio is uploaded.
-    pub(crate) async fn play(&self) -> Result<(), String> {
+    pub async fn play(&self) -> Result<(), String> {
         let mut command = if cfg!(target_os = "macos") {
             sanitized_program("/usr/bin/afplay")
         } else if cfg!(target_os = "linux") {
@@ -62,14 +62,14 @@ impl RecordedSample {
 }
 
 impl Recorder {
-    pub(crate) fn elapsed(&self) -> Duration {
+    pub fn elapsed(&self) -> Duration {
         self.started_at
             .elapsed()
             .min(Duration::from_secs(MAX_SECONDS))
     }
 
     /// Read only the newest local PCM window for a visible microphone meter.
-    pub(crate) fn peak(&self) -> u16 {
+    pub fn peak(&self) -> u16 {
         let Some(output) = &self.output else {
             return 0;
         };
@@ -95,7 +95,7 @@ impl Recorder {
     }
 
     /// The caller should stop/collect the sample when this returns true.
-    pub(crate) fn is_finished(&mut self) -> Result<bool, String> {
+    pub fn is_finished(&mut self) -> Result<bool, String> {
         self.child
             .as_mut()
             .expect("capture child")
@@ -104,7 +104,7 @@ impl Recorder {
             .map_err(|e| format!("Cannot inspect microphone recorder: {e}"))
     }
 
-    pub(crate) async fn start() -> Result<Self, String> {
+    pub async fn start() -> Result<Self, String> {
         if cfg!(target_os = "macos") {
             let mut command = sanitized_program("nanocodex-voice-recorder");
             command.args(["--max-seconds", &MAX_SECONDS.to_string()]);
@@ -114,8 +114,9 @@ impl Recorder {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn synthetic() -> Result<Self, String> {
+    /// A 440 Hz synthetic input for checks on machines without a microphone.
+    #[doc(hidden)]
+    pub async fn synthetic() -> Result<Self, String> {
         Self::start_input(
             [
                 "-re",
@@ -267,7 +268,7 @@ impl Recorder {
         )
     }
 
-    pub(crate) async fn stop(mut self) -> Result<RecordedSample, String> {
+    pub async fn stop(mut self) -> Result<RecordedSample, String> {
         let child = self.child.as_mut().expect("capture child");
         // Both capture backends finalize the WAV header on q; killing does not.
         if child
@@ -370,7 +371,7 @@ fn sanitized_command() -> Command {
 
 // GUI-launched terminals often omit Homebrew from PATH. Resolve the binary
 // before clearing the child environment, including packaged and standard installs.
-pub(crate) fn audio_program(program: &str) -> PathBuf {
+pub fn audio_program(program: &str) -> PathBuf {
     if Path::new(program).is_absolute() {
         return program.into();
     }
@@ -417,7 +418,7 @@ fn find_program(program: &str, directories: &[PathBuf]) -> Option<PathBuf> {
         })
 }
 
-pub(crate) fn sanitized_program(program: &str) -> Command {
+pub fn sanitized_program(program: &str) -> Command {
     let mut command = Command::new(audio_program(program));
     command.env_clear();
     // Pass only runtime/device discovery settings, never API keys, account

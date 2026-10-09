@@ -5,6 +5,8 @@ members = [
     "bin/nanocodex/tui-control",
     "bin/nanocodex/screen-supervisor",
     "bin/nanocodex/account-auth",
+    "bin/nanocodex/hand",
+    "bin/nanocodex/shared",
     "bin/nanousd",
     "bin/nanousd-api",
     "crates/nanocodex",
@@ -38,7 +40,7 @@ members = [
 ]
 # A plain `cargo build` produces both executables, nanocodex and nanocodex-hand.
 # Select library packages with -p (for example `cargo test -p nanocodex`).
-default-members = ["bin/nanocodex"]
+default-members = ["bin/nanocodex", "bin/nanocodex/hand"]
 resolver = "2"
 
 [workspace.package]
@@ -103,6 +105,7 @@ nanocodex-claude = { version = "0.6.7", path = "crates/nanocodex-claude" }
 nanocodex-claude-tools = { version = "0.6.7", path = "crates/nanocodex-claude-tools", default-features = false }
 nanocodex-managed = { version = "0.6.7", path = "crates/nanocodex-managed" }
 nanocodex-cli-auth = { version = "0.6.7", path = "bin/nanocodex/account-auth" }
+nanocodex-bin-shared = { version = "0.6.7", path = "bin/nanocodex/shared" }
 nanocodex-durability = { version = "0.6.7", path = "crates/nanocodex-durability" }
 nanocodex-browser = { version = "0.6.7", path = "crates/nanocodex-browser" }
 nanocodex-computer = { version = "0.6.7", path = "crates/experimental/nanocodex-computer" }

@@ -2,5 +2,5 @@
 //! under the historical file name `nanocodex2`.
 
 fn main() -> std::process::ExitCode {
-    nanocodex_cli::hand_main(nanocodex_cli::build_info!())
+    nanocodex_hand_daemon::hand_main(nanocodex_bin_shared::build_info!())
 }

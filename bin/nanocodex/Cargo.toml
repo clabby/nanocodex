@@ -10,7 +10,7 @@ authors.workspace = true
 license = "Apache-2.0"
 homepage.workspace = true
 repository.workspace = true
-description = "Nanocodex CLI: managed client and Hand (nanocodex, nc) plus the local agent (ncl)"
+description = "Nanocodex CLI: managed client (nanocodex, nc) plus the local agent (ncl)"
 build = "build.rs"
 
 [features]
@@ -21,10 +21,6 @@ tempo = [
     "dep:nanocodex-egress",
     "dep:nanousd",
 ]
-# Embed the Linux Wayland screen helpers named by NANOCODEX_LINUX_SCREEN_BUNDLE
-# (built by scripts/build-linux-screen-helpers.sh). Distributable Linux Hands
-# enable it; without it the Hand reports the missing payload at runtime.
-embedded-screen-helpers = []
 # Criterion cases over the production shared TUI renderer (benches/nanocodex2_tui.rs).
 tui-bench = ["dep:criterion"]
 
@@ -34,10 +30,8 @@ anyhow.workspace = true
 criterion = { workspace = true, optional = true }
 dark-light = "3.0.0"
 nanocodex-agent = { path = "../../crates/nanocodex-agent", version = "0.6.7", default-features = false }
-nanocodex-hand = { path = "../../crates/nanocodex-hand", version = "0.6.7" }
 nanocodex-managed = { path = "../../crates/nanocodex-managed", version = "0.6.7", default-features = false, features = ["tools", "voice"] }
 nanocodex-oai-tools = { workspace = true, features = ["attachment", "workspace-runtime", "mcp"] }
-nanocodex-remote = { path = "../../crates/nanocodex-remote", version = "0.6.7" }
 nanocodex-voice-native.workspace = true
 nanocodex-voice-protocol.workspace = true
 opusic-c.workspace = true
@@ -50,7 +44,6 @@ webrtc.workspace = true
 whoami.workspace = true
 zeroize = "1.8.2"
 nanocodex-tui-control = { path = "tui-control", version = "0.6.7" }
-nanocodex-screen-supervisor = { path = "screen-supervisor", version = "0.6.7" }
 nanocodex-computer.workspace = true
 arboard.workspace = true
 async-trait.workspace = true
@@ -75,6 +68,7 @@ indicatif.workspace = true
 percent-encoding.workspace = true
 jsonschema.workspace = true
 nanocodex = { workspace = true, features = ["claude-tools", "workspace-tools"] }
+nanocodex-bin-shared.workspace = true
 nanocodex-cli-auth.workspace = true
 nanocodex-durability = { workspace = true, features = ["sqlite"] }
 nanocodex-browser.workspace = true
@@ -126,7 +120,6 @@ nanocodex-eval-adapters.workspace = true
 nanocodex-vm.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-kvm-ioctls = "0.24.0"
 nanocodex-vm = { workspace = true, features = ["desktop"] }
 
 [dev-dependencies]
@@ -181,8 +174,9 @@ path = "tests/tui_control.rs"
 name = "code_mode_teardown"
 path = "tests/code_mode_teardown.rs"
 
-# One crate, two executables split by role: the user-facing CLI and the Hand
-# daemon (installed under the historical file name nanocodex2).
+# The user-facing CLI. The Hand daemon executable (nanocodex-hand, installed
+# under the historical file name nanocodex2) is the separate
+# nanocodex-hand-daemon package in ./hand; neither depends on the other.
 [lib]
 name = "nanocodex_cli"
 path = "src/lib.rs"
@@ -191,12 +185,6 @@ doc = false
 [[bin]]
 name = "nanocodex"
 path = "src/main.rs"
-doc = false
-test = false
-
-[[bin]]
-name = "nanocodex-hand"
-path = "src/hand_main.rs"
 doc = false
 test = false
 

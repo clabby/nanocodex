@@ -1,12 +1,12 @@
 //! Shared opt-in, content-free client timings for real binary measurements.
 use std::{sync::OnceLock, time::Instant};
 
-pub(super) struct Stage {
+pub struct Stage {
     name: &'static str,
     started: Option<Instant>,
 }
 impl Stage {
-    pub(super) fn new(name: &'static str) -> Self {
+    pub fn new(name: &'static str) -> Self {
         static ENABLED: OnceLock<bool> = OnceLock::new();
         let enabled = *ENABLED.get_or_init(|| {
             std::env::var_os("NANOCODEX_STARTUP_TIMING").is_some_and(|value| value == "1")

@@ -14,7 +14,9 @@ use std::{
 };
 
 /// Explicit Hand executable for development and tests.
-pub(crate) const HAND_EXECUTABLE_ENV: &str = "NANOCODEX_HAND_EXECUTABLE";
+pub const HAND_EXECUTABLE_ENV: &str = "NANOCODEX_HAND_EXECUTABLE";
+/// Selects the Linux Wayland screen-encoder helper role of the Hand executable.
+pub const SCREEN_ENCODER_HELPER_ENV: &str = "NANOCODEX_SCREEN_ENCODER_HELPER";
 /// Set on a process the CLI forwarded to the Hand, so the Hand never forwards back.
 const FORWARDED_ENV: &str = "NANOCODEX_ROLE_FORWARDED";
 
@@ -27,7 +29,7 @@ fn file_name(stem: &str) -> String {
 /// Whether `path` names an executable a Hand service record may run:
 /// `nanocodex2` (the installed Hand), `nanocodex-hand` (a build output), or
 /// `nanocodex` (the CLI, which forwards `hand` to the Hand).
-pub(crate) fn is_hand_file_name(path: &Path) -> bool {
+pub fn is_hand_file_name(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -53,7 +55,7 @@ pub(crate) fn is_hand_file_name(path: &Path) -> bool {
 }
 
 /// Paths under an installation's `current` link that run a Nanocodex executable.
-pub(crate) fn current_executables(install: &Path) -> [PathBuf; 3] {
+pub fn current_executables(install: &Path) -> [PathBuf; 3] {
     let current = install.join("current");
     [
         current.join("nanocodex2"),
@@ -84,7 +86,7 @@ fn other_executable(candidate: &Path) -> bool {
 }
 
 /// Locate the installed Hand daemon from the CLI.
-pub(crate) fn hand_binary() -> io::Result<PathBuf> {
+pub fn hand_binary() -> io::Result<PathBuf> {
     if let Some(path) = std::env::var_os(HAND_EXECUTABLE_ENV).filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
@@ -122,7 +124,7 @@ pub(crate) fn hand_binary() -> io::Result<PathBuf> {
 }
 
 /// Locate the user-facing CLI from the Hand (installed beside it as `nanocodex`).
-pub(crate) fn cli_binary() -> io::Result<PathBuf> {
+pub fn cli_binary() -> io::Result<PathBuf> {
     let mut candidates = Vec::new();
     for running in running_paths() {
         candidates.push(running.with_file_name(file_name("nanocodex")));
@@ -165,12 +167,12 @@ pub(crate) fn cli_binary() -> io::Result<PathBuf> {
 static HAND_ROLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Record that this process is the `nanocodex-hand` executable.
-pub(crate) fn set_hand_role() {
+pub fn set_hand_role() {
     HAND_ROLE.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Whether this process is the Hand executable rather than the CLI.
-pub(crate) fn is_hand_role() -> bool {
+pub fn is_hand_role() -> bool {
     HAND_ROLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -180,7 +182,7 @@ static FORWARDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// marker from this process's environment so no child (Hand services, tool
 /// commands, terminals, or a later forward) inherits it. Call first thing in
 /// `main`, before any thread starts.
-pub(crate) fn take_forwarded() {
+pub fn take_forwarded() {
     if std::env::var_os(FORWARDED_ENV).is_some() {
         FORWARDED.store(true, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: called once at process start, before Tokio or any other
@@ -193,13 +195,13 @@ pub(crate) fn take_forwarded() {
 }
 
 /// Whether this process was forwarded here by the other role.
-pub(crate) fn forwarded() -> bool {
+pub fn forwarded() -> bool {
     FORWARDED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Run `executable` with `arguments` (argv without argv\[0\]) in place of this
 /// process, preserving the exit status. Unix replaces the process image.
-pub(crate) fn forward(
+pub fn forward(
     executable: &Path,
     argv0: Option<OsString>,
     arguments: &[OsString],
@@ -233,7 +235,7 @@ pub(crate) fn forward(
 }
 
 /// Byte equality of two regular files (or one file reached through links).
-pub(crate) fn same_file_contents(left: &Path, right: &Path) -> io::Result<bool> {
+pub fn same_file_contents(left: &Path, right: &Path) -> io::Result<bool> {
     let (Ok(left_meta), Ok(right_meta)) = (fs::metadata(left), fs::metadata(right)) else {
         return Ok(false);
     };

@@ -7,11 +7,11 @@ use std::{
 };
 
 #[cfg(unix)]
-pub(super) use tokio::net::UnixStream as Client;
+pub use tokio::net::UnixStream as Client;
 #[cfg(windows)]
-pub(super) use tokio::net::windows::named_pipe::NamedPipeClient as Client;
+pub use tokio::net::windows::named_pipe::NamedPipeClient as Client;
 
-pub(super) struct Listener {
+pub struct Listener {
     path: PathBuf,
     #[cfg(unix)]
     inner: tokio::net::UnixListener,
@@ -19,7 +19,7 @@ pub(super) struct Listener {
     inner: tokio::net::windows::named_pipe::NamedPipeServer,
 }
 impl Listener {
-    pub(super) fn bind(path: &Path) -> io::Result<Self> {
+    pub fn bind(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         let inner = {
             // Caller holds the publisher's OS lock, so only a stale socket can
@@ -39,11 +39,11 @@ impl Listener {
         })
     }
     #[cfg(unix)]
-    pub(super) async fn accept(&mut self) -> io::Result<tokio::net::UnixStream> {
+    pub async fn accept(&mut self) -> io::Result<tokio::net::UnixStream> {
         self.inner.accept().await.map(|(stream, _)| stream)
     }
     #[cfg(windows)]
-    pub(super) async fn accept(
+    pub async fn accept(
         &mut self,
     ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
         self.inner.connect().await?;
@@ -69,7 +69,7 @@ fn pipe(path: &Path, first: bool) -> io::Result<tokio::net::windows::named_pipe:
         .reject_remote_clients(true)
         .create(path)
 }
-pub(super) async fn connect(path: &Path) -> io::Result<Client> {
+pub async fn connect(path: &Path) -> io::Result<Client> {
     #[cfg(unix)]
     {
         Client::connect(path).await
@@ -96,11 +96,11 @@ pub(super) async fn connect(path: &Path) -> io::Result<Client> {
 
 // Existing lease clients send no bytes. A single versioned opcode requests an
 // update barrier; older daemons close this stream without an acknowledgement.
-pub(super) const PREPARE_IDLE_UPDATE: u8 = 0xA1;
-pub(super) const UPDATE_PREPARED: u8 = 0xA2;
-pub(super) const UPDATE_DEFERRED: u8 = 0xA3;
+pub const PREPARE_IDLE_UPDATE: u8 = 0xA1;
+pub const UPDATE_PREPARED: u8 = 0xA2;
+pub const UPDATE_DEFERRED: u8 = 0xA3;
 
-pub(super) async fn prepare_idle_update(path: &Path) -> io::Result<bool> {
+pub async fn prepare_idle_update(path: &Path) -> io::Result<bool> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     tokio::time::timeout(Duration::from_secs(3), async {
         let mut stream = connect(path).await?;
@@ -121,16 +121,16 @@ pub(super) async fn prepare_idle_update(path: &Path) -> io::Result<bool> {
 // Explicit user action only: ask the daemon process itself to request macOS
 // consent so the OS attributes it to the executable that captures the screen.
 // Reply is one bounded JSON object; older daemons close without replying.
-pub(super) const REQUEST_PERMISSIONS: u8 = 0xB1;
+pub const REQUEST_PERMISSIONS: u8 = 0xB1;
 /// Read-only status for permission guides; never prompts or adds a TCC entry.
-pub(super) const CHECK_PERMISSIONS: u8 = 0xB2;
+pub const CHECK_PERMISSIONS: u8 = 0xB2;
 #[cfg(unix)]
 const PERMISSIONS_REPLY_LIMIT: u64 = 16 * 1024;
 
 /// Refuses before sending anything unless the kernel-attested socket owner is
 /// `expected_pid`. The OS request is non-blocking; the bound covers a stalled peer.
 #[cfg(unix)]
-pub(super) async fn permissions(
+pub async fn permissions(
     path: &Path,
     expected_pid: u32,
     opcode: u8,

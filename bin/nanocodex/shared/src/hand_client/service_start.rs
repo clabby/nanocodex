@@ -2,12 +2,12 @@
 use std::future::Future;
 
 #[derive(Clone, Copy)]
-pub(super) enum Platform {
+pub enum Platform {
     Mac,
     Linux,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Action {
+pub enum Action {
     MacInstall,
     MacGuiStatus,
     MacGuiStart,
@@ -19,7 +19,7 @@ pub(super) enum Action {
     LinuxStart,
 }
 impl Action {
-    pub(super) fn command(
+    pub fn command(
         self,
         gui: Option<(u32, &std::path::Path)>,
     ) -> (&'static str, Vec<String>) {
@@ -79,13 +79,13 @@ impl Action {
         (program, args.iter().map(|arg| (*arg).to_owned()).collect())
     }
 }
-pub(super) struct Reply {
+pub struct Reply {
     pub success: bool,
     pub stdout: String,
 }
 const INSTALL: &str = "The computer Hand OS service is not installed. Install it once with `nanocodex hand install`, then retry. To use the CLI without a local Hand, set NANOCODEX_DISABLE_HAND=1.";
 
-pub(super) async fn ensure_with<F, Fut>(
+pub async fn ensure_with<F, Fut>(
     platform: Platform,
     mac_installed: bool,
     gui_installed: Option<bool>,

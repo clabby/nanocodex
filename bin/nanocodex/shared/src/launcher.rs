@@ -12,16 +12,16 @@ use std::path::PathBuf;
 // updater uses this capability marker when activating an older cached binary:
 // those versions still need the portable shell wrapper for update dispatch and
 // NANOCODEX_DIR. This is a capability hint, not an integrity check.
-pub(crate) const NATIVE_LAUNCHER_MARKER: &[u8] = b"NANOCODEX_NATIVE_LAUNCHER_V1";
+pub const NATIVE_LAUNCHER_MARKER: &[u8] = b"NANOCODEX_NATIVE_LAUNCHER_V1";
 
 #[allow(dead_code)] // Only the legacy binary installs launchers.
-pub(crate) fn supports_native_launcher(contents: &[u8]) -> bool {
+pub fn supports_native_launcher(contents: &[u8]) -> bool {
     contents
         .windows(NATIVE_LAUNCHER_MARKER.len())
         .any(|window| window == NATIVE_LAUNCHER_MARKER)
 }
 
-pub(crate) fn initialize_install_root() {
+pub fn initialize_install_root() {
     std::hint::black_box(NATIVE_LAUNCHER_MARKER);
     #[cfg(unix)]
     if let Some(root) = running_install_root() {
@@ -36,7 +36,7 @@ pub(crate) fn initialize_install_root() {
 }
 
 /// Fallback for callers which discover the store without entrypoint setup.
-pub(crate) fn running_install_root() -> Option<PathBuf> {
+pub fn running_install_root() -> Option<PathBuf> {
     #[cfg(unix)]
     {
         installed_root_for(&std::env::current_exe().ok()?)
@@ -87,7 +87,7 @@ fn installed_root_for(executable: &Path) -> Option<PathBuf> {
 /// Keep `nanocodex update ...` on the separate update manager, even when the
 /// active application is version-pinned. Other commands never spawn a process.
 /// `arguments` is the full argv after mode selection removed `--local`.
-pub(crate) fn dispatch_update(arguments: &[std::ffi::OsString]) -> std::io::Result<()> {
+pub fn dispatch_update(arguments: &[std::ffi::OsString]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

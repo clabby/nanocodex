@@ -52,7 +52,7 @@ fn diagnostic(status: Option<StatusCode>, headers: &HeaderMap, attempt: usize) -
     )
 }
 
-pub(super) async fn identify(
+pub async fn identify(
     client: &Client,
     origin: &str,
     key: &str,

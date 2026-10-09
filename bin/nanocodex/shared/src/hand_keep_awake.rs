@@ -6,16 +6,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) const ENVIRONMENT: &str = "NANOCODEX_HAND_KEEP_AWAKE";
+pub const ENVIRONMENT: &str = "NANOCODEX_HAND_KEEP_AWAKE";
 
-pub(crate) fn setting_path(home: &Path) -> PathBuf {
+pub fn setting_path(home: &Path) -> PathBuf {
     home.join(".nanocodex/hand-keep-awake.json")
 }
-pub(crate) fn state_path(home: &Path) -> PathBuf {
+pub fn state_path(home: &Path) -> PathBuf {
     home.join(".nanocodex/hand-keep-awake.state.json")
 }
 
-pub(crate) fn configured(home: &Path) -> io::Result<bool> {
+pub fn configured(home: &Path) -> io::Result<bool> {
     match fs::read(setting_path(home)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(error),
@@ -27,7 +27,7 @@ pub(crate) fn configured(home: &Path) -> io::Result<bool> {
 }
 
 /// Atomic replacement, never truncate a preference the daemon is reading.
-pub(crate) fn write(path: &Path, value: &Value) -> io::Result<()> {
+pub fn write(path: &Path, value: &Value) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("missing preference directory"))?;
@@ -53,7 +53,7 @@ pub(crate) fn write(path: &Path, value: &Value) -> io::Result<()> {
 }
 
 /// Accept observations only from the owner currently reported by launchd.
-pub(crate) fn snapshot(home: &Path, pid: Option<u32>) -> io::Result<Value> {
+pub fn snapshot(home: &Path, pid: Option<u32>) -> io::Result<Value> {
     let configured = configured(home)?;
     let observed = fs::read(state_path(home))
         .ok()

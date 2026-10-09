@@ -69,7 +69,7 @@ pub(crate) fn command(name: &str) -> Result<Command, ManagedError> {
     }
     if BUNDLE.is_empty() {
         return Err(error(
-            "this build lacks the embedded Wayland bundle; rebuild with scripts/build-linux-screen-helpers.sh, NANOCODEX_LINUX_SCREEN_BUNDLE and --features nanocodex-bin/embedded-screen-helpers",
+            "this build lacks the embedded Wayland bundle; rebuild with scripts/build-linux-screen-helpers.sh, NANOCODEX_LINUX_SCREEN_BUNDLE and --features nanocodex-hand-daemon/embedded-screen-helpers",
         ));
     }
     let uid = nix::unistd::geteuid().as_raw();
