@@ -1296,7 +1296,10 @@ function abortableEvaluation(evaluation, signal) {
   });
 }
 
-// Aborted cells settle promptly; this bounds a host call that ignores abort.
+// Abort rejects the evaluation independently of guest and host promises, and
+// the executor then gives every pending nested call an unknown-outcome terminal
+// (closePendingCalls) before durable finalization. The bound only covers that
+// finalization, so it never closes a relay ahead of a started call's terminal.
 const CANCELLED_RELAY_BOUND_MS = 10_000;
 
 function codeObservationKey(sessionId, callId) {

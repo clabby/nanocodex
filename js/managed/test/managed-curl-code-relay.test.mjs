@@ -84,7 +84,7 @@ async function bundle(output, name, source, cwd) {
   return [{ type: 'ESModule', path }, ...[...new Set(lazy)].map(path => ({ type: 'ESModule', path })), ...[...wasm].map(path => ({ type: 'CompiledWasm', path }))];
 }
 
-test('curl: nested calls of a cell the model never waited for terminate after the turn, exactly once', { timeout: 180_000 }, async () => {
+test('curl: yielded Code Mode nested calls terminate exactly once after completion and cancellation', { timeout: 180_000 }, async () => {
   const output = join(root, 'output/managed-curl-code-relay', new Date().toISOString().replaceAll(':', '-') + '-' + randomUUID().slice(0, 8));
   await mkdir(join(output, 'curl'), { recursive: true });
   const git = args => { try { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim(); } catch { return 'unavailable'; } };
@@ -123,15 +123,24 @@ test('curl: nested calls of a cell the model never waited for terminate after th
     () => exec(marker + '-wait', 'text(await tools.wait_agent({agent_ids:[1],timeout_ms:20000}));'),
   ];
   // The model answers without waiting on the yielded cell, as live models do.
-  const decide = ({ history }) => {
-    const user = JSON.stringify(history.filter(item => item.role === 'user'));
-    const scenario = ['CURL_UNAWAITED_NEXT', 'CURL_UNAWAITED'].find(marker => user.includes(marker));
-    const outputs = history.filter(item => /_call_output$/.test(item.type ?? ''));
+  const cancelInference = {}; cancelInference.wait = new Promise(resolve => { cancelInference.started = resolve; });
+  const decide = async ({ history }) => {
+    // Decide from the current turn only: later turns retain earlier markers.
+    const since = history.findLastIndex(item => item.role === 'user' && /CURL_[A-Z_]+:/.test(JSON.stringify(item.content)));
+    const user = JSON.stringify(history[since]?.content ?? null);
+    const scenario = ['CURL_UNAWAITED_NEXT', 'CURL_CANCEL_NEXT', 'CURL_CANCEL', 'CURL_UNAWAITED'].find(marker => user.includes(marker + ':'));
+    const outputs = history.slice(since + 1).filter(item => /_call_output$/.test(item.type ?? ''));
     modelCalls.push({ process: processNumber, scenario, tool_outputs: outputs.length, last_output: outputs.at(-1), at: new Date().toISOString() });
     if (scenario === 'CURL_UNAWAITED') return outputs.length === 0 ? exec('curl-unawaited-cell',
       '// @exec: {"yield_time_ms": 200}\ntext(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/SLOW"}));')
       : say('UNAWAITED_DONE');
     if (scenario === 'CURL_UNAWAITED_NEXT') return say('UNAWAITED_NEXT_OK');
+    // The cell yields on a hanging effect; the next inference is still in
+    // flight when the client cancels the turn.
+    if (scenario === 'CURL_CANCEL') { if (outputs.length === 0) return exec('curl-cancel-cell',
+      '// @exec: {"yield_time_ms": 200}\ntext(await tools.exec_command({cmd:"curl -s -X POST https://effects.example/effect/HANG"}));');
+      cancelInference.started(); await delay(20_000); return say('CANCEL_NOT_CANCELLED'); }
+    if (scenario === 'CURL_CANCEL_NEXT') return say('CANCEL_NEXT_OK');
     unexpected.push({ kind: 'model', scenario: scenario ?? null }); return say('UNEXPECTED');
   };
 
@@ -154,7 +163,7 @@ test('curl: nested calls of a cell the model never waited for terminate after th
     const call = JSON.parse(raw), url = new URL(call.url);
     const send = (status, body, type = 'application/json') => { res.writeHead(status, { 'content-type': type }); res.end(typeof body === 'string' ? body : JSON.stringify(body)); };
     if (url.href === 'https://control.internal/model') {
-      const decision = decide(JSON.parse(call.body));
+      const decision = await decide(JSON.parse(call.body));
       if (decision === 'kill') return void kill('model call in flight: ' + modelCalls.at(-1).scenario);
       return send(200, decision);
     }
@@ -175,6 +184,7 @@ test('curl: nested calls of a cell the model never waited for terminate after th
       // before any receipt can return: the outcome is genuinely unknown.
       if (name === 'B' || (['C', 'E'].includes(name) && effects.filter(effect => effect.name === name).length === 1)) return void kill('effect ' + name + ' dispatched, response never returned');
       if (name === 'SLOW') await delay(3000);
+      if (name === 'HANG') await delay(30_000);
       return send(200, 'EFFECT_' + name + '_APPLIED\n', 'text/plain');
     }
     if (url.origin === 'https://chatgpt.com' && call.body?.includes('"gpt-6-luna"')) {
@@ -185,7 +195,7 @@ test('curl: nested calls of a cell the model never waited for terminate after th
     if (url.href === 'https://chatgpt.com/backend-api/codex/responses' && call.method === 'POST') {
       const body = JSON.parse(call.body);
       if (body.previous_response_id) { unexpected.push({ kind: 'responses-https-previous', url: call.url }); return send(400, { error: 'stateless fixture' }); }
-      const decision = decide({ history: body.input ?? [] });
+      const decision = await decide({ history: body.input ?? [] });
       if (decision === 'kill') return void kill('HTTPS model call in flight: ' + modelCalls.at(-1).scenario);
       return send(200, decision.map(frame => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(''), 'text/event-stream');
     }
@@ -306,6 +316,25 @@ test('curl: nested calls of a cell the model never waited for terminate after th
     assert.deepEqual(openToolCalls(final), []);
     assert.ok(Object.values(terminals(final)).every(count => count === 1), 'no call has two terminal results: ' + JSON.stringify(terminals(final)));
     assert.equal(effects.filter(effect => effect.name === 'SLOW').length, 1, 'no effect is repeated');
+    // 4. The cell yields, then the turn is cancelled while the model is in
+    // flight: the nested call gets exactly one failed, unknown-outcome result.
+    const cancelRun = (await curl('cancel-run', '/v1/agents/' + agent + '/turns', { method: 'POST', body: { input: 'CURL_CANCEL: start the hanging effect.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    await cancelInference.wait;
+    await curl('cancel-active-turn', '/v1/agents/' + agent + '/turns/' + cancelRun.turn_id + '/cancel', { method: 'POST', headers: { 'Idempotency-Key': randomUUID() }, expected: 202 });
+    assert.ok(['cancelled', 'failed'].includes((await terminal('cancel-terminal', agent, cancelRun.turn_id)).state));
+    const cancelled = await history('cancel-history', agent);
+    const cancelResults = cancelled.data.filter(row => row.event?.type === 'tool.result' && row.event.payload.call_id === 'curl-cancel-cell/code-1');
+    assert.equal(cancelResults.length, 1, 'the cancelled nested call terminates exactly once');
+    assert.equal(cancelResults[0].event.payload.status, 'failed');
+    assert.match(JSON.stringify(cancelResults[0].event.payload), /unknown/);
+    assert.deepEqual(openToolCalls(cancelled), [], 'no call stays running after cancellation');
+    assert.ok(Object.values(terminals(cancelled)).every(count => count === 1), JSON.stringify(terminals(cancelled)));
+    const cancelNext = (await curl('cancel-next-turn', '/v1/agents/' + agent + '/turns', { method: 'POST', body: { input: 'CURL_CANCEL_NEXT: answer.' }, headers: { 'Idempotency-Key': randomUUID() }, expected: 202 })).value;
+    assert.equal((await terminal('cancel-next-terminal', agent, cancelNext.turn_id)).state, 'completed');
+    const settled = await history('cancel-history-final', agent);
+    assert.deepEqual(openToolCalls(settled), []);
+    assert.ok(Object.values(terminals(settled)).every(count => count === 1), JSON.stringify(terminals(settled)));
+    summary.cancel = { turn: cancelRun.turn_id, result: cancelResults[0].event.payload.status, terminals: terminals(settled) };
     summary.unawaited = { agent, turn, late_result_cursor: late.frames.find(frame => frame === lateResult)?.cursor ?? null, terminals: terminals(final) };
 
     assert.deepEqual(unexpected, []);

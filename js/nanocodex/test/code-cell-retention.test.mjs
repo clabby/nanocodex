@@ -230,3 +230,22 @@ test("a cell relayed again after a wait gets a fresh relay id", async () => {
     assert.deepEqual((await secondDrain).map(update => update.type), ["nested_call_completed"]);
   } finally { cell.release(); await cell.runtime.reset(); }
 });
+
+test("cancelling the turn that is waiting on an earlier turn's cell relays its terminal once", async () => {
+  const cell = await yielded();
+  try {
+    const [detached] = JSON.parse(cell.runtime.detachTurn("owner"));
+    const detachedDrain = drain(cell.runtime, detached.relay_id);
+    cell.runtime.beginTurn("owner");
+    // The later turn waits on the earlier cell, then is cancelled mid-wait.
+    const waited = cell.runtime.waitCodeObserved(JSON.stringify({ cell_id: id(cell.first), yield_time_ms: 60_000 }), "owner", "wait");
+    await tick();
+    assert.deepEqual(await detachedDrain, [], "the wait ended the detach relay");
+    const relays = JSON.parse(cell.runtime.cancelTurnWithUpdates("owner"));
+    assert.equal(relays.length, 1, "the waited cell belongs to the cancelled turn");
+    const updates = await drain(cell.runtime, relays[0].relay_id);
+    assert.deepEqual(updates.map(update => update.type), ["nested_call_completed"]);
+    assert.equal(updates[0].call.structured_result.outcome, "unknown");
+    await waited;
+  } finally { cell.release(); await cell.runtime.reset(); }
+});
