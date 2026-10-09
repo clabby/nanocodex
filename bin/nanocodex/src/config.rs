@@ -359,6 +359,15 @@ impl AgentArgs {
             Some(model.family() == HarnessFamily::Codex && (!same_family || fast_mode));
     }
 
+    /// Arguments for switching a running TUI to another saved session (/attach):
+    /// the resumed session supplies its own workspace and model.
+    pub(crate) fn for_session_switch(mut self) -> Self {
+        self.cwd = None;
+        self.model = None;
+        self.claude_resume = None;
+        self
+    }
+
     pub(crate) fn resume_claude(
         mut self,
         session: crate::native_sessions::ResumeSession,

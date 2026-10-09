@@ -46,6 +46,57 @@ pub(crate) struct LocalConnection {
     pub(crate) session_id: String,
     pub(crate) workspace: PathBuf,
     pub(crate) settings: AgentSettings,
+    /// Replayed history of a resumed session (empty for a fresh one).
+    pub(in crate::nanocodex2::tui) history: super::history::HistoryWindow,
+}
+
+impl LocalConnection {
+    /// The pieces the driver's connection result carries.
+    pub(super) fn into_connected(self) -> super::ConnectedAgent {
+        (
+            self.agent,
+            self.events,
+            self.session_id,
+            self.workspace,
+            self.history,
+            None,
+            self.settings,
+            true,
+            super::ManagedActiveTurns::default(),
+        )
+    }
+}
+
+impl super::DriverRuntime {
+    /// Rebuilds the local agent for a saved session (/attach) or, with
+    /// `session: None`, a fresh one. The running agent keeps serving until the
+    /// replacement connects.
+    pub(super) fn local_relaunch(
+        &mut self,
+        purpose: super::ConnectionPurpose,
+        session: Option<&str>,
+    ) -> Result<tokio::task::AbortHandle, String> {
+        let Some(local) = self.local.as_mut() else {
+            return Err("no local session".to_owned());
+        };
+        local.launch = match session {
+            Some(id) => sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?,
+            None => sessions::fresh(&local.launch),
+        };
+        let connecting = local.connect();
+        Ok(self.connection.spawn(async move {
+            super::ConnectionResult::Agent {
+                purpose,
+                result: connecting
+                    .await
+                    .map(LocalConnection::into_connected)
+                    .map_err(|error| super::ConnectionFailure {
+                        error: nanocodex_managed::ManagedError::Configuration(error),
+                        retry: super::RetryTarget::Default,
+                    }),
+            }
+        }))
+    }
 }
 
 impl LocalState {
@@ -80,6 +131,10 @@ impl LocalState {
                 session_id: backend.handle.session_id().to_string(),
                 workspace: backend.workspace.clone(),
                 settings: local_settings(&backend),
+                history: sessions::history_window(
+                    &backend.transcript,
+                    backend.handle.session_id(),
+                ),
             };
             let replaced = slot
                 .lock()

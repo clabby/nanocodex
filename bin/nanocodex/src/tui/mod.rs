@@ -12,10 +12,10 @@ mod external_editor;
 pub(crate) mod interaction;
 mod markdown;
 mod notification;
-mod resume_picker;
 mod scheduler;
 mod selection;
 mod slash_commands;
+#[path = "../nanocodex2/tui/features/split_launch.rs"]
 mod split;
 mod startup;
 mod telemetry;
@@ -76,7 +76,6 @@ use crate::{
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 pub(crate) use eval_attach::attach_evaluation;
-pub(crate) use resume_picker::select_resume_session;
 
 pub(crate) use crate::tool_calls::ToolCalls;
 

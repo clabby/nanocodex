@@ -1792,19 +1792,7 @@ impl DriverRuntime {
             self.connection.spawn(async move {
                 let result = connecting
                     .await
-                    .map(|connected| {
-                        (
-                            connected.agent,
-                            connected.events,
-                            connected.session_id,
-                            connected.workspace,
-                            HistoryWindow::default(),
-                            None,
-                            connected.settings,
-                            true,
-                            ManagedActiveTurns::default(),
-                        )
-                    })
+                    .map(local::LocalConnection::into_connected)
                     .map_err(|error| ConnectionFailure {
                         error: ManagedError::Configuration(error),
                         retry: target,
@@ -4328,9 +4316,10 @@ async fn apply_feature_update(
             runtime.local_voice_status = status;
             app.update(AppEvent::VoiceStatus(runtime.voice_status()))
         }
+        // FEATURE-HOOK: wp2 /collapse and /split close the local side pane.
+        FeatureUpdate::ClosePane(pane) => app.close_fork(pane),
         FeatureUpdate::ReplaceAgent(_)
         | FeatureUpdate::OpenPane(_)
-        | FeatureUpdate::ClosePane(_)
         | FeatureUpdate::Capabilities(_) => app.update(AppEvent::NotifyError {
             pane: PaneId::Main,
             error: "This feature action is not wired into the unified TUI yet".to_owned(),
@@ -4367,6 +4356,36 @@ async fn apply_update(
                         &mut effects,
                         scheduler,
                     );
+                    continue;
+                }
+                if runtime.local.is_some() {
+                    // FEATURE-HOOK: wp2 local /btw forks the in-process agent.
+                    let Some(main) = runtime.agent.clone() else {
+                        absorb(
+                            app.update(AppEvent::ForkFailed {
+                                pane,
+                                error: "Wait for the local agent before opening /btw".into(),
+                            }),
+                            &mut effects,
+                            scheduler,
+                        );
+                        continue;
+                    };
+                    let (commands, requests) = mpsc::unbounded_channel();
+                    let task = tokio::spawn(features::btw_local::run(
+                        pane,
+                        main,
+                        runtime.settings,
+                        runtime.sequence.saturating_add(1),
+                        requests,
+                        runtime.btw_events.clone(),
+                    ));
+                    runtime.btw = Some(BtwConnection {
+                        pane,
+                        agent_id: None,
+                        commands,
+                        task,
+                    });
                     continue;
                 }
                 let (commands, requests) = mpsc::unbounded_channel();
@@ -4432,6 +4451,15 @@ async fn apply_update(
                 }
                 if pane != PaneId::Main {
                     match effect {
+                        RootEffect::Feature(command) => {
+                            // FEATURE-HOOK: wp2 /collapse and /split typed in the side pane.
+                            let handled = runtime.local.as_mut().is_some_and(|local| {
+                                local.with_features(|features, cx| features.command(pane, &command, cx))
+                            });
+                            if !handled {
+                                absorb(app.update(AppEvent::NotifyError { pane, error: "This command needs a local agent (run ncl)".into() }), &mut effects, scheduler);
+                            }
+                        }
                         RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
                             if runtime
                                 .btw
@@ -5167,7 +5195,26 @@ async fn apply_update(
                         if let Some(task) = runtime.session_search_tasks.remove(&pane) {
                             task.abort();
                         }
-                        if !query.trim().is_empty() {
+                        if !query.trim().is_empty() && runtime.local.is_some() {
+                            let task = runtime.session_searches.spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                let search = query.clone();
+                                let result = tokio::task::spawn_blocking(move || {
+                                    local::sessions::search(&search, 20)
+                                })
+                                .await
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result.map_err(|error| format!("{error:#}")));
+                                SessionSearchCompletion {
+                                    pane,
+                                    picker_id,
+                                    request_id,
+                                    query,
+                                    result,
+                                }
+                            });
+                            runtime.session_search_tasks.insert(pane, task);
+                        } else if !query.trim().is_empty() {
                             let client = runtime.client.clone();
                             let task = runtime.session_searches.spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -5194,6 +5241,21 @@ async fn apply_update(
                         if let Some(task) = runtime.session_search_tasks.remove(&pane) {
                             task.abort();
                         }
+                    }
+                    RootEffect::LoadSessions { request_id, .. } if runtime.local.is_some() => {
+                        let update = match local::sessions::list(&runtime.workspace) {
+                            Ok(sessions) => app.update(AppEvent::SessionsLoaded {
+                                pane,
+                                request_id,
+                                sessions,
+                            }),
+                            Err(error) => app.update(AppEvent::SessionListFailed {
+                                pane,
+                                request_id,
+                                error: format!("Could not load local sessions: {error:#}"),
+                            }),
+                        };
+                        absorb(update, &mut effects, scheduler);
                     }
                     RootEffect::LoadSessions { request_id, .. } => {
                         let client = runtime.client.clone();
@@ -5248,6 +5310,18 @@ async fn apply_update(
                             &mut effects,
                             scheduler,
                         );
+                            continue;
+                        }
+                        if runtime.local.is_some() {
+                            // Local sessions resume from the rollout/journal store.
+                            match runtime.local_relaunch(ConnectionPurpose::Resume(pane), Some(&agent_id)) {
+                                Ok(resume) => runtime.pending_resume = Some((resume, pane)),
+                                Err(error) => absorb(
+                                    app.update(AppEvent::SessionLoadFailed { pane, error }),
+                                    &mut effects,
+                                    scheduler,
+                                ),
+                            }
                             continue;
                         }
                         let client = runtime.client.clone();
@@ -5322,6 +5396,10 @@ async fn apply_update(
                             fast_mode: root.composer().fast_mode(),
                         });
                         request_render(app.update(AppEvent::VoiceStatus(None)), scheduler);
+                        if let Some(local) = &mut runtime.local {
+                            // /clear starts a fresh local agent, not the resumed session.
+                            local.launch = local::sessions::fresh(&local.launch);
+                        }
                         runtime.start_new_session(settings);
                         absorb(
                             app.update(AppEvent::NewSessionReady {

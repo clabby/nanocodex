@@ -42,6 +42,8 @@ pub(crate) mod harness;
 pub(crate) mod mcp;
 pub(crate) mod realtime_voice;
 pub(crate) mod split;
+// FEATURE-HOOK: wp2 terminal launcher shared with the legacy TUI until WP5.
+mod split_launch;
 
 /// Slash commands whose behaviour belongs to a feature module.
 #[derive(Clone, Debug, Eq, PartialEq)]

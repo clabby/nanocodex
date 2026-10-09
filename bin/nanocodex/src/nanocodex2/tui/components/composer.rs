@@ -141,6 +141,16 @@ impl SettingsCommand {
                 ),
                 _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload <server>".into()),
             }),
+            // FEATURE-HOOK: wp2 local /btw collapse/split and the branch navigator
+            "/collapse" | "/split" | "/branches" => Some(if parts.next().is_some() {
+                Self::Invalid(format!("Usage: {command}"))
+            } else {
+                Self::Feature(match command {
+                    "/collapse" => crate::nanocodex2::tui::features::FeatureCommand::Collapse,
+                    "/split" => crate::nanocodex2::tui::features::FeatureCommand::Split,
+                    _ => crate::nanocodex2::tui::features::FeatureCommand::Branches,
+                })
+            }),
             "/benchmark" => Some(Self::Feature(
                 crate::nanocodex2::tui::features::FeatureCommand::Benchmark(
                     input.trim_start()[command.len()..].trim().to_owned(),
