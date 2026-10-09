@@ -642,7 +642,20 @@ impl TranscriptModel {
             }
             "run.failed" => {
                 self.remove_run(record);
-                self.finish_failed(None, Some(&RunScope::new(record)));
+                let scope = RunScope::new(record);
+                if record
+                    .decode_payload::<RunTerminalPayload>()
+                    .is_ok_and(|payload| payload.status.as_deref() == Some("cancelled"))
+                {
+                    // Cancellation is a terminal outcome, not a failed run.
+                    // Drop the preceding run.error explanation without turning
+                    // it into a persistent error card.
+                    self.pending_compaction_errors.remove(&scope);
+                    self.take_pending_error(Some(&scope));
+                    self.finish_activity(Some(&scope));
+                } else {
+                    self.finish_failed(None, Some(&scope));
+                }
                 Ok(true)
             }
             "tool.call" => self.tool_call(record),
@@ -1415,7 +1428,7 @@ impl TranscriptModel {
 
     fn complete_turn(&mut self, record: &TranscriptRecord) {
         let payload_duration_ns = record
-            .decode_payload::<RunDurationPayload>()
+            .decode_payload::<RunTerminalPayload>()
             .ok()
             .and_then(|payload| payload.duration_ns);
         let recorded_duration_ns = self.remove_run(record).map(|started_at| {
@@ -2221,9 +2234,11 @@ struct ToolResultPayload {
 }
 
 #[derive(Deserialize)]
-struct RunDurationPayload {
+struct RunTerminalPayload {
     #[serde(default)]
     duration_ns: Option<u64>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]

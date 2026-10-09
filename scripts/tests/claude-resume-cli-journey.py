@@ -405,6 +405,8 @@ def main():
         # was never recorded must replay as outcome unknown (?), never as success.
         require(all(r[0] in (l[0], "?") for r, l in zip(replay_cells[:2], live_cells[:2])),
                 f"replayed nested shells differ: {replay_cells} vs {live_cells}")
+        require(not any("Tools " in line and ("__CLI_NESTED_RESULT__" in line or '{"' in line)
+                        for line in replay.splitlines()), "raw structured receipt in replayed workflow header")
         for leaked in ("data:image", "base64", "Harness recovery notice", "Historical context"):
             require(leaked not in replay, f"replay shows internal or private text: {leaked}")
         # User rows: each admitted prompt once, the steer once and in order, and
