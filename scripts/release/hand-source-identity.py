@@ -12,7 +12,9 @@ The identity is a SHA-256 over sorted, length-prefixed records of:
   closure (normal and build edges, all features: a superset), so CLI-only
   packages are naturally outside it; nested packages outside the closure,
   tests/, benches/, examples/ and target/.git/node_modules are skipped;
-* the closure's Cargo.lock entries (name, version, source, checksum);
+* the closure's Cargo.lock entries (name, version, source, checksum) and its
+  resolved dependency edges and enabled features per node, with path packages
+  named by workspace-relative directory;
 * workspace inputs outside package directories (manifest, Cargo config,
   linker wrappers, entitlements, payload verifier, macOS helper sources);
 * rustc -vV, cargo -V, C/Swift compiler versions, target, profile, features
@@ -161,6 +163,23 @@ def compute(args):
         if entry is None:
             fail(f"Cargo.lock has no entry for {package['name']} {package['version']}")
         records.add("lock", f"{package['name']} {package['version']} {package['source']}", entry.get("checksum", "git"))
+    def node_key(package_id):
+        package = packages[package_id]
+        if package["source"] is None:
+            location = "path:" + rel(root, Path(package["manifest_path"]).parent.resolve())
+        else:
+            location = package["source"]
+        return f"{package['name']} {package['version']} {location}"
+
+    for package_id in closure:
+        edges = []
+        for dep in nodes[package_id]["deps"]:
+            kinds = sorted(f"{k.get('kind') or 'normal'}:{k.get('target') or ''}"
+                           for k in dep["dep_kinds"] if k.get("kind") != "dev")
+            if kinds:
+                edges.append(f"{dep['name']} -> {node_key(dep['pkg'])} [{','.join(kinds)}]")
+        records.add("edges", node_key(package_id), "\n".join(sorted(edges)))
+        records.add("features", node_key(package_id), ",".join(sorted(nodes[package_id].get("features", []))))
     for directory in path_dirs:
         records.add("package", rel(root, directory), packages[next(i for i in closure if Path(packages[i]["manifest_path"]).parent.resolve() == directory)]["name"])
         hash_tree(root, directory, records, files, set(), True)
@@ -191,8 +210,9 @@ def compute(args):
         records.add("payload", name, path.read_bytes())
         payloads[name] = str(path)
     identity = records.digest()
-    # Cargo.lock is covered by the closure's lock records rather than its bytes,
-    # so lockfile changes outside the Hand closure keep the identity.
+    # Cargo.lock is covered by the closure's lock, edge and feature records
+    # rather than its bytes, so lockfile changes outside the Hand closure keep
+    # the identity while any resolution change inside it changes it.
     report = {"schema": SCHEMA, "identity": identity, "root": str(root), "package": hands[0]["name"],
               "files": sorted(files | {"Cargo.lock"}), "payloads": payloads,
               "records": [[k, n, hashlib.sha256(v).hexdigest()] for (k, n), v in sorted(records.items.items())]}

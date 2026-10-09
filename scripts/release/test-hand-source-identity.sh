@@ -9,6 +9,17 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 ws="$work/ws"
 mkdir -p "$ws"/{.cargo,scripts/tests,macos/HandMenuBar,app/src,app/hand/src,app/hand/tests,app/shared/src}
+# Offline vendored registry: mid accepts leaf 1 or 2 and the Hand closure
+# links both majors, so Cargo.lock can re-point mid's edge without changing
+# the package set.
+for crate in "leaf 1.0.0" "leaf 2.0.0" "mid 1.0.0"; do
+  read -r name version <<<"$crate"
+  dir="$ws/vendor/$name-$version"; mkdir -p "$dir/src"
+  printf '[package]\nname = "%s"\nversion = "%s"\nedition = "2021"\n' "$name" "$version" > "$dir/Cargo.toml"
+  [[ "$name" == mid ]] && printf '[dependencies]\nleaf = ">=1, <3"\n' >> "$dir/Cargo.toml"
+  echo 'pub fn f() {}' > "$dir/src/lib.rs"
+  printf '{"files":{},"package":"%s"}' "$(printf '%s' "$crate" | sha256sum | cut -c1-64)" > "$dir/.cargo-checksum.json"
+done
 cd "$ws"
 cat > Cargo.toml <<'EOF'
 [workspace]
@@ -38,19 +49,24 @@ path = "src/main.rs"
 tempo = []
 [dependencies]
 shared = { path = "../shared" }
+mid = "1"
+leaf = "1"
 EOF
 cat > app/shared/Cargo.toml <<'EOF'
 [package]
 name = "shared"
 version = "0.1.0"
 edition = "2021"
+[dependencies]
+leaf = "2"
 EOF
 echo 'fn main() {}' > app/src/main.rs
 echo '// terminal UI' > app/src/tui.rs
 echo 'fn main() {}' > app/hand/src/main.rs
 echo '#[test] fn t() {}' > app/hand/tests/journey.rs
 echo 'pub fn f() {}' > app/shared/src/lib.rs
-for input in .cargo/config.toml nanocodex-vm.entitlements scripts/tests/linux-screen-helpers-bundle.py \
+printf '[source.crates-io]\nreplace-with = "vendored"\n[source.vendored]\ndirectory = "vendor"\n' > .cargo/config.toml
+for input in nanocodex-vm.entitlements scripts/tests/linux-screen-helpers-bundle.py \
   macos/HandMenuBar/main.swift scripts/aarch64-unknown-linux-musl-linker scripts/aarch64-unknown-linux-musl-ar; do
   echo "# $input" > "$input"
 done
@@ -79,6 +95,16 @@ echo '// edit' >> app/shared/src/lib.rs;       expect changed "a shared-package 
 echo '# edit' >> .cargo/config.toml;           expect changed "a Cargo config edit"
 echo helpers-v2 > "$work/screen-helpers.tar.gz"; expect changed "a native payload change"
 features=""; expect changed "a feature change"; unset features; current="$(identity)"
+
+# Same package set and file bytes, different resolved edge: mid -> leaf 1.
+grep -A6 '^name = "mid"$' Cargo.lock | grep -q '"leaf 2.0.0"' || { echo "FAIL: fixture did not resolve mid to leaf 2" >&2; exit 1; }
+packages_before="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print([n for k,n,_ in r["records"] if k=="lock"], r["files"])' "$work/report.json")"
+sed -i '/^name = "mid"$/,/^$/ s/"leaf 2.0.0"/"leaf 1.0.0"/' Cargo.lock
+grep -A6 '^name = "mid"$' Cargo.lock | grep -q '"leaf 1.0.0"' || { echo "FAIL: Cargo.lock edge edit did not apply" >&2; exit 1; }
+expect changed "re-pointing a locked dependency edge with an unchanged package set"
+packages_after="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print([n for k,n,_ in r["records"] if k=="lock"], r["files"])' "$work/report.json")"
+[[ "$packages_before" == "$packages_after" ]] || { echo "FAIL: the edge fixture changed the package or file set" >&2; exit 1; }
+echo "ok: the edge fixture kept the locked package set and hashed files identical"
 
 verify() { python3 "$script" verify --report "$work/report.json" --dep-info "$work/hand.d"; }
 printf '%s: %s %s %s\n' "$ws/target/release/nanocodex-hand" "$ws/app/hand/src/main.rs" "$ws/app/shared/src/lib.rs" \
