@@ -1104,7 +1104,10 @@ impl ClaudeClient {
     ) -> Result<(reqwest::Response, Vec<String>), ClaudeError> {
         // Reject invalid cache policy before resolving credentials or sending HTTP.
         request.validate_cache_control()?;
-        let wire_body = self.request_body(request, streaming)?;
+        // The body is moved into the HTTP request: a conversation-sized copy
+        // must not stay resident for the whole provider round trip of every
+        // concurrently running agent. Only an authentication retry rebuilds it.
+        let mut wire_body = Some(self.request_body(request, streaming)?);
         let mut retried = false;
         // Retain both attempted generations only for this request, so an error
         // gateway cannot reflect an earlier rejected credential into a durable
@@ -1272,7 +1275,10 @@ impl ClaudeClient {
                 .headers(headers);
             let response = builder
                 .header("content-type", "application/json")
-                .body(wire_body.clone())
+                .body(match wire_body.take() {
+                    Some(body) => body,
+                    None => self.request_body(request, streaming)?,
+                })
                 .send()
                 .await?;
             // Only an explicit HTTP authentication rejection is recovered here.

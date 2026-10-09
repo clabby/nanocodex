@@ -3870,7 +3870,7 @@ impl State {
             pending = conversation.packed_messages();
             pending.extend(prompt);
             cursor.prepared = true;
-            cursor.pending = pending.clone();
+            self.retain_pending(&mut cursor, &pending);
             cursor.usage = usage.clone();
             self.advance_cursor(&mut cursor, conversation).await?;
         }
@@ -3880,7 +3880,7 @@ impl State {
                 .consume_steering(request, &mut cursor, &mut pending)
                 .await?
             {
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 self.advance_cursor(&mut cursor, conversation).await?;
             }
             if cancel.flag.load(Ordering::SeqCst) && self.policy.is_none() {
@@ -3911,7 +3911,7 @@ impl State {
                 self.emit_compacted(&request.events, index, compaction_started);
                 pending = conversation.packed_messages();
                 previous_message_id = conversation.previous_message_id.clone();
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 cursor.usage = usage.clone();
                 self.advance_cursor(&mut cursor, conversation).await?;
             }
@@ -4338,7 +4338,7 @@ impl State {
                     return Err(NanocodexError::TurnCancelled);
                 }
                 cursor.index = index + 1;
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 cursor.usage = usage.clone();
                 // Admit discovery/removal for the next request before persisting it.
                 // Reopening a prepared cursor never expands its original catalog.
@@ -4371,7 +4371,7 @@ impl State {
                     .saturating_add(response.usage.cache_creation_input_tokens)
                     .saturating_add(response.usage.output_tokens);
                 cursor.index = index + 1;
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 cursor.usage = usage.clone();
                 // A completed server-tool response is also forward progress.
                 cursor.output_continuations = 0;
@@ -4425,7 +4425,7 @@ impl State {
                 // the instruction with the interrupted boundary across that swap.
                 conversation.messages = pending.clone();
                 cursor.index = index + 1;
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 cursor.usage = usage.clone();
                 self.refresh_dynamic_tools(&mut cursor);
                 self.advance_cursor(&mut cursor, conversation).await?;
@@ -4463,7 +4463,7 @@ impl State {
                 pending = conversation.packed_messages();
                 previous_message_id = conversation.previous_message_id.clone();
                 cursor.index = index + 1;
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 cursor.usage = usage.clone();
                 self.advance_cursor(&mut cursor, conversation).await?;
                 continue;
@@ -4523,7 +4523,7 @@ impl State {
                 // cutoffs were not consecutive with the continuation it starts.
                 cursor.output_continuations = 0;
                 cursor.index = index + 1;
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 cursor.usage = usage.clone();
                 self.advance_cursor(&mut cursor, conversation).await?;
                 continue;
@@ -4557,7 +4557,7 @@ impl State {
                 conversation.summary.clear();
                 conversation.advance_boundary();
                 cursor.index = index + 1;
-                cursor.pending = pending.clone();
+                self.retain_pending(&mut cursor, &pending);
                 cursor.usage = usage.clone();
                 self.advance_cursor(&mut cursor, conversation).await?;
                 continue;
