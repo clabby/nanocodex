@@ -383,6 +383,40 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
 
+  hand-reuse-check:
+    if: github.repository == 'gakonst/nanocodex'
+    name: check Hand reuse (read-only)
+    needs: [bundle, build-windows-hand]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Test Hand reuse against a fake release store
+        shell: bash
+        run: scripts/release/test-reuse-unchanged-hand.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: nanocodex-*
+          path: dist
+          merge-multiple: true
+      - name: Compare this build's Hand with the published nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Read-only: reports what publish would reuse, uploads nothing.
+          shopt -s nullglob
+          cat dist/nanocodex2-*.identity
+          previous=""
+          if pointer=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" --jq .object.sha 2>/dev/null); then
+            previous="nightly-$pointer"
+          fi
+          scripts/release/reuse-unchanged-hand.sh dist "$previous"
+
   publish:
     if: >-
       github.repository == 'gakonst/nanocodex' &&
