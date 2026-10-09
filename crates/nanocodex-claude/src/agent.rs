@@ -2462,10 +2462,19 @@ impl State {
             output_config: self.effort().map(|effort| crate::OutputConfig { effort }),
             speed,
             tool_choice: None,
-            thinking: self
-                .adaptive_thinking
-                .load(Ordering::SeqCst)
-                .then(|| json!({"type":"adaptive"})),
+            thinking: self.adaptive_thinking.load(Ordering::SeqCst).then(|| {
+                // Only these admitted models produce user-facing progress
+                // updates. Other models keep their existing thinking display.
+                // https://platform.claude.com/docs/en/build-with-claude/thinking#progress-updates-between-tool-calls
+                if matches!(
+                    self.model().as_str(),
+                    "claude-opus-5-5" | "claude-fable-5-1" | "claude-sonnet-5-5"
+                ) {
+                    json!({"type":"adaptive","display":"updates"})
+                } else {
+                    json!({"type":"adaptive"})
+                }
+            }),
             context_management: self
                 .keep_thinking
                 .then(|| json!({"edits":[{"type":"clear_thinking_20251015","keep":"all"}]})),
@@ -2674,25 +2683,41 @@ impl State {
                             None => break Err(ClaudeError::IncompleteStream),
                         };
                         first_event.get_or_insert_with(&elapsed_ns);
-                        if matches!(event, StreamEvent::ContentBlockDelta { .. }) {
-                            first_output.get_or_insert_with(&elapsed_ns);
-                        }
                         if let Some(recovery) = &mut recovery {
                             recovery.observe(&event);
                         }
                         if let StreamEvent::MessageStart { message } = &event {
                             message_id = Some(message.id.clone());
                         }
-                        if let (
-                            Some(events),
+                        // Empty omitted-thinking deltas and signatures are not
+                        // visible output. Forward only provider display text,
+                        // preserving opaque blocks separately for continuation.
+                        let display = match &event {
                             StreamEvent::ContentBlockDelta {
                                 delta: ContentDelta::TextDelta { text },
                                 ..
-                            },
-                        ) = (events, &event)
-                        {
-                            published_text = true;
-                            self.emit(events,AgentEventKind::AssistantDelta,json!({"model_call_index":index,"item_id":message_id,"phase":null,"text":text}));
+                            } if !text.is_empty() => {
+                                Some((AgentEventKind::AssistantDelta, message_id.clone(), text))
+                            }
+                            StreamEvent::ContentBlockDelta {
+                                index: block_index,
+                                delta: ContentDelta::ThinkingDelta { thinking },
+                            } if !thinking.is_empty() => Some((
+                                AgentEventKind::ReasoningSummaryDelta,
+                                message_id
+                                    .as_ref()
+                                    .map(|id| format!("{id}:thinking:{block_index}")),
+                                thinking,
+                            )),
+                            _ => None,
+                        };
+                        if let Some((kind, item_id, text)) = display {
+                            first_output.get_or_insert_with(&elapsed_ns);
+                            if let Some(events) = events {
+                                // A retry cannot retract either kind of visible delta.
+                                published_text = true;
+                                self.emit(events, kind, json!({"model_call_index":index,"item_id":item_id,"phase":null,"text":text}));
+                            }
                         }
                         let terminal = matches!(event, StreamEvent::MessageStop);
                         captured.push(event);
