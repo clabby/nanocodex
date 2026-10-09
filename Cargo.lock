@@ -5869,6 +5869,7 @@ dependencies = [
  "nanocodex-observability",
  "nanocodex-subagents",
  "nanocodex-tui-control",
+ "nanocodex-tui-render",
  "nanocodex-vm",
  "nanocodex-voice",
  "nanocodex-voice-native",
@@ -6535,6 +6536,30 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "nanocodex-tui-render"
+version = "0.6.7"
+dependencies = [
+ "crossterm 0.29.0",
+ "image",
+ "png 0.18.1",
+ "pulldown-cmark",
+ "ratatex",
+ "ratatui 0.29.0",
+ "ratatui 0.30.2",
+ "ratatui-image 11.0.6",
+ "rayon",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
+ "url",
 ]
 
 [[package]]

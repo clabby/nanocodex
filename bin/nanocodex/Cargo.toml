@@ -44,6 +44,7 @@ webrtc.workspace = true
 whoami.workspace = true
 zeroize = "1.8.2"
 nanocodex-tui-control = { path = "tui-control", version = "0.6.7" }
+nanocodex-tui-render = { path = "tui-render", version = "0.6.7" }
 nanocodex-computer.workspace = true
 arboard.workspace = true
 async-trait.workspace = true
