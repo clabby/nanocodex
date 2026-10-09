@@ -172,7 +172,7 @@ function boundaries(config) {
 }
 // Fixed failure labels only. Raw Wrangler lines can contain binding values, so they are never emitted.
 const failureCategories = [
-  ['cloudflare-api-request', /A request to the Cloudflare API/i], ['authentication', /authenticat|unauthori[sz]ed|forbidden/i],
+  ['cloudflare-api-request', /A request to the Cloudflare API/i], ['authentication', /authenticate|authentication|authenticating|unauthori[sz]ed|forbidden/i],
   ['migrations', /migration/i], ['durable-objects', /durable object/i], ['containers', /container/i], ['docker', /docker/i],
   ['exports', /export/i], ['bindings', /binding/i], ['bundling', /build failed|could not resolve|esbuild/i],
   ['configuration', /configuration|unexpected field|is not a valid/i], ['size-limit', /too large|exceeds|size limit/i],
