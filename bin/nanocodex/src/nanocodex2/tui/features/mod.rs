@@ -100,15 +100,6 @@ pub(crate) trait FeatureOverlay: Send {
     }
 }
 
-/// A side agent a feature asks the driver to show in its own pane.
-pub(crate) struct SidePane {
-    pub(crate) title: String,
-    pub(crate) agent: Nanocodex,
-    pub(crate) events: nanocodex::AgentEvents,
-    /// Prompt to submit once the pane is open.
-    pub(crate) prompt: Option<String>,
-}
-
 /// A prompt a feature submits on the user's behalf (scheduler fire, /benchmark).
 pub(crate) struct FeaturePrompt {
     pub(crate) pane: Option<PaneId>,
@@ -144,14 +135,8 @@ pub(crate) enum FeatureUpdate {
     OpenOverlay(Box<dyn FeatureOverlay>),
     /// Close the open feature overlay.
     CloseOverlay,
-    /// Replace the local agent (harness switch, /clear, branch switch).
-    ReplaceAgent(Box<crate::config::ConfiguredAgent>),
-    /// Open a side pane for a forked agent (local /btw).
-    OpenPane(Box<SidePane>),
     /// Close a side pane.
     ClosePane(PaneId),
-    /// Re-read capabilities (a feature became available or unavailable).
-    Capabilities(Capabilities),
     /// Submit a prompt with an optional private instruction and completion receipt.
     SubmitPrompt(FeaturePrompt),
     /// Rebuild the local agent from new launch arguments (harness/model switch

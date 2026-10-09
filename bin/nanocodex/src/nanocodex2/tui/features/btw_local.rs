@@ -178,6 +178,10 @@ pub(in crate::nanocodex2::tui) async fn run(
                     }
                 }
                 None => {
+                    // The pane closed (/close, /collapse, /split): stop the fork itself.
+                    if let Some(control) = control.take() {
+                        drop(control.cancel().await);
+                    }
                     drop(agent.shutdown().await);
                     return;
                 }

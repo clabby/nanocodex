@@ -4355,12 +4355,6 @@ async fn apply_feature_update(
         }
         // FEATURE-HOOK: wp2 /collapse and /split close the local side pane.
         FeatureUpdate::ClosePane(pane) => app.close_fork(pane),
-        FeatureUpdate::ReplaceAgent(_)
-        | FeatureUpdate::OpenPane(_)
-        | FeatureUpdate::Capabilities(_) => app.update(AppEvent::NotifyError {
-            pane: PaneId::Main,
-            error: "This feature action is not wired into the unified TUI yet".to_owned(),
-        }),
     };
     apply_update(update, app, runtime, terminal, scheduler).await
 }
@@ -4450,7 +4444,13 @@ async fn apply_update(
                 if runtime.btw.as_ref().is_some_and(|btw| btw.pane == pane)
                     && let Some(btw) = runtime.btw.take()
                 {
-                    btw.task.abort();
+                    if runtime.local.is_some() {
+                        // FEATURE-HOOK: wp2 dropping the request channel makes the local
+                        // side task cancel its turn and shut its forked agent down.
+                        drop(btw.commands);
+                    } else {
+                        btw.task.abort();
+                    }
                 }
             }
             AppEffect::Pane { pane, effect } => {

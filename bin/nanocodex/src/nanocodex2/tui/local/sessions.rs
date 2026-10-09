@@ -281,12 +281,15 @@ pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
                 .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?;
             let workspace = PathBuf::from(session.workspace());
             let transcript = session.transcript().to_vec();
-            let agent = launch
+            let model = nanocodex::HarnessModel::from(session.model());
+            let mut agent = launch
                 .args
                 .clone()
                 .build_resumed_tui(session, launch.vm.clone())
                 .await
                 .wrap_err("could not resume the local agent")?;
+            // The resumed thread keeps its model; the footer and picker show it.
+            agent.model = model;
             Ok(Built {
                 agent,
                 workspace,
