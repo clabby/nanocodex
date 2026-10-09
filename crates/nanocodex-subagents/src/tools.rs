@@ -940,7 +940,7 @@ impl Tool for WaitAgent {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             WAIT_AGENT_TOOL,
-            "Waits until any requested subagent reaches a terminal status and returns a snapshot of every requested agent. The result includes pending, running, and closing agents; consumers must preserve those nonterminal agents and act only on completed, failed, interrupted, or closed entries. Use one call with multiple IDs instead of polling the workspace.",
+            "Waits until any requested subagent reaches a terminal status and returns a snapshot of every requested agent. The result includes pending, running, and closing agents; consumers must preserve those nonterminal agents and act only on completed, failed, interrupted, or closed entries. Each entry's status is an object; read its terminal state from status.state. The call returns immediately while any requested agent is already terminal, so remove terminal IDs before waiting again. Use one call with multiple IDs instead of polling the workspace.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1114,12 +1114,20 @@ pub fn install_claude_tools(
     for tool in shared_tools(parent, &registry) {
         let definition = serde_json::to_value(tool.definition())
             .map_err(|error| nanocodex_agent::NanocodexError::InvalidRequest(error.to_string()))?;
+        // Claude definitions have no output-schema field, and code mode only
+        // shows nested tools through their description. Without the result
+        // shape, models guess field types and can spin on wait_agent forever.
+        let mut description = definition["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(schema) = tool.definition().output_schema() {
+            description.push_str("\nOutput schema: ");
+            description.push_str(&schema.as_value().to_string());
+        }
         let native = nanocodex_claude::ToolDefinition {
             name: definition["name"].as_str().unwrap_or_default().to_owned(),
-            description: definition["description"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
+            description,
             input_schema: definition["parameters"].clone(),
             strict: None,
             defer_loading: false,
