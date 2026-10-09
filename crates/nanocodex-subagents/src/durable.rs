@@ -204,6 +204,25 @@ impl JournalCheckpoint {
     }
 }
 
+/// Decodes a checkpoint record loaded on demand, verifying its identity.
+pub(super) fn decode_checkpoint(json: &str, key: &str) -> std::io::Result<ChildSnapshot> {
+    if checkpoint_key(json) != key {
+        return Err(std::io::Error::other(format!(
+            "subagent checkpoint {key} does not match its record"
+        )));
+    }
+    let record: CheckpointRecord = serde_json::from_str(json).map_err(|error| {
+        std::io::Error::other(format!("invalid subagent checkpoint {key}: {error}"))
+    })?;
+    match (record.checkpoint, record.native_checkpoint) {
+        (Some(snapshot), None) => Ok(ChildSnapshot::Codex(snapshot)),
+        (None, Some(native)) => native.into_snapshot(),
+        _ => Err(std::io::Error::other(format!(
+            "subagent checkpoint {key} has no single backend"
+        ))),
+    }
+}
+
 /// Borrowed encoding of a checkpoint record; no conversation is cloned.
 #[derive(Serialize)]
 struct CheckpointRecordRef<'a> {
@@ -488,28 +507,6 @@ pub(super) fn persist_agent(
 
 impl PersistedAgent {
     /// Replaces a checkpoint reference with its stored record.
-    pub(super) async fn hydrate(
-        &mut self,
-        store: &dyn SubagentStore,
-        root_session_id: &str,
-    ) -> std::io::Result<Option<JournalCheckpoint>> {
-        let Some(key) = self.checkpoint_ref.take() else {
-            return Ok(None);
-        };
-        let json = store.load_record(root_session_id, &key).await?;
-        if checkpoint_key(&json) != key {
-            return Err(std::io::Error::other(format!(
-                "subagent checkpoint {key} does not match its record"
-            )));
-        }
-        let record: CheckpointRecord = serde_json::from_str(&json).map_err(|error| {
-            std::io::Error::other(format!("invalid subagent checkpoint {key}: {error}"))
-        })?;
-        self.checkpoint = record.checkpoint;
-        self.native_checkpoint = record.native_checkpoint;
-        Ok(Some(JournalCheckpoint::stored(key)))
-    }
-
     /// The journaled checkpoint for any backend family.
     pub(super) fn snapshot(&self) -> std::io::Result<Option<ChildSnapshot>> {
         if let Some(snapshot) = &self.checkpoint {
@@ -535,7 +532,10 @@ pub(super) fn restored_session(
 ) -> std::io::Result<(ChildSession, bool, bool)> {
     let contract = OutputContract::compile(&agent.output_schema)?;
     let snapshot = agent.snapshot()?;
-    let recoverable = snapshot.is_some();
+    // A referenced record is loaded only when the child next runs, so a
+    // restored task tree does not decode every idle conversation at once.
+    let journaled = snapshot.is_none() && agent.checkpoint_ref.is_some();
+    let recoverable = snapshot.is_some() || journaled;
     let terminal = matches!(agent.status, AgentStatus::Closing | AgentStatus::Closed);
     let in_flight = !terminal
         && (agent.turn_in_flight
@@ -586,6 +586,7 @@ pub(super) fn restored_session(
         session.binding_task = task;
     }
     session.resume_attempts = resume_attempts;
+    session.journaled_runtime = journaled;
     // Retain until the turn settles: a second loss before then is still unknown.
     if in_flight {
         session.in_flight_calls = agent.in_flight_calls;
