@@ -257,7 +257,17 @@ impl ActionsMenu {
             };
         }
         let Some(action) = self.matches.get(self.selected) else {
-            return ComponentUpdate::none();
+            // A slash command that names no action (Claude /loop, /compact, a
+            // skill, or a command with arguments) is sent to the agent verbatim,
+            // as typing it in the legacy composer did. Search keeps priority:
+            // any matching action is still the Enter target.
+            if self.query.trim().is_empty() {
+                return ComponentUpdate::none();
+            }
+            return ComponentUpdate {
+                effects: vec![ActionsEffect::Submit(format!("/{}", self.query.trim_end()))],
+                render: RenderRequest::Immediate,
+            };
         };
         self.trigger(ACTIONS[*action])
     }
