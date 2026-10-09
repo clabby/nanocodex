@@ -45,6 +45,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   const codeObservations = new Map();
   // Relays of cells a completed turn left running, keyed like observations.
   const codeRelays = new Map();
+  // Unique per relay: a cell can be relayed again after a wait ends its relay.
+  let nextRelayId = 1;
   const cells = new Map();
   const turns = new Map();
   const cellGeneration = globalThis.crypto.randomUUID();
@@ -927,7 +929,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     for (const cell of cells.values()) {
       if (cell.sessionId !== sessionId || cell.observing || cell.relay) continue;
       if (cell.result && cell.updates.length === 0) continue;
-      const id = `relay:${cell.id}`;
+      const id = `relay:${cell.id}:${nextRelayId++}`;
       const observation = createCodeObservation(sessionId, cell.turn);
       cell.relay = { id, observation };
       codeRelays.set(codeObservationKey(sessionId, id), observation);
@@ -940,8 +942,39 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
   function closeRelay(cell) {
     if (!cell.relay) return;
+    clearTimeout(cell.relay.bound);
     cell.relay.observation.close();
     cell.relay = undefined;
+  }
+
+  // Cancels the current logical turn's cells like cancelTurn, and returns a
+  // relay per cancelled cell carrying every nested update no observer has
+  // received: updates a just-dropped exec/wait observer never read, buffered
+  // updates, then the aborted calls' terminal results. Each relay ends once
+  // its cell settles, or after a bound so a cancelled turn can always commit.
+  // Earlier turns' cells (including detached ones) are untouched.
+  function cancelTurnWithUpdates(sessionId) {
+    const turn = turns.get(sessionId) ?? 0;
+    const relays = [];
+    for (const cell of cells.values()) {
+      if (cell.sessionId !== sessionId || cell.turn !== turn) continue;
+      if (!cell.relay) {
+        const id = `relay:${cell.id}:${nextRelayId++}`;
+        cell.relay = { id, observation: createCodeObservation(sessionId, cell.turn) };
+        codeRelays.set(codeObservationKey(sessionId, id), cell.relay.observation);
+      }
+      const { observation } = cell.relay;
+      if (cell.observation) {
+        for (const update of cell.observation.take()) observation.push(update);
+        cell.observation = undefined;
+      }
+      for (const update of cell.updates.splice(0)) observation.push(update);
+      relays.push({ relay_id: cell.relay.id, origin_call_id: cell.parentCallId });
+      if (cell.result) closeRelay(cell);
+      else cell.relay.bound = setTimeout(() => closeRelay(cell), CANCELLED_RELAY_BOUND_MS);
+    }
+    cancel(sessionId, turn);
+    return JSON.stringify(relays);
   }
 
   function closeCodeRelays(sessionId) {
@@ -1089,6 +1122,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     },
     nextCodeUpdate,
     detachTurn,
+    cancelTurnWithUpdates,
     preempt,
     preemptTurn,
     beginTurn(sessionId) { turns.set(sessionId, (turns.get(sessionId) ?? 0) + 1); },
@@ -1262,6 +1296,9 @@ function abortableEvaluation(evaluation, signal) {
   });
 }
 
+// Aborted cells settle promptly; this bounds a host call that ignores abort.
+const CANCELLED_RELAY_BOUND_MS = 10_000;
+
 function codeObservationKey(sessionId, callId) {
   return JSON.stringify([sessionId, callId]);
 }
@@ -1298,6 +1335,12 @@ function createCodeObservation(sessionId, turn) {
       closed = true;
       preemptWake = undefined;
       while (waiters.length) waiters.shift()(null);
+    },
+    /** Closes the observation and returns updates its reader never took. */
+    take() {
+      const remaining = queued.splice(0);
+      this.close();
+      return remaining;
     },
     next() {
       if (queued.length) return Promise.resolve(queued.shift());

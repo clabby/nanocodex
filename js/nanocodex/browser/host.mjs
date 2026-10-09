@@ -667,6 +667,7 @@ export function createBrowserHost(options = {}) {
     preemptCodeTurn: code.preemptTurn,
     nextCodeUpdate: code.nextCodeUpdate,
     detachCodeTurn: code.detachTurn,
+    cancelCodeTurnWithUpdates: code.cancelTurnWithUpdates,
     executeTool: code.executeTool,
     routeSubagent: (request) => {
       if (!options.subagentRouting) throw new Error("subagent routing is not configured");

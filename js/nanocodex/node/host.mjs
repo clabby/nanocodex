@@ -347,6 +347,7 @@ export function createNodeHost(options = {}) {
     preemptCodeTurn: code.preemptTurn,
     nextCodeUpdate: code.nextCodeUpdate,
     detachCodeTurn: code.detachTurn,
+    cancelCodeTurnWithUpdates: code.cancelTurnWithUpdates,
     executeTool: code.executeTool,
     bindSubagentSession: code.bindSubagentSession,
     subagentStatus: code.subagentStatus,
