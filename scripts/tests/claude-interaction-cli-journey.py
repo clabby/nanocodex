@@ -108,7 +108,7 @@ def main():
         plan_dir.unlink(); saved_dir.rename(plan_dir)
         os.write(fd,b'/cancel\r'); wait(lambda:len(requests)==17,drain,'cancel did not return error'); pending(17,drain)
         wait(lambda:visible('tui', b'interaction-journey-complete'),drain,'TUI final answer absent')
-        os.write(fd,b'\x03'); p.wait(timeout=10); drain(); os.close(fd)
+        os.write(fd,b'\x03\x03'); p.wait(timeout=10); drain(); os.close(fd)
         require((workspace/'approved.txt').read_text()=='approved-effect','approved write absent')
         require((workspace/'prior.txt').read_text()=='prior','plan entry after exec_command failed')
         for name in ['blocked.txt','blocked-shell.txt','denied.txt','persistence-failed.txt','cancelled.txt']: require(not(workspace/name).exists(),f'blocked mutation exists: {name}')
