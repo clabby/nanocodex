@@ -450,7 +450,13 @@ impl Composer {
             ComposerEvent::Terminal(Event::Key(key)) => self.handle_key(key),
             ComposerEvent::Terminal(Event::Paste(text)) => {
                 self.history.detach();
-                self.insert(&text);
+                // Only resolve image paths after routing to the composer:
+                // pasted paths in search dialogs must remain ordinary text.
+                if let Some(data) = crate::tui::clipboard::pasted_image_data_url(&text) {
+                    self.insert_image(data);
+                } else {
+                    self.insert(&text);
+                }
                 ComposerUpdate::changed()
             }
             ComposerEvent::Terminal(_) => ComposerUpdate::unchanged(),
