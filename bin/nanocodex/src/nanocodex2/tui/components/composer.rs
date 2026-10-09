@@ -156,6 +156,7 @@ impl SettingsCommand {
                 let arguments = input.trim_start()[command.len()..].trim();
                 Some(match crate::nanocodex2::voice::Command::parse(arguments) {
                     Ok(command) => Self::Voice(command),
+                    Err(error) if arguments.split_whitespace().count() != 1 => Self::Invalid(error),
                     Err(_) => Self::Feature(
                         crate::nanocodex2::tui::features::FeatureCommand::RealtimeVoice(
                             arguments.to_owned(),
