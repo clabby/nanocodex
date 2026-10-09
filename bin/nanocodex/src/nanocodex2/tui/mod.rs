@@ -1732,19 +1732,7 @@ impl DriverRuntime {
             self.connection.spawn(async move {
                 let result = connecting
                     .await
-                    .map(|connected| {
-                        (
-                            connected.agent,
-                            connected.events,
-                            connected.session_id,
-                            connected.workspace,
-                            HistoryWindow::default(),
-                            None,
-                            connected.settings,
-                            true,
-                            ManagedActiveTurns::default(),
-                        )
-                    })
+                    .map(local::LocalConnection::into_connected)
                     .map_err(|error| ConnectionFailure {
                         error: ManagedError::Configuration(error),
                         retry: target,
@@ -5018,7 +5006,26 @@ async fn apply_update(
                         if let Some(task) = runtime.session_search_tasks.remove(&pane) {
                             task.abort();
                         }
-                        if !query.trim().is_empty() {
+                        if !query.trim().is_empty() && runtime.local.is_some() {
+                            let task = runtime.session_searches.spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                                let search = query.clone();
+                                let result = tokio::task::spawn_blocking(move || {
+                                    local::sessions::search(&search, 20)
+                                })
+                                .await
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result.map_err(|error| format!("{error:#}")));
+                                SessionSearchCompletion {
+                                    pane,
+                                    picker_id,
+                                    request_id,
+                                    query,
+                                    result,
+                                }
+                            });
+                            runtime.session_search_tasks.insert(pane, task);
+                        } else if !query.trim().is_empty() {
                             let client = runtime.client.clone();
                             let task = runtime.session_searches.spawn(async move {
                                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -5045,6 +5052,21 @@ async fn apply_update(
                         if let Some(task) = runtime.session_search_tasks.remove(&pane) {
                             task.abort();
                         }
+                    }
+                    RootEffect::LoadSessions { request_id, .. } if runtime.local.is_some() => {
+                        let update = match local::sessions::list(&runtime.workspace) {
+                            Ok(sessions) => app.update(AppEvent::SessionsLoaded {
+                                pane,
+                                request_id,
+                                sessions,
+                            }),
+                            Err(error) => app.update(AppEvent::SessionListFailed {
+                                pane,
+                                request_id,
+                                error: format!("Could not load local sessions: {error:#}"),
+                            }),
+                        };
+                        absorb(update, &mut effects, scheduler);
                     }
                     RootEffect::LoadSessions { request_id, .. } => {
                         let client = runtime.client.clone();
@@ -5099,6 +5121,18 @@ async fn apply_update(
                             &mut effects,
                             scheduler,
                         );
+                            continue;
+                        }
+                        if runtime.local.is_some() {
+                            // Local sessions resume from the rollout/journal store.
+                            match runtime.local_relaunch(ConnectionPurpose::Resume(pane), Some(&agent_id)) {
+                                Ok(resume) => runtime.pending_resume = Some((resume, pane)),
+                                Err(error) => absorb(
+                                    app.update(AppEvent::SessionLoadFailed { pane, error }),
+                                    &mut effects,
+                                    scheduler,
+                                ),
+                            }
                             continue;
                         }
                         let client = runtime.client.clone();
@@ -5173,6 +5207,10 @@ async fn apply_update(
                             fast_mode: root.composer().fast_mode(),
                         });
                         request_render(app.update(AppEvent::VoiceStatus(None)), scheduler);
+                        if let Some(local) = &mut runtime.local {
+                            // /clear starts a fresh local agent, not the resumed session.
+                            local.launch = local::sessions::fresh(&local.launch);
+                        }
                         runtime.start_new_session(settings);
                         absorb(
                             app.update(AppEvent::NewSessionReady {

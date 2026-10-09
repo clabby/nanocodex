@@ -24,6 +24,13 @@ pub(crate) struct ResumeSession {
     updated: u64,
 }
 
+impl ResumeSession {
+    /// Last update of the session journal, in Unix seconds.
+    pub(crate) const fn updated(&self) -> u64 {
+        self.updated
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     version: u32,

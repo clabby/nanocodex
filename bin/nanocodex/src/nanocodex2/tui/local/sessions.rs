@@ -426,7 +426,7 @@ pub(crate) async fn select(sessions: &[LocalSession]) -> io::Result<Option<Local
     let mut picker = Picker::new(sessions.len());
     loop {
         terminal.draw(|frame| render(frame, sessions, &mut picker, SystemTime::now()))?;
-        let Event::Key(key) = tokio::task::block_in_place(event::read)? else {
+        let Event::Key(key) = event::read()? else {
             continue;
         };
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {

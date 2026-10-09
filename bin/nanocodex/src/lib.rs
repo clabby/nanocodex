@@ -567,121 +567,124 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Some(Command::Resume(mut command)) => {
+            use nanocodex::HarnessFamily;
+            use nanocodex2::tui::local::{agent::LocalLaunch, sessions};
             let codex_home = config::default_codex_home()?;
             let forking = command.from.is_some() || command.at.is_some();
             if forking {
                 // Rollout files and turn points belong to Codex threads.
-                command
-                    .agent
-                    .resume_with_harness(nanocodex::HarnessFamily::Codex);
+                command.agent.resume_with_harness(HarnessFamily::Codex);
             }
-            if !command.agent.has_explicit_harness() {
-                // A defaulted resume opens the store that owns the requested
-                // thread, otherwise the Codex thread picker as before.
-                let claude = command
-                    .thread_id
+            let explicit = command.agent.has_explicit_harness();
+            let mut thread_id = command.thread_id.take();
+            if thread_id.is_none() && !forking {
+                // One picker over Codex threads and Claude sessions, newest first;
+                // an explicit harness narrows it to that store.
+                let family = if explicit {
+                    Some(command.agent.selected_harness()?)
+                } else {
+                    None
+                };
+                let candidates = sessions::discover(&codex_home)?
+                    .into_iter()
+                    .filter(|session| {
+                        family.is_none_or(|family| {
+                            (family == HarnessFamily::Claude)
+                                == (session.harness == sessions::Harness::Claude)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if candidates.is_empty() {
+                    return Err(sessions::none_found(&codex_home));
+                }
+                let Some(selected) = sessions::select(&candidates).await? else {
+                    return Ok(());
+                };
+                if !explicit {
+                    command.agent.resume_with_harness(match selected.harness {
+                        sessions::Harness::Claude => HarnessFamily::Claude,
+                        sessions::Harness::Codex => HarnessFamily::Codex,
+                    });
+                }
+                thread_id = Some(selected.id);
+            } else if !explicit {
+                // A defaulted resume opens the store that owns the requested thread.
+                let claude = thread_id
                     .as_deref()
                     .is_some_and(|id| native_sessions::load(&codex_home, id).is_ok());
                 command.agent.resume_with_harness(if claude {
-                    nanocodex::HarnessFamily::Claude
+                    HarnessFamily::Claude
                 } else {
-                    nanocodex::HarnessFamily::Codex
+                    HarnessFamily::Codex
                 });
             }
-            if command.agent.selected_harness()? == nanocodex::HarnessFamily::Claude {
+            let mut launch = if command.agent.selected_harness()? == HarnessFamily::Claude {
                 if forking {
                     return Err(eyre!(
                         "--from and --at start Codex threads; use `nanocodex rewind` for Claude"
                     ));
                 }
-                let id = match command.thread_id {
-                    Some(id) => id,
-                    None => {
-                        let sessions = native_sessions::discover(&codex_home)?;
-                        if sessions.is_empty() {
-                            return Err(eyre!(
-                                "no resumable Claude sessions found under {}",
-                                codex_home.display()
-                            ));
-                        }
-                        let Some(id) = native_sessions::select(&sessions)? else {
-                            return Ok(());
-                        };
-                        id
-                    }
-                };
+                let id = thread_id.ok_or_else(|| eyre!("a Claude session ID is required"))?;
                 let session = native_sessions::load(&codex_home, &id)?;
-                return tui::run_observed(
-                    command.agent.resume_claude(session)?,
-                    command.vm,
-                    command.prompt.map(tui::InitialPrompt::plain),
-                    None,
-                    Some(command.observability),
-                )
-                .await;
-            }
-            let rollouts = RolloutConfig::new(&codex_home);
-            let source = match (command.from, &command.thread_id) {
-                (Some(path), _) => Some(path),
-                (None, Some(thread_id)) if command.at.is_some() => Some(
-                    rollouts
-                        .load_session(thread_id)
-                        .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?
-                        .rollout_path()
-                        .to_path_buf(),
-                ),
-                (None, None) if command.at.is_some() => {
-                    return Err(eyre!("--at needs a thread ID or --from"));
+                LocalLaunch {
+                    args: command.agent.resume_claude(session)?,
+                    vm: command.vm,
+                    replaceable: false,
+                    initial_prompt: command.prompt,
+                    resume: None,
                 }
-                _ => None,
-            };
-            let thread_id = match (source, command.thread_id) {
-                (Some(source), _) => {
-                    let workspace = match command.agent.requested_workspace() {
-                        Some(path) => path.to_path_buf(),
-                        None => std::env::current_dir()?,
+            } else {
+                let rollouts = RolloutConfig::new(&codex_home);
+                let source = match (command.from, &thread_id) {
+                    (Some(path), _) => Some(path),
+                    (None, Some(thread_id)) if command.at.is_some() => Some(
+                        rollouts
+                            .load_session(thread_id)
+                            .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?
+                            .rollout_path()
+                            .to_path_buf(),
+                    ),
+                    (None, None) if command.at.is_some() => {
+                        return Err(eyre!("--at needs a thread ID or --from"));
                     }
-                    .canonicalize()
-                    .wrap_err("failed to resolve the new thread's workspace")?;
-                    let point = rollout_fork::Point::parse(command.at.as_deref())?;
-                    let thread_id = rollout_fork::fork(&source, &point, &codex_home, &workspace)?;
-                    eprintln!(
-                        "Started Codex thread {thread_id} from {}.",
-                        source.display()
-                    );
-                    thread_id
-                }
-                (None, Some(thread_id)) => thread_id,
-                (None, None) => {
-                    let sessions = rollouts.list_sessions().wrap_err_with(|| {
-                        format!(
-                            "failed to discover Codex threads under {}",
-                            codex_home.display()
-                        )
-                    })?;
-                    if sessions.is_empty() {
-                        return Err(eyre!(
-                            "no resumable Codex threads found under {}",
-                            codex_home.display()
-                        ));
+                    _ => None,
+                };
+                let thread_id = match (source, thread_id) {
+                    (Some(source), _) => {
+                        let workspace = match command.agent.requested_workspace() {
+                            Some(path) => path.to_path_buf(),
+                            None => std::env::current_dir()?,
+                        }
+                        .canonicalize()
+                        .wrap_err("failed to resolve the new thread's workspace")?;
+                        let point = rollout_fork::Point::parse(command.at.as_deref())?;
+                        let thread_id =
+                            rollout_fork::fork(&source, &point, &codex_home, &workspace)?;
+                        eprintln!(
+                            "Started Codex thread {thread_id} from {}.",
+                            source.display()
+                        );
+                        thread_id
                     }
-                    let Some(thread_id) = tui::select_resume_session(&sessions)? else {
-                        return Ok(());
-                    };
-                    thread_id
+                    (None, Some(thread_id)) => thread_id,
+                    (None, None) => return Err(eyre!("--at needs a thread ID or --from")),
+                };
+                // Fail before entering the terminal when the thread cannot load.
+                rollouts
+                    .load_session(&thread_id)
+                    .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?;
+                LocalLaunch {
+                    args: command.agent,
+                    vm: command.vm,
+                    replaceable: false,
+                    initial_prompt: command.prompt,
+                    resume: Some(sessions::Resume::Codex(thread_id)),
                 }
             };
-            let session = rollouts
-                .load_session(&thread_id)
-                .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?;
-            tui::run_observed(
-                command.agent,
-                command.vm,
-                command.prompt.map(tui::InitialPrompt::plain),
-                Some(session),
-                Some(command.observability),
-            )
-            .await
+            launch.args.prefer_codex_for_vm(&launch.vm);
+            nanocodex2::tui::run_local(launch)
+                .await
+                .map_err(|error| eyre!("{error}"))
         }
         Some(Command::Update(command)) => command.run().await,
         None if std::env::var_os("NANOCODEX_LEGACY_TUI").is_some() => {
@@ -703,6 +706,7 @@ async fn run(cli: Cli) -> Result<()> {
                 vm: cli.vm,
                 replaceable,
                 initial_prompt: cli.prompt,
+                resume: None,
             })
             .await
             .map_err(|error| eyre!("{error}"))
