@@ -182,12 +182,12 @@ fn main() {
     transcript.push('expected: with brew unavailable, nested Cargo builds C, archives it and links a static AArch64 musl init using shipped wrappers; observed: static ELF verified');
   }
   const firstBuild = readFileSync(buildLog, 'utf8');
-  assert.equal(firstBuild.trim().split('\n').length, 2, firstBuild);
+  assert.equal(firstBuild.trim().split('\n').length, 1, firstBuild);
 
   result = update(['--branch', 'topic']);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(buildLog, 'utf8'), firstBuild, 'unchanged branch must reuse both binaries and shared dependencies');
-  transcript.push(`expected: one shared dependency build, one package build for both binaries; repeated update compiles nothing\nobserved: first update ${firstBuildMs} ms; repeated update ${result.elapsedMs} ms\nobserved build log:\n${firstBuild}`);
+  transcript.push(`expected: one shared dependency build script, both executable probes verified; repeated update compiles nothing\nobserved: first update ${firstBuildMs} ms; repeated update ${result.elapsedMs} ms\nobserved build log:\n${firstBuild}`);
 
   result = update(['--pr', '42']);
   assert.equal(result.status, 0, result.stderr);
@@ -216,7 +216,7 @@ fn main() {
   for (const executable of ['nanocodex', 'nanocodex2']) {
     assert.match(run(join(store, 'versions', `branch-${nextSha}`, executable), ['--version']).stdout, new RegExp(nextSha));
   }
-  assert.equal(readFileSync(buildLog, 'utf8').trim().split('\n').length, 4);
+  assert.equal(readFileSync(buildLog, 'utf8').trim().split('\n').length, 2);
   splitPair(`branch-${nextSha}`);
 
   // Recover a modified cached checkout instead of activating altered sources.
