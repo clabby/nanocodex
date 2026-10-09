@@ -28,6 +28,11 @@ impl ChildAgents {
         })
     }
 
+    /// Changes how many child agents may run at once for this session tree.
+    pub(crate) fn set_max_concurrency(&self, limit: usize) {
+        self.control.set_max_concurrency(limit);
+    }
+
     pub(crate) async fn shutdown(&self) {
         drop(self.control.close_all(&self.root_session_id).await);
         if let Some(update_task) = self.update_task.lock().await.take() {
