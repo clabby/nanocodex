@@ -23,11 +23,11 @@ use std::{
 use tokio::process::Command;
 use url::Url;
 
-pub(super) const MAX_IMAGE_HEIGHT: u16 = 24;
+pub const MAX_IMAGE_HEIGHT: u16 = 24;
 
 static PICKER: tokio::sync::OnceCell<Picker> = tokio::sync::OnceCell::const_new();
 
-pub(super) struct Cache {
+pub struct Cache {
     entries: BoundedCache<CacheKey, CachedProtocol, PROTOCOL_CACHE_CAPACITY>,
     sources: BoundedCache<PathBuf, Source, SOURCE_CACHE_CAPACITY>,
     requests: HashSet<CacheKey>,
@@ -41,7 +41,7 @@ pub(super) struct Cache {
     next_poll: Option<Instant>,
 }
 
-pub(super) enum LoadResult {
+pub enum LoadResult {
     Unsupported,
     Deferred,
     Failed,
@@ -146,13 +146,13 @@ impl<K: Eq, V, const CAPACITY: usize> BoundedCache<K, V, CAPACITY> {
 }
 
 #[derive(Default)]
-pub(super) struct PollResult {
-    pub(super) layout_change: LayoutChange,
-    pub(super) render_changed: bool,
+pub struct PollResult {
+    pub layout_change: LayoutChange,
+    pub render_changed: bool,
 }
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum LayoutChange {
+pub enum LayoutChange {
     #[default]
     None,
     Pending,
@@ -169,11 +169,11 @@ struct TmuxClient {
     font_size: Option<FontSize>,
 }
 
-pub(crate) fn video_picker() -> Picker {
+pub fn video_picker() -> Picker {
     PICKER.get().cloned().unwrap_or_else(Picker::halfblocks)
 }
 
-pub(crate) async fn initialize() {
+pub async fn initialize() {
     PICKER.get_or_init(discover_picker).await;
 }
 
@@ -327,7 +327,7 @@ impl Default for Cache {
 }
 
 impl Cache {
-    pub(super) fn load(&mut self, destination: &str, workspace: &Path, width: u16) -> LoadResult {
+    pub fn load(&mut self, destination: &str, workspace: &Path, width: u16) -> LoadResult {
         // Discovery runs after the first editable frame. An early image must
         // not permanently install the fallback while the tmux query is pending.
         if PICKER.get().is_none() && self.inline_images.is_none() {
@@ -352,12 +352,12 @@ impl Cache {
         self.request(key)
     }
 
-    pub(super) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.sources.clear();
         self.advance_terminal_generation();
     }
 
-    pub(super) fn retransmit(
+    pub fn retransmit(
         &mut self,
         destination: &str,
         workspace: &Path,
@@ -376,7 +376,7 @@ impl Cache {
         self.request(key)
     }
 
-    pub(super) fn advance_terminal_generation(&mut self) {
+    pub fn advance_terminal_generation(&mut self) {
         self.entries.clear();
         self.requests.clear();
         self.generation = self.generation.wrapping_add(1);
@@ -385,11 +385,11 @@ impl Cache {
         self.next_poll = None;
     }
 
-    pub(super) const fn animation_deadline(&self) -> Option<Instant> {
+    pub const fn animation_deadline(&self) -> Option<Instant> {
         self.next_poll
     }
 
-    pub(super) fn poll(&mut self, now: Instant) -> PollResult {
+    pub fn poll(&mut self, now: Instant) -> PollResult {
         let mut result = PollResult::default();
         while let Ok(completion) = self.completions.try_recv() {
             if completion.generation != self.generation {
@@ -443,7 +443,7 @@ impl Cache {
     }
 
     #[cfg(test)]
-    pub(super) fn with_inline_images(inline_images: bool) -> Self {
+    pub fn with_inline_images(inline_images: bool) -> Self {
         Self {
             inline_images: Some(inline_images),
             ..Self::default()

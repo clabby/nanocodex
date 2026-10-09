@@ -3,6 +3,7 @@
 
 //! Camera-centered subagent hierarchy and read-only transcript inspector.
 
+use crate::nanocodex2::tui::theme::ThemeExt as _;
 use super::{
     floating::Floating,
     node::Node,

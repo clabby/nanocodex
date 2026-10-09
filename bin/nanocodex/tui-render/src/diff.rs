@@ -3,7 +3,7 @@
 
 //! Structured rendering for unified and `apply_patch` diffs.
 
-use crate::nanocodex2::tui::theme::Theme;
+use crate::theme::Theme;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -12,7 +12,7 @@ use syntect::{easy::HighlightLines, highlighting::Theme as SyntaxTheme, parsing:
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) fn render(source: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+pub fn render(source: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     if width == 0 {
         return Vec::new();
     }
@@ -55,15 +55,15 @@ impl Default for Hunk {
     }
 }
 
-pub(super) struct DiffLine {
-    pub(super) kind: DiffLineKind,
-    pub(super) text: String,
-    pub(super) old_line: Option<u64>,
-    pub(super) new_line: Option<u64>,
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub text: String,
+    pub old_line: Option<u64>,
+    pub new_line: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum DiffLineKind {
+pub enum DiffLineKind {
     Context,
     Addition,
     Deletion,
@@ -418,7 +418,7 @@ fn change_counts<'a>(lines: impl Iterator<Item = &'a DiffLine>) -> (usize, usize
     })
 }
 
-pub(super) fn component_header(label: &str, width: u16, theme: &Theme) -> Line<'static> {
+pub fn component_header(label: &str, width: u16, theme: &Theme) -> Line<'static> {
     let label = truncate(label, width.saturating_sub(5));
     let label_width = u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(u16::MAX);
     let fill = width.saturating_sub(label_width.saturating_add(5));
@@ -437,7 +437,7 @@ pub(super) fn component_header(label: &str, width: u16, theme: &Theme) -> Line<'
     ])
 }
 
-pub(super) fn hunk_divider(label: &str, width: u16, theme: &Theme) -> Line<'static> {
+pub fn hunk_divider(label: &str, width: u16, theme: &Theme) -> Line<'static> {
     let label = truncate(label, width.saturating_sub(5));
     let label_width = u16::try_from(UnicodeWidthStr::width(label.as_str())).unwrap_or(u16::MAX);
     let fill = width.saturating_sub(label_width.saturating_add(5));
@@ -451,7 +451,7 @@ pub(super) fn hunk_divider(label: &str, width: u16, theme: &Theme) -> Line<'stat
     ])
 }
 
-pub(super) fn component_body(
+pub fn component_body(
     line: &DiffLine,
     code: Vec<Span<'static>>,
     wrap_index: usize,
@@ -518,7 +518,7 @@ fn marker_style(kind: DiffLineKind, theme: &Theme) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-pub(super) fn highlighted_diff_line(
+pub fn highlighted_diff_line(
     line: &DiffLine,
     old: &mut HighlightLines<'_>,
     new: &mut HighlightLines<'_>,
