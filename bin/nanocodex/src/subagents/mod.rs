@@ -1,8 +1,6 @@
 //! CLI lifecycle ownership over the reusable subagent extension.
 use nanocodex_subagents::SubagentControl;
-pub(crate) use nanocodex_subagents::{
-    AgentId, AgentStatus, AgentUpdate, DEFAULT_MAX_SUBAGENTS, ScopedAgentUpdate, channel,
-};
+pub(crate) use nanocodex_subagents::{DEFAULT_MAX_SUBAGENTS, ScopedAgentUpdate, channel};
 use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
 

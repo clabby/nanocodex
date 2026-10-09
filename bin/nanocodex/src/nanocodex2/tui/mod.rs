@@ -1652,6 +1652,7 @@ impl DriverRuntime {
         self.local_managed_turns
             .insert(id, managed_request_id.clone());
         self.admitting.insert(id);
+        let local_submission = self.local.is_some();
         self.admissions.spawn(async move {
             let turn = match rejection {
                 Some(error) => Err(nanocodex::NanocodexError::backend(
@@ -1659,9 +1660,13 @@ impl DriverRuntime {
                     std::io::Error::other(error),
                 )),
                 None => {
-                    agent
-                        .prompt(PromptRequest::new(agent_prompt).request_id(managed_request_id))
-                        .await
+                    let request = PromptRequest::new(agent_prompt);
+                    let request = if local_submission {
+                        request
+                    } else {
+                        request.request_id(managed_request_id)
+                    };
+                    agent.prompt(request).await
                 }
             };
             (pane, id, turn)
@@ -2012,6 +2017,24 @@ impl DriverRuntime {
     }
 
     fn spawn_cancellation(&mut self, pane: PaneId, target: CancelTarget) {
+        if self.local.is_some() {
+            let control = match &target {
+                CancelTarget::Local { id, .. } => self.controls.get(id).cloned(),
+                CancelTarget::Managed { .. } => None,
+            };
+            self.cancellations.spawn(async move {
+                let outcome = match control {
+                    Some(control) => control
+                        .cancel()
+                        .await
+                        .map(|()| CancelDisposition::Accepted)
+                        .map_err(|error| error.to_string()),
+                    None => Ok(CancelDisposition::Terminal),
+                };
+                (pane, target, outcome)
+            });
+            return;
+        }
         let client = self.client.clone();
         self.cancellations.spawn(async move {
             let outcome = {
@@ -3914,7 +3937,7 @@ async fn run_inner(
                             )));
                         }
                     };
-                    if admission.as_ref().is_err_and(connection_failure) {
+                    if runtime.local.is_none() && admission.as_ref().is_err_and(connection_failure) {
                         runtime.begin_recovery(&mut app, &mut scheduler, true);
                         continue;
                     }
@@ -5089,17 +5112,21 @@ async fn apply_update(
                             let generation = runtime.connection_generation;
                             let target = SteerTarget::Local(turn_id);
                             let message_id = uuid::Uuid::now_v7().to_string();
-                            runtime.steer_receipts.insert(
-                                (pane, id),
-                                (generation, target.clone(), message_id.clone()),
-                            );
-                            runtime.reconcile_steer_receipt(pane, id, &target, message_id.clone(), prompt.managed_prompt());
+                            let local_steer = runtime.local.is_some();
+                            if !local_steer {
+                                runtime.steer_receipts.insert(
+                                    (pane, id),
+                                    (generation, target.clone(), message_id.clone()),
+                                );
+                                runtime.reconcile_steer_receipt(pane, id, &target, message_id.clone(), prompt.managed_prompt());
+                            }
                             runtime.pending_steer_target = Some((id, target.clone()));
                             runtime.steers.spawn(async move {
-                                let result = control
-                                    .steer_with_id(message_id, prompt.agent_prompt())
-                                    .await
-                                    .map_err(SteerFailure::backend);
+                                let result = if local_steer {
+                                    control.steer(prompt.agent_prompt()).await
+                                } else {
+                                    control.steer_with_id(message_id, prompt.agent_prompt()).await
+                                }.map_err(SteerFailure::backend);
                                 (pane, id, generation, target, result)
                             });
                         } else if !runtime.managed_active_turns.ids.is_empty() {
