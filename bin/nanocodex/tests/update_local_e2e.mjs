@@ -149,8 +149,17 @@ function checkAliases(root, revision, label) {
     assert.match(run(link, ['--help']).stdout, /^Usage: \S+ hand\b/m, `${label}: ${alias} --help must be the hand command help`);
     const status = JSON.parse(run(link, ['status']).stdout);
     assert.equal(typeof status.installed, 'boolean', `${label}: ${alias} status must be hand status`);
+    if (process.platform === 'linux') {
+      // The command a Hand starts for background CUA setup keeps its meaning.
+      // Linux has no automatic upstream setup; its outcome is recorded.
+      const setup = JSON.parse(run(link, ['computer', 'setup', '--background']).stdout);
+      assert.equal(setup.status, 'unsupported', `${label}: ${alias} computer setup must run the CLI command`);
+      const failure = JSON.parse(readFileSync(join(root, 'runtimes', 'openai-cua', 'setup-failure.json'), 'utf8'));
+      assert.equal(failure.status, 'unsupported');
+      assert.equal(failure.retry, 'nanocodex computer setup');
+    }
   }
-  trace.push(`PASS ${label}: bin/{nanocodex-hand,nc-hand} -> ${handTarget}; --version prints Hand Identity ${expectedHandIdentity}; --help is the hand command help; status is hand status`);
+  trace.push(`PASS ${label}: bin/{nanocodex-hand,nc-hand} -> ${handTarget}; --version prints Hand Identity ${expectedHandIdentity}; --help is the hand command help; status is hand status; computer setup --background is the CLI command (Linux: unsupported, recorded)`);
 }
 function bundleBytes(directory, label, handBytes = suppliedHand) {
   assert.equal(digest(readFileSync(join(directory, 'nanocodex'))), digest(readFileSync(suppliedCli)), `${label}: CLI bytes`);

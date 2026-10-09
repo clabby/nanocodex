@@ -22,6 +22,30 @@ pub const HAND_COMMAND_ALIASES_MARKER: &[u8] = b"NANOCODEX_HAND_COMMAND_ALIASES_
 /// Installed PATH names of the Hand executable (`bin/<alias>`).
 pub const HAND_COMMAND_ALIASES: [&str; 2] = ["nanocodex-hand", "nc-hand"];
 
+/// Every `nanocodex hand` subcommand across both CLI command trees, which the
+/// Hand executable does not contain. Under `HAND_COMMAND_ALIASES` only these
+/// words imply `hand`; any other command, such as the `computer setup` the Hand
+/// itself starts in the background, keeps its meaning. The CLI checks this
+/// list against its command trees.
+pub const HAND_SUBCOMMANDS: &[&str] = &[
+    "install",
+    "connect",
+    "menu-bar",
+    "menu-status",
+    "status",
+    "keep-awake",
+    "start",
+    "stop",
+    "restart",
+    "recover",
+    "permissions",
+    "list",
+    "forget",
+    "prune",
+    "stream",
+    "help",
+];
+
 /// Explicit Hand executable for development and tests.
 pub const HAND_EXECUTABLE_ENV: &str = "NANOCODEX_HAND_EXECUTABLE";
 /// Selects the Linux Wayland screen-encoder helper role of the Hand executable.

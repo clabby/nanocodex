@@ -702,6 +702,28 @@ async fn run(cli: Cli) -> Result<()> {
 mod tests {
     use super::*;
 
+    // The Hand executable, which has no CLI command trees, implies `hand` for
+    // exactly these words when invoked as nanocodex-hand or nc-hand.
+    #[test]
+    fn hand_command_aliases_know_every_hand_subcommand() {
+        let mut names = std::collections::BTreeSet::new();
+        for tree in [Cli::command(), nanocodex2::command()] {
+            let mut tree = tree;
+            tree.build();
+            let hand = tree.find_subcommand("hand").expect("hand command");
+            names.extend(
+                hand.get_subcommands()
+                    .map(|command| command.get_name().to_owned()),
+            );
+        }
+        names.insert("help".to_owned());
+        let shared = nanocodex_bin_shared::hand_executable::HAND_SUBCOMMANDS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(shared, names);
+    }
+
     #[test]
     fn runtime_waits_for_foreground_cleanup_before_success_or_error() {
         use std::sync::{

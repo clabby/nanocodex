@@ -136,11 +136,12 @@ pub fn hand_main(build: nanocodex_bin_shared::version::BuildInfo) -> ExitCode {
 }
 
 /// Names under which this executable is the `hand` command itself: the build
-/// output and the installed `bin/nanocodex-hand` and `bin/nc-hand` links. A
-/// user runs `nc-hand` (serve this computer) or `nc-hand status` as
-/// `nanocodex hand` and `nanocodex hand status`; `--help` is the `hand` help.
-/// Internal entrypoints, an explicit `hand`, and the bare `--version` keep
-/// their meaning, so service records and tooling naming the build output work.
+/// output and the installed `bin/nanocodex-hand` and `bin/nc-hand` links. Bare
+/// `nc-hand` (or with serving flags) serves this computer like `nanocodex hand`,
+/// `nc-hand --help` is the `hand` help, and `nc-hand status` is
+/// `nanocodex hand status`. Every other invocation keeps its meaning: internal
+/// entrypoints, explicit `hand`, bare `--version`, a leading `--local`, and CLI
+/// commands such as the `computer setup --background` this executable starts.
 fn imply_hand_command(arguments: &mut Vec<OsString>) {
     // Retained in stripped builds: the updater links the aliases only to a Hand
     // that contains it.
@@ -158,16 +159,16 @@ fn imply_hand_command(arguments: &mut Vec<OsString>) {
     {
         return;
     }
-    let explicit = match arguments.get(1).and_then(|argument| argument.to_str()) {
-        Some("--version" | "-V") => arguments.len() == 2,
-        // Help describes the `hand` command, as `nanocodex hand --help`.
-        Some("--help" | "-h") => false,
-        Some(first) => {
-            first == "hand" || is_hand_daemon_invocation(&[OsString::new(), OsString::from(first)])
+    let implied = match arguments.get(1).map(|argument| argument.to_str()) {
+        None => true,
+        Some(Some("--version" | "-V")) => arguments.len() > 2,
+        Some(Some("--local")) => false,
+        Some(Some(first)) => {
+            first.starts_with('-') || hand_executable::HAND_SUBCOMMANDS.contains(&first)
         }
-        None => false,
+        Some(None) => false,
     };
-    if !explicit {
+    if implied {
         arguments.insert(1, "hand".into());
     }
 }
