@@ -242,7 +242,7 @@ finally:
                         last = content if isinstance(content, str) else " ".join(
                             b.get("text", "") for b in content if isinstance(b, dict))
                         break
-                marker = next((m for m in ("CLAUDE_EDITED", "CLAUDE_SECOND", "CLAUDE_FIRST") if m in last), "UNKNOWN")
+                marker = next((m for m in ("CLAUDE_CLEARED", "CLAUDE_EDITED", "CLAUDE_SECOND", "CLAUDE_FIRST") if m in last), "UNKNOWN")
                 events = [
                     {"type": "message_start", "message": {"id": "msg_" + uuid4().hex, "type": "message", "role": "assistant",
                      "model": body.get("model", "claude"), "content": [], "usage": {"input_tokens": 10, "output_tokens": 0}}},
@@ -285,6 +285,10 @@ finally:
             lines = [line.strip() for line in screen.splitlines()]
             tops = [i for i, line in enumerate(lines) if line.startswith("╭─") and "%/" in line]
             return bool(tops) and any(line.startswith("╰─") for line in lines[tops[-1] + 1:])
+        def composer_text(screen):
+            lines = screen.splitlines()
+            tops = [i for i, line in enumerate(lines) if line.strip().startswith("╭─") and "%/" in line]
+            return "\n".join(lines[tops[-1]:]) if tops else ""
         cwait(composer_visible, "claude composer", 40)
         ctyp("CLAUDE_FIRST"); ckeys("Enter"); cwait(lambda s: "REPLY_CLAUDE_FIRST" in s, "claude first answer")
         ctyp("CLAUDE_SECOND"); ckeys("Enter"); cwait(lambda s: "REPLY_CLAUDE_SECOND" in s, "claude second answer")
@@ -309,6 +313,20 @@ finally:
         ckeys("Up"); ckeys("Enter")
         s = cwait(lambda s: "REPLY_CLAUDE_FIRST" in s and "REPLY_CLAUDE_SECOND" in s, "switch back to the original Claude session", 60)
         checks.append({"check": "switch back to the original Claude session replays it", "ok": "REPLY_CLAUDE_EDITED" not in s})
+        # The reopened session keeps Claude's resolved launch: its footer shows the
+        # Claude model, and /clear starts a fresh Claude (not Codex) session.
+        checks.append({"check": "switched-back Claude session shows its Claude model",
+                       "ok": "claude-opus-5-5" in composer_text(s) and "gpt-" not in s})
+        ctyp("/clear"); ckeys("Enter")
+        cwait(lambda s: composer_visible(s) and "REPLY_CLAUDE_FIRST" not in s, "cleared Claude session", 30)
+        before = len(claude_requests)
+        ctyp("CLAUDE_CLEARED"); ckeys("Enter")
+        s = cwait(lambda s: "REPLY_CLAUDE_CLEARED" in s, "cleared Claude session answer", 60)
+        cleared = [r for r in claude_requests[before:] if "CLAUDE_CLEARED" in json.dumps(r["body"].get("messages", []))]
+        history = json.dumps(cleared[0]["body"].get("messages", [])) if cleared else ""
+        checks.append({"check": "/clear after switching back starts a fresh Claude session",
+                       "ok": bool(cleared) and "CLAUDE_FIRST" not in history
+                       and "claude-opus-5-5" in composer_text(s) and "gpt-" not in s})
     except Exception as error:
         checks.append({"check": "Claude branch editing", "ok": False, "error": str(error)})
     finally:

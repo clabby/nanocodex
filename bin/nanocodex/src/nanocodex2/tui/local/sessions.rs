@@ -37,7 +37,7 @@ use crate::nanocodex2::{
 pub(crate) enum Resume {
     Codex(String),
     /// A saved session of either harness (branch switch); the connection task
-    /// resolves it with [`relaunch`] so lookups stay off the input loop.
+    /// resolves it with [`resolve`] so lookups stay off the input loop.
     Session(String),
     /// A branch started by editing an earlier prompt: reopen `thread`, or copy
     /// `fork` into a new thread first (None for both: a fresh session), and submit
@@ -293,6 +293,18 @@ pub(crate) fn fresh(base: &LocalLaunch) -> LocalLaunch {
     }
 }
 
+/// Resolves a [`Resume::Session`] launch to the harness that saved it, on the
+/// blocking pool; other launches are returned unchanged.
+pub(crate) async fn resolve(launch: LocalLaunch) -> Result<LocalLaunch> {
+    let id = match &launch.resume {
+        Some(Resume::Session(id)) => id.clone(),
+        _ => return Ok(launch),
+    };
+    tokio::task::spawn_blocking(move || relaunch(&launch, &id))
+        .await
+        .wrap_err("session lookup task failed")?
+}
+
 /// What building a (possibly resumed) local agent produced.
 pub(crate) struct Built {
     pub(crate) agent: ConfiguredAgent,
@@ -302,15 +314,11 @@ pub(crate) struct Built {
 }
 
 /// Builds the local agent for `launch`, reopening its saved session if any. File work
-/// (branch copies, rollout materialization) runs on the blocking pool.
+/// (branch copies, rollout materialization) runs on the blocking pool. A
+/// [`Resume::Session`] launch must be [`resolve`]d first.
 pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
     if let Some(Resume::Session(id)) = &launch.resume {
-        let base = launch.clone();
-        let id = id.clone();
-        let resolved = tokio::task::spawn_blocking(move || relaunch(&base, &id))
-            .await
-            .wrap_err("session lookup task failed")??;
-        return Box::pin(build(&resolved)).await;
+        return Err(eyre!("saved session {id} was not resolved before building"));
     }
     let thread = match &launch.resume {
         Some(

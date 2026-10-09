@@ -110,6 +110,9 @@ impl LocalBackend {
 
     /// Builds the local agent off the input loop, reopening a saved session if any.
     pub(crate) async fn build(launch: LocalLaunch) -> Result<(Self, nanocodex::AgentEvents)> {
+        // A branch switch names a saved session of either harness. Keep the resolved
+        // launch so settings, /clear and later switches follow the reopened harness.
+        let launch = super::sessions::resolve(launch).await?;
         let built = super::sessions::build(&launch).await?;
         let (mut backend, events) = Self::new(launch, built.workspace, built.agent);
         backend.transcript = built.transcript;
