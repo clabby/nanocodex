@@ -1,11 +1,15 @@
 //! Discovery for native Claude journals. Discovery is read-only and never claims
 //! a durable owner; the normal Claude builder acquires ownership on continuation.
 use eyre::{Result, WrapErr, eyre};
-use nanocodex::{HarnessFamily, HarnessModel, agent::rollout::RolloutTranscriptItem};
+use nanocodex::{
+    HarnessFamily, HarnessModel,
+    agent::rollout::{RolloutToolOutcome, RolloutTranscriptItem},
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::{HashMap, HashSet},
     fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -91,7 +95,8 @@ pub(crate) fn discover(home: &Path) -> Result<Vec<ResumeSession>> {
     }
     let mut sessions = Vec::new();
     for id in ids.into_iter().take(MAX_SESSIONS) {
-        match inspect(&db, home, &id) {
+        // The picker previews only the first prompt.
+        match inspect(&db, home, &id, 1) {
             Ok(session) => sessions.push(session),
             Err(error) => eprintln!("Skipping Claude session {}: {error}", clean(&id)),
         }
@@ -104,10 +109,11 @@ pub(crate) fn load(home: &Path, id: &str) -> Result<ResumeSession> {
     if id.len() > 256 {
         return Err(eyre!("Claude session ID is too long"));
     }
-    inspect(&open(home)?, home, id).wrap_err_with(|| format!("failed to load Claude session {id}"))
+    inspect(&open(home)?, home, id, usize::MAX)
+        .wrap_err_with(|| format!("failed to load Claude session {id}"))
 }
 
-fn inspect(db: &Connection, home: &Path, id: &str) -> Result<ResumeSession> {
+fn inspect(db: &Connection, home: &Path, id: &str, prompt_limit: usize) -> Result<ResumeSession> {
     // The store API only exposes acquiring owners. Use bounded, read-only SQL
     // here so opening/cancelling the picker cannot fence a running process.
     let state: Option<String> = db.query_row(
@@ -164,7 +170,10 @@ fn inspect(db: &Connection, home: &Path, id: &str) -> Result<ResumeSession> {
         id: id.into(),
         workspace,
         model,
-        transcript: transcript(&checkpoint),
+        transcript: transcript(
+            &checkpoint,
+            &admitted_prompts(db, id, retained, prompt_limit),
+        ),
         updated: manifest.map_or(0, |m| m.updated),
     })
 }
@@ -215,43 +224,325 @@ fn read_payload(db: &Connection, id: &str, key: &str) -> Result<String> {
     Ok(value)
 }
 
-fn transcript(checkpoint: &Value) -> Vec<RolloutTranscriptItem> {
+/// One ordered part of a user prompt, compared to recognize the checkpoint
+/// message that an admitted prompt produced. Media bytes are never compared.
+#[derive(Debug, PartialEq, Eq)]
+enum PromptPart {
+    Text(String),
+    Media,
+}
+
+/// Prompt inputs admitted by this journal, in acceptance order. They are the
+/// authority for real user turns: hook context, harness notices and
+/// continuations share the user role in the checkpoint but are never admitted.
+fn admitted_prompts(
+    db: &Connection,
+    id: &str,
+    retained: &Value,
+    limit: usize,
+) -> Vec<AdmittedPrompt> {
+    let mut operations = retained["operations"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(_, operation)| {
+            // Consumed steering bodies are retired, but their count is kept.
+            let steers = operation["retired_steers"].as_u64().unwrap_or(0) as usize
+                + operation["steers"].as_array().map_or(0, Vec::len);
+            Some((
+                operation["accepted_order"].as_u64()?,
+                operation["input"].as_str()?,
+                steers,
+            ))
+        })
+        .collect::<Vec<_>>();
+    operations.sort_unstable_by_key(|(order, _, _)| *order);
+    // Image prompts retain their media in the input; bound the total read.
+    let mut budget = 4 * MAX_BYTES;
+    let mut prompts = Vec::new();
+    for (_, key, steers) in operations {
+        if prompts.len() >= limit {
+            break;
+        }
+        let Ok(payload) = read_payload(db, id, key) else {
+            continue;
+        };
+        let Some(remaining) = budget.checked_sub(payload.len()) else {
+            break;
+        };
+        budget = remaining;
+        let Ok(input) = serde_json::from_str::<Value>(&payload) else {
+            continue;
+        };
+        if input["provider"] != "claude" || input["kind"] != "prompt" {
+            continue;
+        }
+        let parts = match &input["prompt"]["instruction"] {
+            Value::String(text) => vec![PromptPart::Text(text.clone())],
+            Value::Array(items) => items
+                .iter()
+                .map(|item| match item["type"].as_str() {
+                    Some("text") => {
+                        PromptPart::Text(item["text"].as_str().unwrap_or_default().to_owned())
+                    }
+                    _ => PromptPart::Media,
+                })
+                .collect(),
+            _ => continue,
+        };
+        prompts.push(AdmittedPrompt { parts, steers });
+    }
+    prompts
+}
+
+/// One admitted prompt and how many steering inputs its operation consumed.
+struct AdmittedPrompt {
+    parts: Vec<PromptPart>,
+    steers: usize,
+}
+
+fn user_rows(messages: &[&Value], notices: &[&str], items: &mut Vec<RolloutTranscriptItem>) {
+    for message in messages {
+        if recovery_notice(message, notices) {
+            continue;
+        }
+        let text = prompt_display(message);
+        if !text.is_empty() {
+            items.push(RolloutTranscriptItem::User(text));
+        }
+    }
+}
+
+fn blocks(message: &Value) -> impl Iterator<Item = &Value> {
+    message["content"].as_array().into_iter().flatten()
+}
+
+fn prompt_parts(message: &Value) -> Vec<PromptPart> {
+    blocks(message)
+        .filter_map(|block| match block["type"].as_str()? {
+            "text" => Some(PromptPart::Text(block["text"].as_str()?.to_owned())),
+            "image" | "document" => Some(PromptPart::Media),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The prompt as the composer displayed it: each image replaced its own
+/// placeholder, numbered per prompt. Media bytes never enter the transcript.
+fn prompt_display(message: &Value) -> String {
+    let (mut text, mut images, mut documents) = (String::new(), 0, 0);
+    for block in blocks(message) {
+        match block["type"].as_str() {
+            Some("text") => text.push_str(block["text"].as_str().unwrap_or_default()),
+            Some("image") => {
+                images += 1;
+                text.push_str(&format!("[Image #{images}]"));
+            }
+            Some("document") => {
+                documents += 1;
+                text.push_str(&format!("[Document #{documents}]"));
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
+/// Recovery and catalog-upgrade notices are recorded verbatim in the checkpoint.
+fn recovery_notice(message: &Value, notices: &[&str]) -> bool {
+    let mut text = String::new();
+    for block in blocks(message) {
+        match block["text"].as_str() {
+            Some(part) if block["type"] == "text" => text.push_str(part),
+            _ => return false,
+        }
+    }
+    notices.contains(&text.as_str())
+}
+
+fn tool_output(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|item| match item["type"].as_str()? {
+                "text" => item["text"].as_str().map(str::to_owned),
+                "image" => Some("[image]".to_owned()),
+                "document" => Some("[document]".to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn transcript(checkpoint: &Value, prompts: &[AdmittedPrompt]) -> Vec<RolloutTranscriptItem> {
     let mut items = Vec::new();
-    if let Some(summary) = checkpoint["conversation"]["summary"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-    {
+    let conversation = &checkpoint["conversation"];
+    if let Some(summary) = conversation["summary"].as_str().filter(|s| !s.is_empty()) {
         items.push(RolloutTranscriptItem::Assistant(format!(
             "Retained conversation summary:\n{summary}"
         )));
     }
-    for message in checkpoint["conversation"]["messages"]
+    let notices = conversation["recovery_notices"]
         .as_array()
         .into_iter()
         .flatten()
-    {
-        let assistant = message["role"].as_str() == Some("assistant");
-        for block in message["content"].as_array().into_iter().flatten() {
-            match block["type"].as_str() {
-                Some("text") => {
-                    if let Some(text) = block["text"].as_str() {
-                        items.push(if assistant {
-                            RolloutTranscriptItem::Assistant(text.into())
-                        } else {
-                            RolloutTranscriptItem::User(text.into())
-                        });
-                    }
-                }
-                Some("tool_use") => items.push(RolloutTranscriptItem::Tool {
-                    call_id: block["id"].as_str().unwrap_or_default().into(),
-                    name: block["name"].as_str().unwrap_or_default().into(),
-                    arguments: block["input"].to_string(),
-                }),
-                _ => {} // Never expose signed thinking or binary payloads in the picker/TUI.
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    let messages = conversation["messages"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    let receipt = |message: &Value| blocks(message).any(|block| block["type"] == "tool_result");
+    // Code Mode child calls retained by the engine without their results. A
+    // call started by exec and finished by a later wait keeps its final status.
+    let mut children = HashMap::<&str, Vec<(&str, &Value)>>::new();
+    let mut outcomes = HashMap::<&str, &str>::new();
+    for round in conversation["code_calls"].as_array().into_iter().flatten() {
+        let Some(receipt_id) = round["tool_use_id"].as_str() else {
+            continue;
+        };
+        let origin = round["origin_call_id"].as_str();
+        for call in round["calls"].as_array().into_iter().flatten() {
+            if let Some(call_id) = call["call_id"].as_str() {
+                outcomes.insert(call_id, call["status"].as_str().unwrap_or("unknown"));
+                let cell = call["parent_call_id"]
+                    .as_str()
+                    .or(origin)
+                    .unwrap_or(receipt_id);
+                children.entry(receipt_id).or_default().push((cell, call));
             }
         }
     }
+    let mut replayed_children = HashSet::new();
+    let mut next_prompt = 0;
+    let mut index = 0;
+    while let Some(message) = messages.get(index) {
+        if message["role"].as_str() == Some("assistant") {
+            for block in blocks(message) {
+                match block["type"].as_str() {
+                    Some("text") => {
+                        if let Some(text) = block["text"].as_str() {
+                            items.push(RolloutTranscriptItem::Assistant(text.into()));
+                        }
+                    }
+                    Some("tool_use") => items.push(RolloutTranscriptItem::Tool {
+                        call_id: block["id"].as_str().unwrap_or_default().into(),
+                        name: block["name"].as_str().unwrap_or_default().into(),
+                        arguments: block["input"].to_string(),
+                        parent_call_id: None,
+                    }),
+                    _ => {} // Never expose signed thinking or binary payloads in the picker/TUI.
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if receipt(message) {
+            for block in blocks(message).filter(|block| block["type"] == "tool_result") {
+                let parent = block["tool_use_id"].as_str().unwrap_or_default();
+                for (cell, call) in children.get(parent).into_iter().flatten() {
+                    let call_id = call["call_id"].as_str().unwrap_or_default();
+                    if !replayed_children.insert(call_id) {
+                        continue;
+                    }
+                    items.push(RolloutTranscriptItem::Tool {
+                        call_id: call_id.into(),
+                        name: call["name"].as_str().unwrap_or_default().into(),
+                        arguments: call["input"].to_string(),
+                        parent_call_id: Some((*cell).into()),
+                    });
+                    let outcome = match outcomes.get(call_id).copied() {
+                        Some("completed") => RolloutToolOutcome::Completed,
+                        Some("failed") => RolloutToolOutcome::Failed,
+                        _ => RolloutToolOutcome::Unknown,
+                    };
+                    items.push(RolloutTranscriptItem::tool_result(call_id, "", outcome));
+                }
+                items.push(RolloutTranscriptItem::tool_result(
+                    parent,
+                    &tool_output(&block["content"]),
+                    if block["is_error"].as_bool() == Some(true) {
+                        RolloutToolOutcome::Failed
+                    } else {
+                        RolloutToolOutcome::Completed
+                    },
+                ));
+            }
+            // User content sharing the receipt message has unknown provenance.
+            let content = blocks(message)
+                .filter(|block| block["type"] != "tool_result")
+                .cloned()
+                .collect::<Vec<_>>();
+            if !content.is_empty() {
+                let shared = serde_json::json!({ "content": content });
+                user_rows(&[&shared], &notices, &mut items);
+            }
+            index += 1;
+            continue;
+        }
+        // One admission writes its hook context, synthetic transcript and
+        // prompt as adjacent user messages; only the admitted prompt is shown.
+        let end = messages[index..]
+            .iter()
+            .position(|message| message["role"].as_str() != Some("user") || receipt(message))
+            .map_or(messages.len(), |offset| index + offset);
+        let run = &messages[index..end];
+        index = end;
+        // An admission writes its hook context and prompt as adjacent user
+        // messages, followed by steering consumed before its first model call.
+        // Several admissions are adjacent when earlier turns produced no
+        // assistant message; each matched prompt is its own user turn.
+        let mut segment = Vec::new();
+        let mut steers = None;
+        for message in run {
+            let parts = prompt_parts(message);
+            let Some(offset) = prompts
+                .get(next_prompt..)
+                .and_then(|rest| rest.iter().position(|prompt| prompt.parts == parts))
+            else {
+                segment.push(message);
+                continue;
+            };
+            match steers {
+                Some(steers) => steer_rows(&segment, steers, &notices, &mut items),
+                // Hook context of the first admission. A skipped journal prompt
+                // leaves this text's provenance unknown, so it stays visible.
+                None if offset == 0 => {}
+                None => user_rows(&segment, &notices, &mut items),
+            }
+            segment.clear();
+            steers = Some(prompts[next_prompt + offset].steers);
+            next_prompt += offset + 1;
+            items.push(RolloutTranscriptItem::User(prompt_display(message)));
+        }
+        // Without a matched admission the provenance is unknown: steering
+        // input, or a prompt whose journal input was not retained. Show it
+        // rather than guess that it was harness text.
+        match steers {
+            Some(steers) => steer_rows(&segment, steers, &notices, &mut items),
+            None => user_rows(&segment, &notices, &mut items),
+        }
+    }
     items
+}
+
+/// Steering is appended after the prompt's hook context, so at most the last
+/// `steers` messages can be steering input; earlier ones are hook context. When
+/// later steers were consumed at a later boundary, the remaining tail is
+/// ambiguous and is kept visible.
+fn steer_rows(
+    segment: &[&Value],
+    steers: usize,
+    notices: &[&str],
+    items: &mut Vec<RolloutTranscriptItem>,
+) {
+    user_rows(
+        &segment[segment.len().saturating_sub(steers)..],
+        notices,
+        items,
+    );
 }
 
 fn clean(value: &str) -> String {
@@ -275,7 +566,7 @@ pub(crate) fn rewind_preview(home: &Path, id: &str) -> Result<Value> {
         return Err(eyre!("unsupported native journal format"));
     }
     // Validate provider and routing metadata using the normal read-only inspector.
-    let _ = inspect(&db, home, id)?;
+    let _ = inspect(&db, home, id, 0)?;
     let mut operations = retained["operations"]
         .as_object()
         .ok_or_else(|| eyre!("invalid operations"))?
