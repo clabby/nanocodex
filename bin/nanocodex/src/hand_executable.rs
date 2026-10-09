@@ -93,6 +93,11 @@ pub(crate) fn hand_binary() -> io::Result<PathBuf> {
         // A build directory or bundle holds nanocodex-hand; an installed
         // version holds the Hand as nanocodex2 beside the CLI.
         candidates.push(running.with_file_name(file_name("nanocodex-hand")));
+        // An installed macOS version runs its Hand from the signed bundle
+        // beside the CLI, so privacy grants attach to the bundle identity.
+        if cfg!(target_os = "macos") {
+            candidates.push(running.with_file_name("Nanocodex.app/Contents/MacOS/nanocodex2"));
+        }
         candidates.push(running.with_file_name(file_name("nanocodex2")));
     }
     if let Some(root) = crate::launcher::running_install_root()
@@ -130,6 +135,20 @@ pub(crate) fn cli_binary() -> io::Result<PathBuf> {
             .and_then(Path::parent)
         {
             candidates.push(version.join(file_name("nanocodex")));
+        }
+        // A Hand stored once per identity (hand-versions/<identity>/nanocodex2
+        // or .../Nanocodex.app/Contents/MacOS/nanocodex2) serves the
+        // installation's active CLI.
+        if let Some(root) = running
+            .ancestors()
+            .find(|directory| {
+                directory
+                    .file_name()
+                    .is_some_and(|name| name == "hand-versions")
+            })
+            .and_then(Path::parent)
+        {
+            candidates.push(root.join("current").join(file_name("nanocodex")));
         }
     }
     candidates

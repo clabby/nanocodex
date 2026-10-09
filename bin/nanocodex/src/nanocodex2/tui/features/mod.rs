@@ -137,6 +137,8 @@ pub(crate) enum FeatureUpdate {
     CloseOverlay,
     /// Close a side pane.
     ClosePane(PaneId),
+    /// Re-read capabilities (a feature became available or unavailable).
+    Capabilities(Capabilities),
     /// Submit a prompt with an optional private instruction and completion receipt.
     SubmitPrompt(FeaturePrompt),
     /// Rebuild the local agent from new launch arguments (harness/model switch

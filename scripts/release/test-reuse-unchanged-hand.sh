@@ -46,11 +46,17 @@ windows=nanocodex2-x86_64-pc-windows-msvc
 app=nanocodex-app-aarch64-apple-darwin.tar.gz
 key() { printf '%s  %s\n' "$(printf '%s' "$1" | sha256sum | awk '{ print $1 }')" "$2"; }
 
-# make_app DIR HAND_BYTES: write DIR/$app containing that Hand.
+# make_app DIR HAND_BYTES [incomplete]: write DIR/$app laid out like
+# macos-sign-hand.sh output. Signing inside a bundle changes the executable,
+# so the bundled bytes differ from the standalone Hand.
 make_app() {
-  mkdir -p "$1/app/Nanocodex.app/Contents/MacOS"
-  printf '%s' "$2" > "$1/app/Nanocodex.app/Contents/MacOS/nanocodex2"
-  tar -czf "$1/$app" -C "$1/app" Nanocodex.app
+  local contents="$1/app/Nanocodex.app/Contents"
+  mkdir -p "$contents/MacOS" "$contents/_CodeSignature"
+  printf '%s' "$2" > "$contents/MacOS/nanocodex2"
+  chmod 755 "$contents/MacOS/nanocodex2"
+  printf '<plist/>' > "$contents/Info.plist"
+  [[ "${3:-}" == incomplete ]] || printf 'sealed' > "$contents/_CodeSignature/CodeResources"
+  COPYFILE_DISABLE=1 tar --no-xattrs -czf "$1/$app" -C "$1/app" Nanocodex.app
   rm -rf "$1/app"
 }
 
@@ -72,7 +78,7 @@ publish_previous() {
   printf 'old-cli' | gzip -n > "$release/nanocodex-x86_64-unknown-linux-gnu.gz"
   printf 'old-windows' > "$release/$windows.exe"
   key same "$windows" > "$release/$windows.identity"
-  make_app "$release" "old-$mac"
+  make_app "$release" "bundle-signed-old-$mac"
   resum "$release"
 }
 
@@ -88,7 +94,7 @@ fresh_dist() {
   printf 'new-cli' | gzip -n > "$work/dist/nanocodex-x86_64-unknown-linux-gnu.gz"
   printf 'new-windows' > "$work/dist/$windows.exe"
   key same "$windows" > "$work/dist/$windows.identity"
-  make_app "$work/dist" "new-$mac"
+  make_app "$work/dist" "bundle-signed-new-$mac"
 }
 
 hand() { gzip -dc "$work/dist/$1.gz"; }
@@ -112,7 +118,7 @@ run v1
 expect "unchanged Linux Hand is reused" "$(hand "$linux")" "old-$linux"
 expect "raw Linux compatibility executable follows" "$(cat "$work/dist/$linux")" "old-$linux"
 expect "unchanged macOS Hand is reused" "$(hand "$mac")" "old-$mac"
-expect "Nanocodex.app is reused with it" "$(app_hand)" "old-$mac"
+expect "Nanocodex.app is reused with it" "$(app_hand)" "bundle-signed-old-$mac"
 expect "CLI is never reused" "$(gzip -dc "$work/dist/nanocodex-x86_64-unknown-linux-gnu.gz")" "new-cli"
 expect "Windows Hand is unsupported" "$(cat "$work/dist/$windows.exe")" "new-windows"
 grep -q "unsupported for x86_64-pc-windows-msvc" "$work/log"
@@ -136,12 +142,13 @@ run v3
 expect "previous Hand failing its checksum is not reused" "$(hand "$linux")" "new-$linux"
 
 publish_previous v4
-make_app "$work/releases/v4" "other-hand"
+make_app "$work/releases/v4" "bundle-signed-old-$mac" incomplete
 resum "$work/releases/v4"
 fresh_dist same same
 run v4
-expect "app without its Hand swaps neither asset (Hand)" "$(hand "$mac")" "new-$mac"
-expect "app without its Hand swaps neither asset (app)" "$(app_hand)" "new-$mac"
+expect "unsealed previous app swaps neither asset (Hand)" "$(hand "$mac")" "new-$mac"
+expect "unsealed previous app swaps neither asset (app)" "$(app_hand)" "bundle-signed-new-$mac"
+grep -q "Nanocodex.app is not a complete signed bundle" "$work/log"
 
 publish_previous v5
 grep -v "$app" "$work/releases/v5/SHA256SUMS" > "$work/releases/v5/sums"
@@ -149,6 +156,7 @@ mv "$work/releases/v5/sums" "$work/releases/v5/SHA256SUMS"
 fresh_dist same same
 run v5
 expect "unlisted previous app is not reused" "$(hand "$mac")" "new-$mac"
+expect "unlisted previous app keeps the new app" "$(app_hand)" "bundle-signed-new-$mac"
 expect "Linux still reuses beside it" "$(hand "$linux")" "old-$linux"
 
 publish_previous v6

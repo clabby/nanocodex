@@ -120,13 +120,19 @@ for identity in "${identities[@]}"; do
       verified=false
     fi
   done
-  # The previous app must carry the very Hand it published standalone.
+  # Both assets come from one checksum manifest, signed together by
+  # macos-sign-hand.sh. The bundled executable carries its own bundle-bound
+  # signature, so it never byte-matches the standalone Hand; require instead
+  # the sealed layout the updater accepts.
   if "$verified" && [[ "$target" == aarch64-apple-darwin ]]; then
     mkdir "$work/assets/app"
-    gzip -dc "$work/assets/$name.gz" > "$work/assets/hand"
+    bundle="$work/assets/app/Nanocodex.app/Contents"
     if ! tar -xzf "$work/assets/nanocodex-app-aarch64-apple-darwin.tar.gz" -C "$work/assets/app" ||
-      ! cmp -s "$work/assets/hand" "$work/assets/app/Nanocodex.app/Contents/MacOS/nanocodex2"; then
-      echo "::warning::$previous Nanocodex.app does not contain its published Hand"
+      [[ "$(ls -A "$work/assets/app")" != Nanocodex.app ]] ||
+      [[ -n "$(find "$work/assets/app" ! -type f ! -type d)" ]] ||
+      [[ ! -f "$bundle/Info.plist" || ! -f "$bundle/_CodeSignature/CodeResources" ]] ||
+      [[ ! -f "$bundle/MacOS/nanocodex2" || ! -x "$bundle/MacOS/nanocodex2" ]]; then
+      echo "::warning::$previous Nanocodex.app is not a complete signed bundle"
       verified=false
     fi
   fi

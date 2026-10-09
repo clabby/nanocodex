@@ -12,6 +12,9 @@ spec = importlib.util.spec_from_file_location('journey', Path(__file__).with_nam
 helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
 require, sse, text_of = helper.require, helper.sse, helper.text_of
 
+import importlib.util as _ilu
+_spec=_ilu.spec_from_file_location('screen_helper', Path(__file__).with_name('claude-scheduler-monitor-cli-journey.py')); screen_helper=_ilu.module_from_spec(_spec); _spec.loader.exec_module(screen_helper)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -33,7 +36,7 @@ else: print('{}')
 ''')
     hooks=artifact/'hooks.json'; hooks.write_text(json.dumps({'hooks':{'PreToolUse':[{'matcher':'Write|Read','hooks':[{'type':'command','command':f'python3 {hook}'}]}]}}))
     env={'HOME':str(home),'CODEX_HOME':str(codex_home),'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','TERM':'xterm-256color','NANOCODEX_COMPUTER':'off'}
-    requests=[]; errors=[]; checks=[]; commands=[]; transcripts={}; processes=[]
+    requests=[]; errors=[]; checks=[]; commands=[]; transcripts={}; screens={}; processes=[]
     phase={'name':'tui','start':0,'steps':[],'children':{},'counts':{}}
     class Provider(BaseHTTPRequestHandler):
         def log_message(self,*_): pass
@@ -61,17 +64,20 @@ else: print('{}')
     def start(command,label):
         master,slave=pty.openpty(); fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',45,170,0,0))
         p=subprocess.Popen(command,stdin=slave,stdout=slave,stderr=slave,cwd=workspace,env=env,start_new_session=True); os.close(slave)
-        processes.append(p); commands.append(command); transcripts[label]=bytearray()
+        processes.append(p); commands.append(command); transcripts[label]=bytearray(); screens[label]=screen_helper.TerminalScreen(rows=45, columns=170)
         def drain():
             while select.select([master],[],[],0)[0]:
                 try: chunk=os.read(master,65536)
                 except OSError: break
                 if not chunk: break
-                transcripts[label].extend(chunk)
+                transcripts[label].extend(chunk); screens[label].feed(chunk)
                 if b'\x1b[6n' in chunk: os.write(master,b'\x1b[1;1R')
         return p,master,drain
     def visible(label,text):
-        plain=re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]',b'',transcripts[label]); return re.sub(rb'\s+',b'',text.encode()) in re.sub(rb'\s+',b'',plain)
+        # Observe rendered cells: differential redraws omit unchanged letters from the byte stream.
+        plain=re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]',b'',transcripts[label])
+        if re.sub(rb'\s+',b'',text.encode()) in re.sub(rb'\s+',b'',plain): return True
+        return re.sub(r'\s+','',text) in re.sub(r'\s+','',screens[label].text())
     def wait(check,drain,message,timeout=30):
         end=time.monotonic()+timeout
         while time.monotonic()<end:
@@ -100,7 +106,7 @@ else: print('{}')
         require(visible('tui','Exact input'),'exact input missing'); os.write(fd,b'\r'); pending(3,drain)
         os.write(fd,b'deny\r'); wait(lambda:len(requests)==4 and visible('tui','ask-approve.txt'),drain,'next approval absent'); pending(4,drain)
         os.write(fd,b'approve\r'); wait(lambda:len(requests)==5 and visible('tui','ask-cancel.txt'),drain,'cancel approval absent'); pending(5,drain)
-        os.write(fd,b'/cancel\r'); wait(lambda:visible('tui','tui-permissions-complete'),drain,'TUI final missing'); os.write(fd,b'\x03')
+        os.write(fd,b'/cancel\r'); wait(lambda:visible('tui','tui-permissions-complete'),drain,'TUI final missing'); os.write(fd,b'\x03\x03')
         wait(lambda:p.poll() is not None,drain,'TUI exit stuck',timeout=10); drain(); os.close(fd)
         require((workspace/'ask-approve.txt').read_text()=='approved-ask-approve.txt','approved call not dispatched')
         require((workspace/'allowed.txt').exists(),'allow rule failed')

@@ -49,6 +49,7 @@ pub(crate) struct LocalBackend {
     pub(crate) model: HarnessModel,
     pub(crate) workspace: PathBuf,
     pub(crate) parts: LocalParts,
+    capabilities: Capabilities,
     /// Visible history of a resumed session, replayed once on connect.
     pub(crate) transcript: Vec<nanocodex::agent::rollout::RolloutTranscriptItem>,
     mpp_adapter: Option<crate::mpp::MppAdapter>,
@@ -78,7 +79,11 @@ impl LocalBackend {
             vm,
             model,
         } = agent;
+        let mut capabilities = Capabilities::LOCAL;
+        capabilities.voice_realtime = realtime.is_some();
+        capabilities.claude_host = matches!(model.family(), nanocodex::HarnessFamily::Claude);
         let backend = Self {
+            capabilities,
             launch,
             handle,
             model,
@@ -110,10 +115,7 @@ impl LocalBackend {
 
     /// Feature visibility for this agent.
     pub(crate) fn capabilities(&self) -> Capabilities {
-        let mut capabilities = Capabilities::LOCAL;
-        capabilities.voice_realtime = self.parts.realtime.is_some();
-        capabilities.claude_host = matches!(self.model.family(), nanocodex::HarnessFamily::Claude);
-        capabilities
+        self.capabilities
     }
 
     /// Releases subagents, browser, VM and MPP resources (legacy shutdown_runtime).

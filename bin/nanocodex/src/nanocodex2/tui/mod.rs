@@ -3347,8 +3347,10 @@ async fn run_inner(
                         }
                         ConnectionResult::Agent { purpose, result: Ok((agent, managed_events, agent_id, workspace, history, warning, settings, created, active_turns)) } => {
                             if let Some(local) = &mut runtime.local {
-                                let capabilities = local.capabilities();
-                                local.adopt(capabilities).await;
+                                local.adopt().await;
+                                if let Some(root) = app.root_mut(PaneId::Main) {
+                                    root.set_capabilities(local.capabilities());
+                                }
                             }
                             if matches!(purpose, ConnectionPurpose::Bug(_)) {
                                 runtime.detach_bug_source();
@@ -4355,6 +4357,13 @@ async fn apply_feature_update(
         }
         // FEATURE-HOOK: wp2 /collapse and /split close the local side pane.
         FeatureUpdate::ClosePane(pane) => app.close_fork(pane),
+        FeatureUpdate::Capabilities(capabilities) => {
+            if let Some(root) = app.root_mut(PaneId::Main) {
+                root.set_capabilities(capabilities);
+            }
+            scheduler.request_immediate(Instant::now());
+            return Ok(false);
+        }
     };
     apply_update(update, app, runtime, terminal, scheduler).await
 }
@@ -4600,7 +4609,13 @@ async fn apply_update(
                             local.with_features(|features, cx| features.command(pane, &command, cx))
                         });
                         if !handled {
-                            absorb(app.update(AppEvent::NotifyError { pane, error: "This command needs a local agent (run ncl)".into() }), &mut effects, scheduler);
+                            let error = match &command {
+                                features::FeatureCommand::RealtimeVoice(arguments) => crate::nanocodex2::voice::Command::parse(arguments)
+                                    .err()
+                                    .unwrap_or_else(|| "This /voice command needs a local agent (run ncl)".into()),
+                                _ => "This command needs a local agent (run ncl)".into(),
+                            };
+                            absorb(app.update(AppEvent::NotifyError { pane, error }), &mut effects, scheduler);
                         }
                     }
                     RootEffect::Voice(command) if runtime.local.is_some() => {
