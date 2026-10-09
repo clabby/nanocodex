@@ -48,7 +48,10 @@ impl Feature for Subagents {
             return;
         };
         let next = {
-            let mut completions = self.completions.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut completions = self
+                .completions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let session = agent.session_id();
             completions.retain(|(root, _)| root == session);
             completions.pop_front()
@@ -99,7 +102,9 @@ async fn forward(
                 let done = completed.entry(root.clone()).or_default();
                 if matches!(status, AgentStatus::Completed { .. }) {
                     if done.insert(*id)
-                        && direct_children.get(&root).is_some_and(|children| children.contains(id))
+                        && direct_children
+                            .get(&root)
+                            .is_some_and(|children| children.contains(id))
                     {
                         completions
                             .lock()

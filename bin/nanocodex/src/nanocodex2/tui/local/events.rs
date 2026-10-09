@@ -26,6 +26,13 @@ impl Submissions {
             .push_back(request_id);
     }
 
+    pub(crate) fn remove(&self, request_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|pending| pending != request_id);
+    }
+
     fn pop(&self) -> Option<String> {
         self.0
             .lock()

@@ -1444,6 +1444,9 @@ impl DriverRuntime {
     }
 
     fn start_history_prefetch(&mut self, pane: PaneId) {
+        if self.local.is_some() {
+            return;
+        }
         if (self.history_tree_open && self.history_tree_failed)
             || !self.history_loads.is_empty()
             || !self.history_replays.is_empty()
@@ -3565,6 +3568,12 @@ async fn run_inner(
                                 runtime.clone_panel = None;
                                 request_render(app.update(AppEvent::VoiceStatus(None)), &mut scheduler);
                             }
+                            tracing::info!(
+                                pid = std::process::id(),
+                                session.id = %agent_id,
+                                workspace = %workspace.display(),
+                                "TUI session connected"
+                            );
                             runtime.agent_id = agent_id;
                             runtime.settings = settings;
                             runtime.workspace = workspace;
@@ -3985,7 +3994,12 @@ async fn run_inner(
                             }
                         }
                         Err(error) => {
-                            runtime.local_managed_turns.remove(&id);
+                            if let Some(request_id) = runtime.local_managed_turns.remove(&id)
+                                && let Some(local) = &runtime.local
+                            {
+                                local.submissions.remove(&request_id);
+                                runtime.submitted_turns.remove(&request_id);
+                            }
                             runtime.local_terminal_turns.remove(&id);
                             let record = runtime.local_record(LocalEvent::WorkerTurnFinished {
                                 id,
@@ -4029,7 +4043,7 @@ async fn run_inner(
                 }
                 if let Some(result) = result {
                     let (pane, id, outcome) = result.map_err(|error| ManagedError::Configuration(format!("turn task failed: {error}")))?;
-                    if outcome.as_ref().is_err_and(connection_failure) {
+                    if runtime.local.is_none() && outcome.as_ref().is_err_and(connection_failure) {
                         runtime.begin_recovery(&mut app, &mut scheduler, true);
                         continue;
                     }
