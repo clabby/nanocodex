@@ -224,7 +224,9 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
         if (disposed) throw new Error('Claude tool host is disposed');
         if (!sessionId || !turnId || !callId) throw new Error('Claude tools require session, turn and call identities');
         beginCodeTurn(sessionId, turnId);
-        // Results arrive whole; this host never drains the per-call update stream.
+        // Live consumers drain updates while the cell runs. The final receipt
+        // covers any tail still queued when execution settles; discard that
+        // tail so delivered payloads cannot stay retained for the session.
         try {
           if (name === 'exec') {
             const input = JSON.parse(encodedInput);
