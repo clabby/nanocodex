@@ -16,9 +16,14 @@ pub const NATIVE_LAUNCHER_MARKER: &[u8] = b"NANOCODEX_NATIVE_LAUNCHER_V1";
 
 #[allow(dead_code)] // Only the legacy binary installs launchers.
 pub fn supports_native_launcher(contents: &[u8]) -> bool {
-    contents
-        .windows(NATIVE_LAUNCHER_MARKER.len())
-        .any(|window| window == NATIVE_LAUNCHER_MARKER)
+    contains_marker(contents, NATIVE_LAUNCHER_MARKER)
+}
+
+/// Whether an executable's bytes contain a capability marker. Uses a SIMD
+/// substring search: activation scans whole CLI and Hand executables, where a
+/// byte-window comparison dominated update time in unoptimized builds.
+pub fn contains_marker(contents: &[u8], marker: &[u8]) -> bool {
+    memchr::memmem::find(contents, marker).is_some()
 }
 
 pub fn initialize_install_root() {

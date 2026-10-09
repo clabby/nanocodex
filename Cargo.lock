@@ -5925,6 +5925,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "memchr",
  "nanocodex",
  "nanocodex-cli-auth",
  "nanocodex-computer",

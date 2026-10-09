@@ -23,9 +23,7 @@ const HAND_IDENTITY_FILE: &str = "hand-identity";
 pub(crate) const UNIFIED_CLI_MARKER: &[u8] = b"NANOCODEX_UNIFIED_CLI_V1";
 
 fn is_unified_cli(contents: &[u8]) -> bool {
-    contents
-        .windows(UNIFIED_CLI_MARKER.len())
-        .any(|window| window == UNIFIED_CLI_MARKER)
+    crate::launcher::contains_marker(contents, UNIFIED_CLI_MARKER)
 }
 
 #[cfg(windows)]
@@ -972,20 +970,30 @@ exec "$install_root/current/nanocodex" "$@"
         use crate::hand_executable::{HAND_COMMAND_ALIASES, HAND_COMMAND_ALIASES_MARKER};
         const APP_HAND: &str = "Nanocodex.app/Contents/MacOS/nanocodex2";
         let selected = self.version_dir(key);
-        let serves_aliases = |relative: &str| {
-            fs::read(selected.join(relative)).is_ok_and(|contents| {
-                contents
-                    .windows(HAND_COMMAND_ALIASES_MARKER.len())
-                    .any(|window| window == HAND_COMMAND_ALIASES_MARKER)
-            })
+        let serves_aliases = |contents: &[u8]| {
+            crate::launcher::contains_marker(contents, HAND_COMMAND_ALIASES_MARKER)
         };
-        let hand = if cfg!(target_os = "macos") && serves_aliases(APP_HAND) {
-            Some(APP_HAND)
-        } else if file_matches_checksum(
-            &selected.join(NANOCODEX2_BINARY_NAME),
-            &selected.join(NANOCODEX2_CHECKSUM_FILE),
-        )? && serves_aliases(NANOCODEX2_BINARY_NAME)
+        // Read each Hand once: its checksum and capability come from one copy.
+        let checksummed_hand = || -> Result<Option<Vec<u8>>> {
+            let expected = match fs::read_to_string(selected.join(NANOCODEX2_CHECKSUM_FILE)) {
+                Ok(expected) => expected.trim().to_ascii_lowercase(),
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error).wrap_err("failed to read the Hand checksum"),
+            };
+            match fs::read(selected.join(NANOCODEX2_BINARY_NAME)) {
+                Ok(contents) if hex::encode(Sha256::digest(&contents)) == expected => {
+                    Ok(Some(contents))
+                }
+                Ok(_) => Ok(None),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error).wrap_err("failed to read the selected Hand"),
+            }
+        };
+        let hand = if cfg!(target_os = "macos")
+            && fs::read(selected.join(APP_HAND)).is_ok_and(|contents| serves_aliases(&contents))
         {
+            Some(APP_HAND)
+        } else if checksummed_hand()?.is_some_and(|contents| serves_aliases(&contents)) {
             Some(NANOCODEX2_BINARY_NAME)
         } else {
             None

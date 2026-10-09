@@ -105,7 +105,9 @@ const provenance = (stdout, what) => development ? plainBuild(stdout, what) : on
 // Help structure distinguishes the trees: the managed tree takes only a
 // command (no top-level options), while only the local tree has `auth`.
 const managedHelp = /^Usage: \S+ \[COMMAND\]$/m;
+// The Hand Identity line of the candidate Hand, '' for a plain development pair.
 let expectedHandIdentity = '';
+const lexists = path => { try { lstatSync(path); return true; } catch { return false; } };
 const localHelp = /^\s+auth\s/m;
 function checkAliases(root, revision, label) {
   for (const alias of ['nanocodex', 'nanocodex2', 'nc', 'ncl']) {
@@ -128,6 +130,16 @@ function checkAliases(root, revision, label) {
   const handTarget = process.platform === 'darwin'
     ? join('..', 'current', 'Nanocodex.app', 'Contents', 'MacOS', 'nanocodex2')
     : join('..', 'current', 'nanocodex2');
+  // An older Hand kept from a live owner (CLI-only update) cannot serve the
+  // names, so the updater must publish none rather than a wrong command.
+  if (!readFileSync(join(root, handTarget.replace('..', '.'))).includes('NANOCODEX_HAND_COMMAND_ALIASES_V1')) {
+    for (const alias of ['nanocodex-hand', 'nc-hand']) {
+      assert.ok(!existsSync(join(root, 'bin', alias)) && !lexists(join(root, 'bin', alias)),
+        `${label}: the active Hand predates the aliases, so bin/${alias} must be absent`);
+    }
+    trace.push(`PASS ${label}: the active Hand predates nanocodex-hand/nc-hand; neither link is published`);
+    return;
+  }
   for (const alias of ['nanocodex-hand', 'nc-hand']) {
     const link = join(root, 'bin', alias);
     assert.equal(readlinkSync(link), handTarget, `${label}: bin/${alias} must link the Hand`);
