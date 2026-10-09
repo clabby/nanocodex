@@ -236,6 +236,7 @@ import {
 import { persistEventStreamFailure } from "./event-stream-failure";
 import { watchManagedAgentFamilyEvents } from "./agent-event-watcher";
 import { createToolLifecycleObserver } from "./tool-observation";
+import { OpenToolCalls } from "./open-tool-calls";
 import { traceToolInvocation } from "./tool-tracing";
 import { DiagnosticJournal, diagnosticQuery, diagnosticScope } from "./diagnostic-journal";
 import {
@@ -4196,6 +4197,8 @@ export class DurableAgentSession extends DurableComputerObject {
   #presentation?: AgentPresentationWriter;
   #events?: EventWatcher;
   #eventLog!: DurableEventLog<StreamMessage>;
+  #openToolCalls!: OpenToolCalls;
+  #finishedRunAgent: number | undefined;
   #eventArchive!: ManagedEventArchive<StreamMessage>;
   #eventArchiveTask?: Promise<ManagedEventSealResult>;
   #archiveMaintenance!: ArchiveMaintenance;
@@ -4520,7 +4523,11 @@ export class DurableAgentSession extends DurableComputerObject {
       .toArray().some(({ name }) => name === "source_cursor")) {
       this.ctx.storage.sql.exec("ALTER TABLE history_projection_outbox ADD COLUMN source_cursor TEXT NOT NULL DEFAULT '0'");
     }
-    this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage, event => this.#operations.record(event, this.#sessionId()));
+    this.#openToolCalls = new OpenToolCalls(this.ctx.storage);
+    this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage, event => {
+      this.#operations.record(event, this.#sessionId());
+      this.#finishedRunAgent = this.#openToolCalls.observe(event) ?? this.#finishedRunAgent;
+    });
     this.#codeEffectJournal = createManagedCodeEffectJournal(this.ctx.storage);
     this.#eventArchive = new ManagedEventArchive<StreamMessage>(
       this.ctx.storage,
@@ -9854,6 +9861,7 @@ export class DurableAgentSession extends DurableComputerObject {
       this.ctx.storage.sql.exec("DELETE FROM history_projection_outbox");
       this.ctx.storage.sql.exec("DELETE FROM turn_history_citations");
       this.#eventLog.clear();
+      this.#openToolCalls.clear();
       this.#eventArchive.clearLocalState();
       this.#turnArchive.clearLocalState();
       this.#realtimeArchive.clearLocalState();
@@ -13375,6 +13383,7 @@ A direct subagent completed after the previous turn ended. Continue the current 
         return this.#eventLog.append(message, turnId);
       });
       this.#publish(event);
+      this.#settleAbandonedToolCalls();
       if (turnId && message.type === "event" && ["model.call.completed", "model.compaction.completed"].includes(message.event.type)) {
         const goal = this.#goalRuntime.flush(turnId);
         if ((goal?.status === "budgetLimited" || goal?.status === "usageLimited") && this.#managedTurn(turnId)?.state === "accepted") {
@@ -13385,6 +13394,22 @@ A direct subagent completed after the previous turn ended. Continue the current 
     } catch (error) {
       this.#failEventStream(error);
     }
+  }
+
+  /** After a child's run in this isolate finishes, a previous isolate's calls
+   * it did not replay can never report: publish their unknown-outcome results
+   * right after that run terminal, before any later event is recorded. */
+  #settleAbandonedToolCalls(): void {
+    const agent = this.#finishedRunAgent;
+    this.#finishedRunAgent = undefined;
+    if (agent === undefined) return;
+    const abandoned = this.#openToolCalls.abandoned(agent);
+    if (abandoned.length === 0) return;
+    const events = this.ctx.storage.transactionSync(() =>
+      abandoned.map(({ message, turnId }) => this.#eventLog.append(message, turnId)));
+    this.#finishedRunAgent = undefined;
+    for (const event of events) this.#publish(event);
+    console.info({ type: "managed.tool_calls.abandoned", count: events.length });
   }
 
   #flushStagedDelta(): void {
