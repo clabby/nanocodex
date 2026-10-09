@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check legacy TUI log destinations using the real CLI and isolated homes.
+"""Check local TUI log destinations using the real CLI and isolated homes.
 
 python3 scripts/tests/tui-log-location-journey.py --binary target/debug/nanocodex
 Terminal transcripts and log files remain in ignored output/ for inspection.
