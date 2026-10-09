@@ -230,7 +230,10 @@ async fn private_subscription_connect_catalog_and_disconnect_journey() {
             serde_json::from_value::<ManagedModel>(json!(native.as_str())).unwrap(),
             model
         );
-        assert_eq!(nanocodex_managed::HarnessModel::from(model), native.into());
+        assert_eq!(
+            nanocodex_managed::HarnessModel::from(model),
+            nanocodex_managed::HarnessModel::Claude(native)
+        );
         assert!(model.supports_thinking(model.default_thinking()));
     }
     state.lock().unwrap().partial = true;
