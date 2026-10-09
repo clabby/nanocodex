@@ -1,19 +1,19 @@
 //! Local sessions, branches and side threads through the shipped CLI in tmux.
+#![cfg(target_os = "linux")]
 #[path = "support/local_cli.rs"]
 mod local_cli;
 use local_cli::local_cli;
 
-#[cfg(target_os = "linux")]
 #[test]
 fn ncl_sessions_journey() {
-    if std::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_err()
-    {
-        eprintln!("skipping: the ncl sessions journey drives a real tmux terminal");
-        return;
-    }
+    assert!(
+        std::process::Command::new("tmux")
+            .arg("-V")
+            .status()
+            .expect("tmux is required for the local sessions journey")
+            .success(),
+        "tmux must be runnable for the local sessions journey"
+    );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = std::process::Command::new("python3")
         .current_dir(&root)

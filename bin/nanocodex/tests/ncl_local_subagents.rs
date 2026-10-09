@@ -1,4 +1,5 @@
 //! Real ncl over a PTY with real Code Mode and child registry; only Messages inference is synthetic.
+#![cfg(unix)]
 #[path = "support/local_cli.rs"]
 mod local_cli;
 use local_cli::local_cli;
