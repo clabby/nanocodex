@@ -42,7 +42,10 @@ export class OriginAgentSession extends DurableAgentSession {
       const statuses=competitors.map(response=>response.status);
       const response=await first;
       console.info({type:'fixture.admission_race',statuses,winner:response.status});
-      if(statuses.some(status=>status!==409)) throw Error('competing admission was not fenced');
+      // Live admission commits ownership and initialization in one synchronous
+      // batch, so competitors observe either its reservation or the admitted
+      // session. None may initialize or claim the object.
+      if(statuses[0]!==409||statuses.some(status=>status<400)) throw Error('competing admission was not fenced');
       return response;
     }
     if(url.pathname==='/fixture-origin-state') {
@@ -404,7 +407,8 @@ test(originOnly ? "cold authorized Hand origin and admission replay through acco
     const ready=await waitMessage(message=>message.type==='ready'),liveTurn=crypto.randomUUID();
     assert.equal(upgradeStatus,101,'prepared live request upgrades while fresh discovery is held');
     const admissionRace=records.find(row=>row.type==='fixture.admission_race');
-    assert.deepEqual(admissionRace?.statuses,[409,409,409],'live, fused and standalone admissions lose to the reserved create');
+    assert.equal(admissionRace?.statuses[0],409,'a competing live create loses to the admitted create');
+    assert.ok(admissionRace.statuses.every(status=>status>=400),'fused and standalone admissions never initialize the admitted object');
     assert.equal(admissionRace.winner,101);
     evidence.admission_race=admissionRace;
     const admitted=await call(`/v1/agents/${ready.session_id}`,"GET",undefined,200,liveToken);
