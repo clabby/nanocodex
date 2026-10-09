@@ -143,9 +143,16 @@ pub(crate) fn with_client_context(
     let hand = machine.as_ref().map(|id| format!("user:{id}"));
     let cwd = machine.as_ref().map(|id| format!("/{id}"));
     let client = client.with_request_origin("nanocodex2", hand.as_deref(), cwd.as_deref())?;
-    let workspace = workspace
-        .to_str()
-        .ok_or_else(|| error("The current directory must be valid UTF-8"))?;
+    // JSON turn context cannot carry a non-UTF-8 path exactly, and a lossy
+    // path would describe (and route commands to) a different directory. Omit
+    // the descriptive hint; the session itself stays usable.
+    let Some(workspace) = workspace.to_str() else {
+        tracing::warn!(
+            workspace = %workspace.display(),
+            "native working directory is not UTF-8; omitting it from turn context"
+        );
+        return Ok(client);
+    };
     client.with_native_cwd(workspace)
 }
 
