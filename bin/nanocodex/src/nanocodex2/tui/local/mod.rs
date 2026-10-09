@@ -79,12 +79,23 @@ impl super::DriverRuntime {
         let Some(local) = self.local.as_mut() else {
             return Err("no local session".to_owned());
         };
-        local.launch = match session {
-            Some(id) => {
-                sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?
-            }
+        let launch = match session {
+            Some(id) => sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?,
             None => sessions::fresh(&local.launch),
         };
+        self.local_switch(purpose, launch)
+    }
+
+    /// Replaces the local agent with one built from `launch` (branch switch/edit).
+    pub(super) fn local_switch(
+        &mut self,
+        purpose: super::ConnectionPurpose,
+        launch: agent::LocalLaunch,
+    ) -> Result<tokio::task::AbortHandle, String> {
+        let Some(local) = self.local.as_mut() else {
+            return Err("no local session".to_owned());
+        };
+        local.launch = launch;
         let connecting = local.connect();
         Ok(self.connection.spawn(async move {
             super::ConnectionResult::Agent {
@@ -133,7 +144,10 @@ impl LocalState {
                 session_id: backend.handle.session_id().to_string(),
                 workspace: backend.workspace.clone(),
                 settings: local_settings(&backend),
-                history: sessions::history_window(&backend.transcript, backend.handle.session_id()),
+                history: sessions::history_window(
+                    &backend.transcript,
+                    backend.handle.session_id(),
+                ),
             };
             let replaced = slot
                 .lock()
@@ -177,6 +191,18 @@ impl LocalState {
                 _marker: std::marker::PhantomData,
             },
         );
+        // A branch edit submits its edited prompt once, on the new agent.
+        if let Some(sessions::Resume::Branch { prompt, .. }) = backend.launch.resume.as_mut() {
+            let text = std::mem::take(prompt);
+            if !text.is_empty() {
+                self.features
+                    .host()
+                    .send(super::features::FeatureUpdate::Submit { pane: None, text });
+            }
+        }
+        if let Some(sessions::Resume::Branch { prompt, .. }) = self.launch.resume.as_mut() {
+            prompt.clear();
+        }
         self.backend = Some(backend);
     }
 
@@ -224,11 +250,7 @@ impl LocalState {
         if let Some(bridge) = self.bridge.take() {
             bridge.abort();
         }
-        let pending = self
-            .slot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let pending = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let Some((backend, bridge)) = pending {
             bridge.abort();
             backend.shutdown().await?;

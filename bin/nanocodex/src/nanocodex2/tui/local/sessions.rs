@@ -37,6 +37,12 @@ use crate::nanocodex2::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Resume {
     Codex(String),
+    /// A branch started by editing an earlier prompt: reopen `thread` (None: a
+    /// fresh session) and submit `prompt` once it connects.
+    Branch {
+        thread: Option<String>,
+        prompt: String,
+    },
 }
 
 /// The harness that owns a saved session.
@@ -268,7 +274,7 @@ pub(crate) struct Built {
 /// Builds the local agent for `launch`, reopening its saved session if any.
 pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
     match &launch.resume {
-        Some(Resume::Codex(thread_id)) => {
+        Some(Resume::Codex(thread_id) | Resume::Branch { thread: Some(thread_id), .. }) => {
             let home = crate::config::default_codex_home()?;
             let session = RolloutConfig::new(&home)
                 .load_session(thread_id)
@@ -287,7 +293,7 @@ pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
                 transcript,
             })
         }
-        None => {
+        None | Some(Resume::Branch { thread: None, .. }) => {
             let workspace = launch.args.cwd().to_path_buf();
             let transcript = launch
                 .args

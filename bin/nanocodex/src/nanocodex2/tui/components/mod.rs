@@ -5,6 +5,8 @@
 
 mod actions;
 mod app;
+// FEATURE-HOOK: wp2 branch navigator overlay.
+mod branch_navigator;
 mod code_review;
 mod composer;
 mod context_diagnostics;
@@ -30,6 +32,7 @@ mod transcript;
 mod waved_text;
 
 pub(crate) use app::{AppEffect, AppEvent, AppNode};
+pub(crate) use branch_navigator::BranchNavigator;
 pub(crate) use interaction::{InteractionOutcome, InteractionOverlay};
 pub(crate) use node::{ComponentUpdate, RenderRequest};
 pub(crate) use queue::QueueId;
