@@ -16,6 +16,7 @@ mod editor;
 mod format;
 mod history;
 mod links;
+mod notification; // FEATURE-HOOK: wp3
 mod pane;
 mod private_input;
 mod prompt;
@@ -31,12 +32,11 @@ mod shell;
 mod sites;
 mod spinner;
 mod sudo_input;
+mod telemetry; // FEATURE-HOOK: wp3
 mod terminal;
 mod theme;
-mod telemetry; // FEATURE-HOOK: wp3
 mod tmux;
 mod transcript;
-mod notification; // FEATURE-HOOK: wp3
 mod vault;
 mod voice_clone;
 
@@ -2130,7 +2130,8 @@ impl Wp3Hooks {
             screen: focused.is_none(),
         };
         self.view.observe(session_id, &view);
-        self.stream.presented(session_id, &view, render_started, draw);
+        self.stream
+            .presented(session_id, &view, render_started, draw);
         let busy = |pane: Option<PaneId>| {
             pane.and_then(|pane| app.root(pane))
                 .is_some_and(RootNode::has_active_turns)

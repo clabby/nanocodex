@@ -57,7 +57,12 @@ impl Received {
 
     /// A local agent event. Local turns supply their own monotonic timing,
     /// which this boundary reports relative to receipt.
-    pub(crate) fn local(kind: &'static str, turn_id: Option<&str>, terminal: bool, payload_bytes: usize) -> Self {
+    pub(crate) fn local(
+        kind: &'static str,
+        turn_id: Option<&str>,
+        terminal: bool,
+        payload_bytes: usize,
+    ) -> Self {
         Self {
             kind,
             turn_id: turn_id.map(Arc::from),
@@ -359,4 +364,3 @@ fn unix_now_ns() -> u64 {
         .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
         .unwrap_or_default()
 }
-

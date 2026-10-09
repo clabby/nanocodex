@@ -73,15 +73,25 @@ pub(crate) fn start() {
 
 /// Stops renderer workers. A later [start] can initialize again.
 pub(crate) fn shutdown() {
-    if let Some(renderer) = RENDERER.lock().unwrap_or_else(PoisonError::into_inner).take() {
+    if let Some(renderer) = RENDERER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+    {
         renderer.shutdown();
     }
     STARTED.store(false, Ordering::Release);
 }
 
 /// Terminal uploads queued by the renderer, in order. Write before the frame.
-pub(crate) fn drain_commands(mut write: impl FnMut(&[u8]) -> std::io::Result<()>) -> std::io::Result<u64> {
-    let commands = match RENDERER.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+pub(crate) fn drain_commands(
+    mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
+) -> std::io::Result<u64> {
+    let commands = match RENDERER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
         Some(renderer) => renderer.drain_terminal_commands(),
         None => return Ok(0),
     };
@@ -96,7 +106,11 @@ pub(crate) fn drain_commands(mut write: impl FnMut(&[u8]) -> std::io::Result<()>
 /// Re-sends every ready image after the terminal may have dropped them
 /// (focus return through tmux, or an external editor on the alternate screen).
 pub(crate) fn reupload_all() {
-    if let Some(renderer) = RENDERER.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+    if let Some(renderer) = RENDERER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
         renderer.reupload_all();
     }
 }
@@ -122,7 +136,10 @@ pub(super) fn deadline(now: Instant) -> Option<Instant> {
 
 pub(super) enum Rendered {
     /// One placeholder span per terminal row.
-    Ready { rows: Vec<Span<'static>>, columns: u16 },
+    Ready {
+        rows: Vec<Span<'static>>,
+        columns: u16,
+    },
     /// Show the source text. Pending formulas re-layout once their image is ready.
     Source { pending: bool },
 }
@@ -299,12 +316,18 @@ fn detect() -> TerminalProfile {
     let cell = client
         .as_ref()
         .and_then(|client| client.cell)
-        .or_else(|| crossterm::terminal::window_size().ok().and_then(window_cell))
+        .or_else(|| {
+            crossterm::terminal::window_size()
+                .ok()
+                .and_then(window_cell)
+        })
         .unwrap_or_default();
     let kitty = match env::var("NANOCODEX_TUI_GRAPHICS").ok().as_deref() {
         Some("kitty") => true,
         Some("off") => false,
-        _ if tmux => client.as_ref().is_some_and(|client| kitty_hint(&client.term)),
+        _ if tmux => client
+            .as_ref()
+            .is_some_and(|client| kitty_hint(&client.term)),
         _ => env::var("TERM_PROGRAM")
             .ok()
             .into_iter()
@@ -379,4 +402,3 @@ fn tmux_client() -> Option<TmuxClient> {
         .map(|(width, height)| PixelSize::new(width, height));
     Some(TmuxClient { term, cell })
 }
-

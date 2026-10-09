@@ -31,8 +31,10 @@ fn hand_version() -> &'static str {
     VERSION.get_or_init(|| {
         let mut version = format!("Version: {}", env!("CARGO_PKG_VERSION"));
         if let Some(identity) = HAND_IDENTITY.filter(|identity| !identity.is_empty()) {
-            version.push_str("
-Hand Identity: ");
+            version.push_str(
+                "
+Hand Identity: ",
+            );
             version.push_str(identity);
         }
         version
@@ -115,8 +117,12 @@ fn try_main(arguments: Vec<OsString>) -> Result<(), ManagedError> {
     // A service validator must probe the Hand itself. A CLI path forwards
     // here marked as forwarded; refusing it keeps a CLI from passing as a Hand.
     if crate::hand_executable::forwarded()
-        && arguments.get(1).is_some_and(|argument| argument == "__device-hand")
-        && arguments.iter().any(|argument| argument == "--service-protocol")
+        && arguments
+            .get(1)
+            .is_some_and(|argument| argument == "__device-hand")
+        && arguments
+            .iter()
+            .any(|argument| argument == "--service-protocol")
     {
         return Err(ManagedError::Configuration(
             "the Hand service protocol is answered only by the Hand executable itself, not through the nanocodex CLI".into(),

@@ -2,9 +2,7 @@
 
 use std::{io::Cursor, path::PathBuf};
 
-#[path = "../clipboard.rs"]
-mod text;
-pub(super) use text::copy_to_clipboard;
+pub(super) use crate::clipboard::copy_to_clipboard;
 
 pub(super) fn paste_image_to_temp_png() -> Result<PathBuf, String> {
     let mut clipboard =

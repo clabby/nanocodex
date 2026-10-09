@@ -64,7 +64,12 @@ impl Notifier {
 
     /// Called after each presented frame with main and side-pane activity.
     /// A pane that stops working while the terminal is unfocused notifies once.
-    pub(crate) fn after_frame(&mut self, terminal: &mut TerminalSession, main_busy: bool, btw_busy: bool) {
+    pub(crate) fn after_frame(
+        &mut self,
+        terminal: &mut TerminalSession,
+        main_busy: bool,
+        btw_busy: bool,
+    ) {
         for (index, (busy, scope)) in [(main_busy, "Nanocodex"), (btw_busy, "Nanocodex BTW")]
             .into_iter()
             .enumerate()
@@ -115,4 +120,3 @@ fn notification_bytes(backend: Backend, tmux: bool, message: &str) -> Vec<u8> {
     let escaped = sequence.replace('\x1b', "\x1b\x1b");
     format!("\x1bPtmux;{escaped}\x1b\\").into_bytes()
 }
-
