@@ -19,6 +19,7 @@ mod format;
 mod history;
 mod links;
 pub(crate) mod local;
+mod notification;
 mod pane;
 mod private_input;
 mod prompt;
@@ -34,6 +35,7 @@ mod shell;
 mod sites;
 mod spinner;
 mod sudo_input;
+mod telemetry; // FEATURE-HOOK: wp3
 mod terminal;
 mod theme;
 mod tmux;
@@ -2192,6 +2194,58 @@ async fn reconnect_agent(
     Ok(connected)
 }
 
+/// Renderer telemetry and completion notifications shared by every TUI driver.
+pub(crate) struct Wp3Hooks {
+    stream: telemetry::StreamTelemetry,
+    view: telemetry::ViewTelemetry,
+    pub(crate) notifier: notification::Notifier,
+}
+
+impl Wp3Hooks {
+    pub(crate) fn new() -> Self {
+        Self {
+            stream: telemetry::StreamTelemetry::default(),
+            view: telemetry::ViewTelemetry::default(),
+            notifier: notification::Notifier::from_env(),
+        }
+    }
+
+    /// Record one agent event as it reaches the TUI, before it is applied.
+    pub(crate) fn received(&mut self, session_id: &str, event: telemetry::Received) {
+        if event.kind() == "turn.failed" {
+            self.notifier.turn_failed();
+        }
+        self.stream.received(session_id, event);
+    }
+
+    /// After every presented frame: frame cost, view changes and notifications.
+    pub(crate) fn presented(
+        &mut self,
+        app: &AppNode,
+        terminal: &mut TerminalSession,
+        session_id: &str,
+        render_started: Instant,
+        draw: terminal::DrawMetrics,
+    ) {
+        let main = app.main_pane();
+        let fork = app.fork_pane();
+        let focused = app.focused_pane();
+        let view = telemetry::ViewState {
+            split: fork.is_some(),
+            focus_main: focused.is_some() && focused == main,
+            screen: focused.is_none(),
+        };
+        self.view.observe(session_id, &view);
+        self.stream
+            .presented(session_id, &view, render_started, draw);
+        let busy = |pane: Option<PaneId>| {
+            pane.and_then(|pane| app.root(pane))
+                .is_some_and(RootNode::has_active_turns)
+        };
+        self.notifier.after_frame(terminal, busy(main), busy(fork));
+    }
+}
+
 pub(crate) async fn run(
     client: &ManagedClient,
     agent_id: Option<String>,
@@ -2258,9 +2312,11 @@ async fn run_inner(
     let mut app = AppNode::new(Theme::default(), workspace.clone(), root);
     let mut reload: Option<crate::nanocodex2::reload::Registration> = None;
     let mut reload_requested = false;
+    let _observability = telemetry::install_observability(); // FEATURE-HOOK: wp3
     let mut terminal = TerminalSession::enter().await.map_err(terminal_error)?;
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
+    let mut wp3 = Wp3Hooks::new(); // FEATURE-HOOK: wp3
     let (btw_events, mut btw_updates) = mpsc::unbounded_channel();
     let is_local = local_launch.is_some();
     let mut runtime = DriverRuntime {
@@ -2668,7 +2724,8 @@ async fn run_inner(
             );
         }
         if scheduler.is_due(Instant::now()) {
-            terminal
+            let render_started = Instant::now(); // FEATURE-HOOK: wp3
+            let draw = terminal
                 .draw(|frame| {
                     app.render(frame);
                     if let Some(overlay) = &mut runtime.feature_overlay {
@@ -2679,6 +2736,7 @@ async fn run_inner(
                     }
                 })
                 .map_err(terminal_error)?;
+            wp3.presented(&app, &mut terminal, &runtime.agent_id, render_started, draw); // FEATURE-HOOK: wp3
             runtime.screen.size.send_if_modified(|size| {
                 let current = app.screen_size();
                 if *size == current {
@@ -2964,6 +3022,7 @@ async fn run_inner(
                     .transpose()
                     .map_err(terminal_error)?
                     .ok_or_else(|| terminal_error(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")))?;
+                wp3.notifier.observe_event(&event); // FEATURE-HOOK: wp3 (focus only)
                 // SECURITY: intercept BEFORE ordinary AppEvent, clipboard,
                 // screen, composer, shell, debug/control, export or history.
                 if let Some(flow) = &mut runtime.secure_input {
@@ -3035,6 +3094,7 @@ async fn run_inner(
             }, if runtime.managed_events_open => {
                 match event {
                     Some(event) => {
+                        wp3.received(&runtime.agent_id, telemetry::Received::managed(&event)); // FEATURE-HOOK: wp3
                         if let Some(bridge) = &runtime.control_bridge { let mut value=serde_json::to_value(&event).unwrap_or_default(); value["session_id"]=serde_json::json!(runtime.agent_id); bridge.publish("managed.event",value); }
                         runtime.observed_cursor.clone_from(&event.cursor);
                         if let Some(request_id) = event.data.turn_id() {

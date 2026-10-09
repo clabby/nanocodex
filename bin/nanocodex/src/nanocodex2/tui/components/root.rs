@@ -4122,7 +4122,7 @@ impl RootNode {
         }
     }
 
-    const fn has_active_turns(&self) -> bool {
+    pub(crate) const fn has_active_turns(&self) -> bool {
         self.in_flight_turns > 0 || self.managed_active_turns > 0
     }
 

@@ -7885,3 +7885,336 @@ async fn terminal_perf_input_stays_responsive_while_an_agent_streams_large_tool_
         "steering lagged: {steer}"
     );
 }
+
+// Renderer parity journeys: math graphics, completion notifications, tool
+// display modes and stream/view telemetry, all through the shipped binary.
+
+fn renderer_evidence(name: &str, bytes: &[u8]) {
+    if let Some(dir) = std::env::var_os("NANOCODEX_TUI_EVIDENCE_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+}
+
+async fn attached_renderer_terminal(configure: impl FnOnce(&mut CommandBuilder)) -> Fixture {
+    let mut fixture = Fixture::start_with_active(true).await;
+    fixture.terminal = Terminal::start_with_command(&fixture.origin, true, None, configure);
+    fixture.replacement_connection().await;
+    fixture.terminal.wait_text("Enter steer").await;
+    fixture
+}
+
+fn byte_count(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+async fn wait_bytes(terminal: &Terminal, needle: &[u8]) {
+    tokio::time::timeout(TIMEOUT, async {
+        while byte_count(&terminal.output.lock().unwrap(), needle) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "terminal never emitted {:?}",
+            String::from_utf8_lossy(needle)
+        )
+    });
+}
+
+/// PNG payloads of Kitty graphics uploads: APC "ESC _ G keys ; base64 ESC \",
+/// chunked while a chunk carries m=1.
+fn kitty_pngs(output: &[u8]) -> Vec<Vec<u8>> {
+    let find = |haystack: &[u8], needle: &[u8]| {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    };
+    let mut pngs = Vec::new();
+    let mut payload = String::new();
+    let mut rest = output;
+    while let Some(start) = find(rest, b"\x1b_G") {
+        let body = &rest[start + 3..];
+        let Some(end) = find(body, b"\x1b\\") else {
+            break;
+        };
+        let command = &body[..end];
+        if let Some(separator) = command.iter().position(|byte| *byte == b';') {
+            let keys = String::from_utf8_lossy(&command[..separator]).into_owned();
+            payload.push_str(&String::from_utf8_lossy(&command[separator + 1..]));
+            if !keys.split(',').any(|key| key == "m=1") {
+                if let Ok(png) = base64::engine::general_purpose::STANDARD.decode(&payload)
+                    && png.starts_with(b"\x89PNG")
+                {
+                    pngs.push(png);
+                }
+                payload.clear();
+            }
+        }
+        rest = &body[end + 2..];
+    }
+    pngs
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_math_renders_kitty_images_and_falls_back_to_source() {
+    let reply = "Euler:\n\n\\[e^{i\\pi} + 1 = 0\\]\n\nInline \\(x^2\\) beside text.\n\n$$\\frac{a}{b}$$\n\nMATH_DONE";
+    let placeholder = "\u{10EEEE}".as_bytes();
+
+    let mut kitty = attached_renderer_terminal(|command| {
+        command.env("TERM", "xterm-kitty");
+        command.env("NANOCODEX_TUI_GRAPHICS", "kitty");
+    })
+    .await;
+    kitty.nested(
+        REMOTE_TURN,
+        "assistant.message",
+        json!({"model_call_index": 1, "item_id": "math", "phase": "final_answer", "text": reply}),
+    );
+    kitty.complete(REMOTE_TURN);
+    kitty.terminal.wait_text("MATH_DONE").await;
+    wait_bytes(&kitty.terminal, placeholder).await;
+    // Rendered formulas replace their TeX source on screen.
+    kitty.terminal.wait_no_text("e^{i").await;
+    kitty.terminal.wait_no_text("frac").await;
+    // Inline formulas that need more than one row keep their source in line.
+    kitty.terminal.wait_text("beside text.").await;
+    let output = kitty.terminal.output.lock().unwrap().clone();
+    let pngs = kitty_pngs(&output);
+    assert!(
+        pngs.len() >= 3,
+        "expected three formula uploads, got {}",
+        pngs.len()
+    );
+    renderer_evidence("math-kitty.raw", &output);
+    renderer_evidence(
+        "math-kitty.screen.txt",
+        kitty
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    for (index, png) in pngs.iter().enumerate() {
+        renderer_evidence(&format!("math-kitty-formula-{index}.png"), png);
+    }
+    // Typing stays immediate after graphics uploads.
+    let mut echoes = Vec::new();
+    for probe in ["LAGPROBEA", "LAGPROBEB", "LAGPROBEC"] {
+        let started = std::time::Instant::now();
+        kitty.terminal.input(probe);
+        kitty.terminal.wait_text(probe).await;
+        echoes.push(started.elapsed());
+    }
+    renderer_evidence(
+        "math-kitty-input-echo.txt",
+        format!("{echoes:?}\n").as_bytes(),
+    );
+    assert!(
+        echoes.iter().all(|echo| *echo < Duration::from_millis(500)),
+        "{echoes:?}"
+    );
+
+    // Every other terminal keeps the formula source readable.
+    let mut plain = attached_renderer_terminal(|_| {}).await;
+    plain.nested(
+        REMOTE_TURN,
+        "assistant.message",
+        json!({"model_call_index": 1, "item_id": "math", "phase": "final_answer", "text": reply}),
+    );
+    plain.complete(REMOTE_TURN);
+    plain.terminal.wait_text("MATH_DONE").await;
+    plain.terminal.wait_text("e^{i\\pi} + 1 = 0").await;
+    plain.terminal.wait_text("$x^2$").await;
+    plain.terminal.wait_text("\\frac{a}{b}").await;
+    let output = plain.terminal.output.lock().unwrap().clone();
+    assert_eq!(byte_count(&output, placeholder), 0);
+    assert_eq!(byte_count(&output, b"\x1b_G"), 0);
+    renderer_evidence(
+        "math-fallback.screen.txt",
+        plain
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_notifies_finished_turns_only_while_unfocused() {
+    let finished: &[u8] = b"\x1b]9;Nanocodex finished\x07";
+    let attention: &[u8] = b"\x1b]9;Nanocodex needs attention\x07";
+    let mut fixture = attached_renderer_terminal(|command| {
+        command.env("TERM_PROGRAM", "kitty");
+        command.env("NANOCODEX_TUI_GRAPHICS", "off");
+    })
+    .await;
+    fixture.terminal.input("\x1b[O");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fixture.nested(REMOTE_TURN, "assistant.message", json!({"model_call_index": 1, "item_id": "unfocused", "phase": "final_answer", "text": "UNFOCUSED_DONE"}));
+    fixture.complete(REMOTE_TURN);
+    fixture.terminal.wait_text("UNFOCUSED_DONE").await;
+    wait_bytes(&fixture.terminal, finished).await;
+
+    // A focused terminal finishes silently.
+    fixture.terminal.input("\x1b[I");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fixture.terminal.prompt("FOCUSED_PROMPT", "\r");
+    let focused = fixture.submission("FOCUSED_PROMPT").await;
+    fixture.nested(&focused, "assistant.message", json!({"model_call_index": 1, "item_id": "focused", "phase": "final_answer", "text": "FOCUSED_DONE"}));
+    fixture.complete(&focused);
+    fixture.terminal.wait_text("FOCUSED_DONE").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // A failure while away asks for attention.
+    fixture.terminal.input("\x1b[O");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fixture.terminal.prompt("FAILING_PROMPT", "\r");
+    let failing = fixture.submission("FAILING_PROMPT").await;
+    fixture.emit(
+        &failing,
+        json!({"type": "turn_failed", "id": failing, "error": "RENDERER_FAILURE"}),
+    );
+    fixture.terminal.wait_text("RENDERER_FAILURE").await;
+    wait_bytes(&fixture.terminal, attention).await;
+    let output = fixture.terminal.output.lock().unwrap().clone();
+    assert_eq!(
+        byte_count(&output, finished),
+        1,
+        "focused completion must not notify"
+    );
+    renderer_evidence("notification.raw", &output);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_hidden_tool_calls_keep_the_turn_working_and_ctrl_o_cycles() {
+    let mut fixture = attached_renderer_terminal(|command| {
+        command.env("NANOCODEX_TOOL_CALLS", "hidden");
+    })
+    .await;
+    fixture.nested(REMOTE_TURN, "tool.call", json!({"call_id": "hidden-read", "tool": "read_file", "arguments": {"path": "HIDDEN_TOOL_PATH.txt"}}));
+    fixture.nested(REMOTE_TURN, "assistant.delta", json!({"model_call_index": 1, "item_id": "visible", "phase": "final_answer", "text": "VISIBLE_AFTER_TOOL"}));
+    fixture.terminal.wait_text("VISIBLE_AFTER_TOOL").await;
+    fixture.terminal.wait_no_text("HIDDEN_TOOL_PATH").await;
+    fixture.terminal.wait_text("Enter steer").await;
+    renderer_evidence(
+        "tools-hidden.screen.txt",
+        fixture
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    // Ctrl+O: hidden -> summaries -> every detail -> hidden.
+    fixture.terminal.input("\x0f");
+    fixture.terminal.wait_text("HIDDEN_TOOL_PATH").await;
+    renderer_evidence(
+        "tools-folded.screen.txt",
+        fixture
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    fixture.terminal.input("\x0f");
+    fixture.terminal.wait_text("HIDDEN_TOOL_PATH").await;
+    renderer_evidence(
+        "tools-expanded.screen.txt",
+        fixture
+            .terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .as_bytes(),
+    );
+    fixture.terminal.input("\x0f");
+    fixture.terminal.wait_no_text("HIDDEN_TOOL_PATH").await;
+    fixture.nested(REMOTE_TURN, "tool.result", json!({"call_id": "hidden-read", "tool": "read_file", "status": "completed", "duration_ns": 1, "result": {"text": "file contents"}}));
+    fixture.complete(REMOTE_TURN);
+    fixture.terminal.wait_text("Enter send").await;
+    fixture.terminal.wait_no_text("HIDDEN_TOOL_PATH").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_stream_and_view_telemetry_reach_the_log_and_otlp() {
+    let traces = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let captured = traces.clone();
+    let collector = Router::new().route(
+        "/v1/traces",
+        post(move |body: axum::body::Bytes| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().extend_from_slice(&body);
+                axum::http::StatusCode::OK
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let collector_origin = format!("http://{}", listener.local_addr().unwrap());
+    let collector_task = tokio::spawn(async move {
+        axum::serve(listener, collector).await.unwrap();
+    });
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("tui.log");
+    let mut fixture = attached_renderer_terminal(|command| {
+        command.env("NANOCODEX_LOG_FILE", &log);
+        command.env("OTEL_EXPORTER_OTLP_ENDPOINT", &collector_origin);
+        command.env("RUST_LOG", "warn,nanocodex=info");
+        command.env("OTEL_LEVEL", "warn,nanocodex=info");
+    })
+    .await;
+    for text in ["TELEMETRY_", "STREAM_", "DONE"] {
+        fixture.nested(REMOTE_TURN, "assistant.delta", json!({"model_call_index": 1, "item_id": "telemetry", "phase": "final_answer", "text": text}));
+    }
+    fixture.terminal.wait_text("TELEMETRY_STREAM_DONE").await;
+    fixture.nested(REMOTE_TURN, "assistant.message", json!({"model_call_index": 1, "item_id": "telemetry", "phase": "final_answer", "text": "TELEMETRY_STREAM_DONE"}));
+    fixture.complete(REMOTE_TURN);
+    fixture.terminal.wait_text("Enter send").await;
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    tokio::time::timeout(TIMEOUT, async {
+        while !read_log().contains("TUI stream timing completed") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("stream timing never logged: {}", read_log()));
+    let text = read_log();
+    assert!(text.contains("TUI view state changed"), "{text}");
+    assert!(text.contains(AGENT), "{text}");
+    // The batch exporter flushes on its own schedule; no Jaeger is involved.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            {
+                let body = traces.lock().unwrap();
+                if byte_count(&body, b"tui.stream") > 0 && byte_count(&body, AGENT.as_bytes()) > 0 {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("OTLP collector never received the tui.stream span");
+    renderer_evidence("telemetry.log", text.as_bytes());
+    renderer_evidence("telemetry-otlp.bin", &traces.lock().unwrap());
+    collector_task.abort();
+}
