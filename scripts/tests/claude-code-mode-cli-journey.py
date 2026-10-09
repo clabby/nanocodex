@@ -193,10 +193,10 @@ else: print('{}')
             require(not (workspace / 'interrupt-leak.txt').exists(), 'delayed native effect ran before fixture gate release')
             cancel_sent = time.time()
             os.write(master, b'/cancel\r')
-            # Queue the next prompt. Admission while the cancelled inference is
-            # still held proves the previous turn settled; no status-copy match.
+            # Submit the next prompt. Admission while the cancelled inference
+            # is still held proves settlement without a status-copy match.
             phase.update(name='interrupt-recovery', counts={}, child=[], steps=[execute('const r=await tools.write_stdin({session_id:load("interruptShell"),yield_time_ms:1000}); if(r.exit_code!==0) throw Error("retained shell failed"); text("INTERRUPT_RECOVERY_OK");', 'INTERRUPT_RECOVERY_OK')])
-            os.write(master, b'Continue after cancellation\t')
+            os.write(master, b'Continue after cancellation\r')
             until(lambda: phase['counts'].get('root', 0) > 0, 'next turn was not admitted after cancellation')
             cancel_settled = time.time()
             effect_present = (workspace / 'interrupt-leak.txt').exists()
