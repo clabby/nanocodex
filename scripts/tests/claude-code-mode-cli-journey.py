@@ -127,7 +127,7 @@ else: print('{}')
     server = ThreadingHTTPServer(('127.0.0.1', 0), Provider)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     environment = {'HOME': str(artifact / 'home'), 'CODEX_HOME': str(artifact / 'home/codex'), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'NANOCODEX_COMPUTER': 'off'}
-    common = [str(binary), 'run', '--claude', '--model', 'claude-sonnet-5-5', '--claude-api-key', 'synthetic-code-key', '--claude-messages-url', f'http://127.0.0.1:{server.server_port}/v1/messages', '--cwd', str(workspace), '--rollouts', 'false', '--browser=none', '--mcp-defaults', 'false', '--mcp-codex-config', 'false', '--web-search', 'false', '--image-generation', 'false', '--subagents', 'true', '--memory', 'false', '--claude-hooks', str(hooks)]
+    common = [str(binary), '--local', 'run', '--claude', '--model', 'claude-sonnet-5-5', '--claude-api-key', 'synthetic-code-key', '--claude-messages-url', f'http://127.0.0.1:{server.server_port}/v1/messages', '--cwd', str(workspace), '--rollouts', 'false', '--browser=none', '--mcp-defaults', 'false', '--mcp-codex-config', 'false', '--web-search', 'false', '--image-generation', 'false', '--subagents', 'true', '--memory', 'false', '--claude-hooks', str(hooks)]
 
     def run(name, steps, extra=None, child=None):
         phase.update(name=name, steps=steps, counts={}, child=child or [])
@@ -143,7 +143,7 @@ else: print('{}')
 
     def interrupt_pending_inference():
         phase.update(name='interrupt', counts={}, child=[], steps=[execute('const r=await tools.exec_command({cmd:"printf started > interrupt-started.txt; while [ ! -f interrupt-release.txt ]; do sleep 0.05; done; printf retained > interrupt-leak.txt",yield_time_ms:250}); store("interruptShell",r.session_id); await yield_control(); text(r);', 'Script running with cell ID')])
-        command = [common[0]] + common[2:] + ['--prompt', 'Interrupt pending inference journey']
+        command = common[:2] + common[3:] + ['--prompt', 'Interrupt pending inference journey']
         commands.append(command)
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 45, 170, 0, 0))
@@ -207,6 +207,8 @@ else: print('{}')
             (artifact / 'interrupt-timing.json').write_text(json.dumps({**inference_timing, 'effect_started': (workspace / 'interrupt-started.txt').stat().st_mtime, 'cancel_sent': cancel_sent, 'cancel_settled': cancel_settled, 'effect_present_at_settlement': effect_present}, indent=2))
             release_inference.set()
             require((workspace / 'interrupt-leak.txt').read_text() == 'retained', 'turn cancellation lost retained shell session')
+            os.write(master, b"\x03")
+            time.sleep(.2)
             os.write(master, b"\x03")
             deadline = time.monotonic() + 10
             while process.poll() is None and time.monotonic() < deadline:
