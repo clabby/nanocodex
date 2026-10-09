@@ -184,7 +184,8 @@ def main():
             h.require(len(requests) == start + 2, 'rejected change dispatched a model request')
             h.require(requests[-1]['request']['model'] == expected, 'model changed after thread started')
             wait(lambda: 'Working' not in footer() and 'Queued' not in footer(), 'turn did not finish')
-            os.write(master, b'\x04')
+            # The unified TUI exits on a second Ctrl+C.
+            os.write(master, b'\x03\x03')
             wait(lambda: process.poll() is not None, 'CLI did not exit')
             drain()
             h.require(process.returncode == 0, 'CLI failed to exit cleanly')

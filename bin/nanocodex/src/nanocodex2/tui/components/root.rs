@@ -3083,7 +3083,11 @@ impl RootNode {
         if model == self.composer.component().model() && !self.composer.component().auto_routing() {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
-        self.interactive = false;
+        // A local harness switch holds typed prompts in the driver until the
+        // selected harness is adopted, so its composer stays usable meanwhile.
+        if !self.capabilities.local {
+            self.interactive = false;
+        }
         let _ = self
             .composer
             .component_mut()
