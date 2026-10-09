@@ -33,6 +33,11 @@ fn hand_version() -> &'static str {
 Hand Identity: ",
             );
             version.push_str(identity);
+        } else if let Some(sha) = crate::version::git_sha() {
+            // Without an identity, local pair verification matches the exact
+            // source revision of the CLI and Hand instead.
+            version.push_str("\nCommit SHA: ");
+            version.push_str(sha);
         }
         version
     })
