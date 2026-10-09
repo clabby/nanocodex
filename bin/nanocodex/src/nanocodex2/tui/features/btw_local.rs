@@ -236,16 +236,26 @@ impl Feature for LocalBtw {
         if !matches!(command, FeatureCommand::Collapse) {
             return false;
         }
-        match collapse_prompt(cx.busy) {
+        match collapse_prompt() {
             Ok((side, (display, instruction))) => {
                 drop(release(side.pane));
                 cx.host.send(FeatureUpdate::ClosePane(side.pane));
-                cx.host.send(FeatureUpdate::SubmitPrompt(FeaturePrompt {
-                    pane: Some(PaneId::Main),
-                    display,
-                    instruction: Some(instruction),
-                    completion: None,
-                }));
+                if cx.busy {
+                    // Legacy delivers the collapse into the running main turn as a steer.
+                    cx.host.send(FeatureUpdate::Steer {
+                        pane: Some(PaneId::Main),
+                        text: format!("{display}
+
+{instruction}"),
+                    });
+                } else {
+                    cx.host.send(FeatureUpdate::SubmitPrompt(FeaturePrompt {
+                        pane: Some(PaneId::Main),
+                        display,
+                        instruction: Some(instruction),
+                        completion: None,
+                    }));
+                }
                 tokio::spawn(async move { drop(side.agent.shutdown().await) });
             }
             Err(error) => cx
@@ -256,16 +266,13 @@ impl Feature for LocalBtw {
     }
 }
 
-fn collapse_prompt(main_busy: bool) -> Result<(Side, (String, String)), &'static str> {
+fn collapse_prompt() -> Result<(Side, (String, String)), &'static str> {
     let side = active().ok_or("/collapse requires an open /btw thread")?;
     if side.busy {
         return Err("BTW has an active turn; wait for it to finish before /collapse");
     }
     if !side.completed {
         return Err("BTW needs one completed turn before /collapse");
-    }
-    if main_busy {
-        return Err("the main thread is running; wait for it to finish before /collapse");
     }
     let prompt = match side.agent.rollout() {
         Some(rollout) => collapse_btw_prompt(rollout.thread_id()),

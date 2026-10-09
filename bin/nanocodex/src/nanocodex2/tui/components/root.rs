@@ -184,6 +184,8 @@ pub(crate) enum RootEvent {
     ShellFinished,
     TurnsCancelled,
     ForkReady,
+    /// FEATURE-HOOK: wp2 queue a steer for the running turn as if typed.
+    FeatureSteer(Submission),
     NewSessionFailed(String),
     ReviewBranchesLoaded {
         request_id: uuid::Uuid,
@@ -4596,6 +4598,13 @@ impl Component for RootNode {
             }
             RootEvent::TurnsCancelled => self.turns_cancelled(),
             RootEvent::ForkReady => self.fork_ready(),
+            RootEvent::FeatureSteer(prompt) => {
+                let (id, prompt) = self.queue.component_mut().begin_steer(prompt);
+                ComponentUpdate {
+                    effects: vec![RootEffect::Steer { id, prompt }],
+                    render: RenderRequest::Immediate,
+                }
+            }
             RootEvent::NewSessionFailed(message) => self.new_session_failed(message),
             RootEvent::ReviewBranchesLoaded { request_id, result } => {
                 if let Some(Overlay::CodeReview(selector)) = &mut self.overlay {

@@ -138,6 +138,9 @@ pub(crate) enum FeatureUpdate {
     CloseOverlay,
     /// Close a side pane.
     ClosePane(PaneId),
+    /// Steer text into the running main turn exactly as a typed steer would be
+    /// (local /collapse while main is busy).
+    Steer { pane: Option<PaneId>, text: String },
     /// Re-read capabilities (a feature became available or unavailable).
     Capabilities(Capabilities),
     /// Submit a prompt with an optional private instruction and completion receipt.

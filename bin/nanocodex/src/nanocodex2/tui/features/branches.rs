@@ -141,11 +141,18 @@ impl Branches {
         let registry = Arc::clone(&self.registry);
         let host = cx.host.clone();
         let workspace = cx.workspace.to_path_buf();
+        // Claude sessions have no Codex rollout; their prompts come from the journal.
+        let claude = rollout
+            .is_none()
+            .then(|| cx.agent.map(|agent| agent.session_id().to_owned()))
+            .flatten();
         // Reading the transcript touches the disk; keep it off the input loop.
         tokio::spawn(async move {
             let thread = rollout.as_ref().map(|(thread, _)| thread.clone());
-            let prompts = tokio::task::spawn_blocking(move || {
-                thread.map(|thread| prompts(&thread)).unwrap_or_default()
+            let prompts = tokio::task::spawn_blocking(move || match (thread, claude) {
+                (Some(thread), _) => prompts(&thread),
+                (None, Some(session)) => claude_prompts(&session),
+                (None, None) => Vec::new(),
             })
             .await
             .unwrap_or_default();
@@ -208,6 +215,25 @@ fn ready<'a>(cx: &'a FeatureContext<'_>) -> Result<&'a LocalLaunch, String> {
     }
     cx.launch
         .ok_or_else(|| "branches need a local agent (run ncl)".to_owned())
+}
+
+/// User prompts of a Claude session journal, oldest first.
+fn claude_prompts(session: &str) -> Vec<String> {
+    let Ok(home) = crate::config::default_codex_home() else {
+        return Vec::new();
+    };
+    crate::native_sessions::load(&home, session)
+        .map(|session| {
+            session
+                .transcript
+                .iter()
+                .filter_map(|item| match item {
+                    RolloutTranscriptItem::User(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// User prompts of a saved Codex thread, oldest first.

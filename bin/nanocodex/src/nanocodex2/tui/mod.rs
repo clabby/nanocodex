@@ -4557,6 +4557,11 @@ async fn apply_feature_update(
         }
         // /collapse and /split close the local side pane.
         FeatureUpdate::ClosePane(pane) => app.close_fork(pane),
+        // FEATURE-HOOK: wp2 the root queues it and emits its usual RootEffect::Steer.
+        FeatureUpdate::Steer { pane, text } => app.update(AppEvent::FeatureSteer {
+            pane: main(pane),
+            prompt: Submission::text(text),
+        }),
         FeatureUpdate::Capabilities(capabilities) => {
             if let Some(root) = app.root_mut(PaneId::Main) {
                 root.set_capabilities(capabilities);
