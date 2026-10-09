@@ -3926,7 +3926,7 @@ fn submit(
 /// control commands share this path with typed input.
 fn execute_submission(
     app: &mut App,
-    root_session_id: &str,
+    _root_session_id: &str,
     commands: &mpsc::UnboundedSender<WorkerCommand>,
     intent: SubmitIntent,
     submission: Submission,
