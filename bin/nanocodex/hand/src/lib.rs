@@ -116,7 +116,8 @@ pub fn hand_main(build: nanocodex_bin_shared::version::BuildInfo) -> ExitCode {
     version::init(build);
     hand_executable::set_hand_role();
     hand_executable::take_forwarded();
-    let arguments: Vec<OsString> = std::env::args_os().collect();
+    let mut arguments: Vec<OsString> = std::env::args_os().collect();
+    imply_hand_command(&mut arguments);
     if is_helper_process() || is_hand_daemon_invocation(&arguments) {
         return daemon::main(arguments);
     }
@@ -131,6 +132,41 @@ pub fn hand_main(build: nanocodex_bin_shared::version::BuildInfo) -> ExitCode {
             eprintln!("Error: {error}; user commands are provided by the nanocodex CLI");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Names under which this executable is the `hand` command itself: the build
+/// output and the installed `bin/nanocodex-hand` and `bin/nc-hand` links. A
+/// user runs `nc-hand` (serve this computer) or `nc-hand status` as
+/// `nanocodex hand` and `nanocodex hand status`; `--help` is the `hand` help.
+/// Internal entrypoints, an explicit `hand`, and the bare `--version` keep
+/// their meaning, so service records and tooling naming the build output work.
+fn imply_hand_command(arguments: &mut Vec<OsString>) {
+    let Some(name) = arguments
+        .first()
+        .and_then(|argv0| std::path::Path::new(argv0).file_stem())
+        .and_then(|stem| stem.to_str())
+    else {
+        return;
+    };
+    if !["nanocodex-hand", "nc-hand"]
+        .iter()
+        .any(|alias| name.eq_ignore_ascii_case(alias))
+    {
+        return;
+    }
+    let explicit = match arguments.get(1).and_then(|argument| argument.to_str()) {
+        Some("--version" | "-V") => arguments.len() == 2,
+        // Help describes the `hand` command, as `nanocodex hand --help`.
+        Some("--help" | "-h") => false,
+        Some(first) => {
+            first == "hand"
+                || is_hand_daemon_invocation(&[OsString::new(), OsString::from(first)])
+        }
+        None => false,
+    };
+    if !explicit {
+        arguments.insert(1, "hand".into());
     }
 }
 
