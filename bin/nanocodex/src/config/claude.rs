@@ -586,7 +586,6 @@ impl AgentArgs {
             subagent_updates,
             mpp_adapter: None,
             mcp: mcp_handle,
-            browser: None,
             vm: None,
             model,
         })

@@ -19,12 +19,35 @@ executables remain only on the rolling release so pre-compression updaters can
 cross the format transition.
 
 Each native nightly and stable release builds both role binaries per target in
-one invocation (`cargo build -p nanocodex-bin --bin nanocodex --bin nanocodex-hand
---features tempo`). `nanocodex-<triple>[.gz]` is the CLI and
+one invocation (`cargo build --features nanocodex-bin/tempo`, with the release
+profile selected by the workflow). The workspace defaults select the CLI and
+Hand packages; plain `cargo build` produces both debug executables. `nanocodex-<triple>[.gz]` is the CLI and
 `nanocodex2-<triple>[.gz]` is the `nanocodex-hand` daemon, keeping the companion
 name older updaters fetch (`nanocodex-x86_64-pc-windows-msvc.exe` and
 `nanocodex2-x86_64-pc-windows-msvc.exe` on Windows). `SHA256SUMS` lists both.
 x86_64 Linux also contains the static VM guest.
+
+Linux x86_64 and Apple Silicon bundles include a platform voice runtime archive.
+The voice jobs verify initialization and relocation before upload; the updater
+checks its checksum and installs it under the selected version's
+`nanocodex-resources/voice`. Windows currently has no voice archive. Native voice
+payloads are release components, not outputs of an ordinary Rust debug build.
+
+Ordinary debug builds use Cargo's incremental cache without a provenance build
+script. CLI, Hand, shared executable support, and terminal rendering are separate
+packages. CLI-only edits leave the Hand package cached. A plain development build
+reports its package version without inventing a Git revision or release identity.
+
+Release staging sets `VERGEN_GIT_SHA`, `TAG_NAME`, and
+`NANOCODEX_HAND_IDENTITY` at the executable boundary. The identity comes from
+`scripts/release/hand-source-identity.py`: the Hand dependency closure, resolved
+features and dependency edges, source, toolchain, build configuration, and native
+payloads. Post-build verification checks the compiler's dependency file against
+that closure before the artifact can be reused. This preserves an unchanged
+Hand across CLI-only releases without invalidating ordinary debug builds.
+Linux distribution builds additionally embed the prepared screen helpers using
+`nanocodex-hand-daemon/embedded-screen-helpers`; plain debug builds report a
+missing payload if that screen backend is requested.
 
 On Apple Silicon, `scripts/release/macos-sign-hand.sh` signs the Hand with the
 identifier `com.nanocodex.hand` and the hypervisor entitlement its libkrun VMM
@@ -47,6 +70,8 @@ builds is verified only on a real Mac.
 platform bundle atomically and exposes the CLI as `nanocodex`, `nc`, and `ncl`
 under `$NANOCODEX_DIR/bin`; the invoked name selects the managed tree
 (`nanocodex`, `nc`) or the local agent tree (`ncl`, or `nanocodex --local`).
+The verified Hand companion is exposed as `nanocodex-hand` and `nc-hand`.
+These names are aliases for the two role executables, not extra Cargo binaries.
 `nanocodex update --branch NAME` and `nanocodex update --pr NUMBER` fetch source into a temporary
 checkout, compile the CLI and Hand locally, and install them together; when the
 built Hand reports the running Hand's identity, only the CLI changes.

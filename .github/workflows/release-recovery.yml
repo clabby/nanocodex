@@ -82,6 +82,18 @@ jobs:
               --target ${{ matrix.target }}
             echo "HAND_BINARY=$release/nanocodex2" >> "$GITHUB_ENV"
             echo "VM_BINARIES=$release/nanocodex2" >> "$GITHUB_ENV"
+          elif cargo metadata --locked --no-deps --format-version 1 \
+            | jq -e '.packages[] | select(.name == "nanocodex-hand-daemon")' >/dev/null; then
+            # Tags after the Hand split build the Hand daemon package beside the CLI.
+            features=nanocodex-bin/tempo
+            if [[ -n "${NANOCODEX_LINUX_SCREEN_BUNDLE:-}" ]]; then
+              features+=",nanocodex-hand-daemon/embedded-screen-helpers"
+            fi
+            cargo build --locked --release \
+              --package nanocodex-bin --package nanocodex-hand-daemon --features "$features" \
+              --target ${{ matrix.target }}
+            echo "HAND_BINARY=$release/nanocodex-hand" >> "$GITHUB_ENV"
+            echo "VM_BINARIES=$release/nanocodex-hand" >> "$GITHUB_ENV"
           else
             cargo build --locked --release \
               --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo \

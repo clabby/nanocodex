@@ -11,6 +11,7 @@ use super::{
     selection::{TextRange, TextSpan},
     waved_text::WavedText,
 };
+use crate::nanocodex2::tui::theme::ThemeExt as _;
 use crate::nanocodex2::{
     config::{ReasoningEffort, ReasoningMode},
     tui::{

@@ -26,7 +26,7 @@ use nanocodex::{
 };
 use nanocodex_durability::{DurableSession as PortableDurableSession, SqliteStore};
 
-use crate::browser::{BrowserArgs, ConfiguredBrowser};
+use crate::browser::BrowserArgs;
 use crate::login::load_managed_mcp_credential;
 use crate::managed_memory::{ConfiguredManagedMemory, MEMORY_INSTRUCTIONS};
 use crate::mcp::{ConfiguredMcp, McpArgs};
@@ -55,7 +55,6 @@ pub(crate) struct ConfiguredAgent {
         Option<tokio::sync::mpsc::UnboundedReceiver<nanocodex_subagents::ScopedAgentUpdate>>,
     pub(crate) mpp_adapter: Option<MppAdapter>,
     pub(crate) mcp: Option<McpHandle>,
-    pub(crate) browser: Option<ConfiguredBrowser>,
     pub(crate) vm: Option<ConfiguredVm>,
     pub(crate) model: HarnessModel,
 }
@@ -670,8 +669,6 @@ impl AgentArgs {
         } else {
             None
         };
-        // Browser interaction is supplied by CUA, including for the direct CLI.
-        let configured_browser = None;
         let mpp_enabled = self.mpp.is_enabled();
         if mpp_enabled && !matches!(responses_transport, ResponsesTransport::Https) {
             return Err(eyre!(
@@ -983,7 +980,6 @@ impl AgentArgs {
             subagent_updates,
             mpp_adapter,
             mcp: mcp_handle,
-            browser: configured_browser,
             vm: configured_vm,
             model: model.into(),
         })

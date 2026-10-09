@@ -86,11 +86,11 @@ pub(crate) async fn linux_hand_binary() -> Result<Vec<u8>> {
         return Ok(binary);
     }
     let client = Client::builder()
-        .user_agent(format!("nanocodex/{}", version::SEMVER_VERSION))
+        .user_agent(format!("nanocodex/{}", version::semver()))
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .build()?;
-    let release = if version::IS_NIGHTLY {
+    let release = if version::is_nightly() {
         let pointer = fetch_release(&client, NIGHTLY_RELEASE_API, "nightly release").await?;
         fetch_immutable_nightly(&client, &pointer).await?
     } else {
@@ -110,7 +110,7 @@ pub(crate) async fn linux_hand_binary() -> Result<Vec<u8>> {
 /// Older updater binaries install executables without their voice archive.
 /// Repair only this exact managed stable installation, on first voice use.
 pub(crate) async fn ensure_installed_voice_runtime() -> Result<()> {
-    if version::IS_NIGHTLY || std::env::var_os("NANOCODEX_VOICE_PACKAGE").is_some() {
+    if version::is_nightly() || std::env::var_os("NANOCODEX_VOICE_PACKAGE").is_some() {
         return Ok(());
     }
     let store = VersionStore::discover()?;
@@ -120,7 +120,7 @@ pub(crate) async fn ensure_installed_voice_runtime() -> Result<()> {
         return Ok(());
     };
     let client = Client::builder()
-        .user_agent(format!("nanocodex/{}", version::SEMVER_VERSION))
+        .user_agent(format!("nanocodex/{}", version::semver()))
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .build()?;
@@ -145,7 +145,7 @@ pub(crate) async fn ensure_installed_voice_runtime() -> Result<()> {
 }
 
 pub(crate) fn prepare_legacy_nightly_bootstrap() -> Result<()> {
-    if version::IS_NIGHTLY {
+    if version::is_nightly() {
         VersionStore::prepare_legacy_nightly_bootstrap()?;
     }
     Ok(())
@@ -165,7 +165,7 @@ pub(crate) fn ensure_default_automatic_updates() -> Result<()> {
         return Ok(());
     }
     if store.active()?.is_some() && root.join("updater/nanocodex").is_file() {
-        automatic::ensure_default(&root, version::IS_NIGHTLY)?;
+        automatic::ensure_default(&root, version::is_nightly())?;
     }
     Ok(())
 }
@@ -337,7 +337,7 @@ impl Update {
         }
         let manager_key = manager_key(&manager_version);
         store.prepare(&manager_key)?;
-        automatic::ensure_default(store.root(), self.nightly || version::IS_NIGHTLY)?;
+        automatic::ensure_default(store.root(), self.nightly || version::is_nightly())?;
         VersionStore::promote_running_legacy_nightly_manager()?;
         let previous = store.active()?.unwrap_or_else(|| manager_key.clone());
         if self.background
@@ -398,7 +398,7 @@ impl Update {
         }
 
         let client = Client::builder()
-            .user_agent(format!("nanocodex/{}", version::SEMVER_VERSION))
+            .user_agent(format!("nanocodex/{}", version::semver()))
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .build()
@@ -1353,10 +1353,10 @@ fn parse_pr_number(value: &str) -> std::result::Result<u64, String> {
 }
 
 fn manager_key(version_number: &Version) -> String {
-    if version::IS_NIGHTLY {
+    if version::is_nightly() {
         "nightly".to_owned()
-    } else if version::SEMVER_VERSION.contains("-dev+") {
-        format!("dev-{}", version::SEMVER_VERSION)
+    } else if version::semver().contains("-dev+") {
+        format!("dev-{}", version::semver())
     } else {
         version_number.to_string()
     }

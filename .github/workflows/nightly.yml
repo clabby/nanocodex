@@ -74,10 +74,35 @@ jobs:
           # Voice helpers have their own Cargo target directories.
           workspaces: ${{ matrix.workspaces }}
           cache-on-failure: true
+      # rust-cache restores third-party dependencies but always rebuilds
+      # workspace crates. sccache reuses unchanged workspace libraries across
+      # runs; binaries and changed crates still compile from source.
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        if: matrix.component == 'cli'
+        with:
+          version: v0.16.0
+      - name: Reuse unchanged workspace crates
+        if: matrix.component == 'cli'
+        shell: bash
+        env:
+          # PR-artifact builds of a pull-request head dispatched from master
+          # only read master's cache; scheduled nightlies (and branch dispatches,
+          # whose cache scope is private to that branch) write.
+          CACHE_MODE: ${{ (inputs.pr == '' || github.ref != 'refs/heads/master') && 'READ_WRITE' || 'READ_ONLY' }}
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "SCCACHE_GHA_RW_MODE=$CACHE_MODE"
+            # A cache-service outage falls back to compiling locally.
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          } >> "$GITHUB_ENV"
       - name: Enforce ring-only Rustls provider
         if: matrix.component == 'cli'
         shell: bash
         run: ./scripts/check-rustls-provider.sh
+      - uses: ./.github/actions/docker-hub-mirror
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
       - name: Prepare embedded Linux Wayland helpers
         if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
         shell: bash
@@ -93,10 +118,27 @@ jobs:
           # libkrun's build script does not track installed Rust targets. Drop
           # cached init blobs that may have used its dynamic-link fallback.
           cargo clean --package krun-init-blob --profile nightly --target ${{ matrix.target }}
+          # Release-stage Hand identity: computed from the Hand package closure
+          # before compiling, verified against the Hand's Cargo dep-info after.
+          features=nanocodex-bin/tempo
+          payload=()
+          if [[ -n "${NANOCODEX_LINUX_SCREEN_BUNDLE:-}" ]]; then
+            # Distributable Linux Hands embed the helper payload named above.
+            features+=",nanocodex-hand-daemon/embedded-screen-helpers"
+            payload=(--payload "linux-screen-helpers=$NANOCODEX_LINUX_SCREEN_BUNDLE")
+          fi
+          NANOCODEX_HAND_IDENTITY="$(scripts/release/hand-source-identity.py compute \
+            --target ${{ matrix.target }} --profile nightly --features "$features" \
+            ${payload[@]+"${payload[@]}"} --report "$RUNNER_TEMP/hand-identity-inputs.json")"
+          export NANOCODEX_HAND_IDENTITY
+          echo "Hand source identity: $NANOCODEX_HAND_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
           VERGEN_GIT_SHA="$BUILD_SHA" \
             cargo build --locked --profile nightly --timings \
-              --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo \
+              --package nanocodex-bin --package nanocodex-hand-daemon --features "$features" \
               --target ${{ matrix.target }}
+          scripts/release/hand-source-identity.py verify \
+            --report "$RUNNER_TEMP/hand-identity-inputs.json" \
+            --dep-info "target/${{ matrix.target }}/nightly/nanocodex-hand.d"
       - name: Verify shipped Linux Hand screen payload
         if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
         shell: bash
@@ -163,6 +205,24 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
+      # The shipped updater installs this exact pair (and, from minimal real
+      # source checkouts, rebuilt pairs) under an isolated synthetic account.
+      - name: Exercise the public macOS updater journeys with the built pair
+        if: runner.os == 'macOS' && matrix.component == 'cli'
+        shell: bash
+        run: |
+          node bin/nanocodex/tests/update_local_e2e.mjs \
+            "target/${{ matrix.target }}/nightly/nanocodex" \
+            "target/${{ matrix.target }}/nightly/nanocodex-hand" \
+            "${{ runner.temp }}/update-local-e2e" --source
+      - name: Retain updater journey evidence
+        if: always() && runner.os == 'macOS' && matrix.component == 'cli'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-update-journeys-${{ matrix.target }}
+          path: ${{ runner.temp }}/update-local-e2e
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Retain Cargo build timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -172,6 +232,12 @@ jobs:
             target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report compiler cache reuse
+        if: always() && matrix.component == 'cli' && env.RUSTC_WRAPPER == 'sccache'
+        shell: bash
+        run: |
+          sccache --show-stats | tee sccache-stats.txt
+          { echo '### sccache (${{ matrix.target }})'; grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable)' sccache-stats.txt | grep -v ' by ' | sed 's/^/    /'; } >> "$GITHUB_STEP_SUMMARY"
 
   bundle:
     name: bundle ${{ matrix.target }}
@@ -264,12 +330,29 @@ jobs:
           workspaces: |
             . -> target
           cache-on-failure: true
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.16.0
+      - name: Reuse unchanged workspace crates
+        shell: pwsh
+        env:
+          # Same write policy as the Linux and macOS CLI builds.
+          CACHE_MODE: ${{ (inputs.pr == '' || github.ref != 'refs/heads/master') && 'READ_WRITE' || 'READ_ONLY' }}
+        run: |
+          @(
+            "RUSTC_WRAPPER=sccache",
+            "SCCACHE_GHA_ENABLED=true",
+            "SCCACHE_GHA_RW_MODE=$env:CACHE_MODE",
+            "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build Windows Hand payload
         shell: pwsh
         env:
           TAG_NAME: ${{ inputs.pr && format('pr-{0}', inputs.pr) || 'nightly' }}
+          # Both executables report the exact commit they were built from.
+          VERGEN_GIT_SHA: ${{ env.BUILD_SHA }}
         run: |
-          cargo build --locked --profile nightly --timings --package nanocodex-bin --bin nanocodex --bin nanocodex-hand --features tempo
+          cargo build --locked --profile nightly --timings --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign payload when Authenticode is configured
         shell: pwsh
@@ -319,6 +402,12 @@ jobs:
             target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report compiler cache reuse
+        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        shell: bash
+        run: |
+          sccache --show-stats | tee sccache-stats.txt
+          { echo '### sccache (x86_64-pc-windows-msvc)'; grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable)' sccache-stats.txt | grep -v ' by ' | sed 's/^/    /'; } >> "$GITHUB_STEP_SUMMARY"
 
   build-vm-guest:
     if: >-
