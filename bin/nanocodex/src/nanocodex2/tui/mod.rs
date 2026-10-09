@@ -566,6 +566,9 @@ struct DriverRuntime {
     voice_tasks: JoinSet<(PaneId, Result<String, String>)>,
     voice: Option<crate::nanocodex2::voice::Session>,
     client: ManagedClient,
+    /// The local backend for ncl; None for managed sessions.
+    local: Option<local::LocalState>,
+    feature_overlay: Option<Box<dyn features::FeatureOverlay>>,
     agent: Option<Nanocodex>,
     startup_attach: bool,
     pending_resume: Option<(tokio::task::AbortHandle, PaneId)>,
@@ -1168,6 +1171,12 @@ impl DriverRuntime {
         scheduler: &mut RenderScheduler,
         automatic: bool,
     ) {
+        if self.local.is_some() {
+            // A local agent has no durable stream to reattach; its turns
+            // finish through their own results.
+            let _ = (app, scheduler, automatic);
+            return;
+        }
         if let Some((_, pane)) = &self.pending_resume {
             // A failed old stream must not race the explicitly selected session.
             // If resume fails, its completion path will recover this connection.
@@ -1569,6 +1578,11 @@ impl DriverRuntime {
             return;
         };
         let managed_request_id = uuid::Uuid::now_v7().to_string();
+        if let Some(local) = &mut self.local {
+            // The event bridge tags the next local run with this request id.
+            local.submissions.push(managed_request_id.clone());
+            local.prompted = true;
+        }
         self.submitted_turns.insert(managed_request_id.clone());
         self.unacknowledged_inputs
             .insert(id, (pane, managed_request_id.clone(), prompt.clone()));
@@ -1712,6 +1726,32 @@ impl DriverRuntime {
     fn spawn_connection(&mut self, purpose: ConnectionPurpose, target: RetryTarget) {
         if matches!(purpose, ConnectionPurpose::Startup) {
             self.retry_target = Some(target.clone());
+        }
+        if let Some(local) = &self.local {
+            let connecting = local.connect();
+            self.connection.spawn(async move {
+                let result = connecting
+                    .await
+                    .map(|connected| {
+                        (
+                            connected.agent,
+                            connected.events,
+                            connected.session_id,
+                            connected.workspace,
+                            HistoryWindow::default(),
+                            None,
+                            connected.settings,
+                            true,
+                            ManagedActiveTurns::default(),
+                        )
+                    })
+                    .map_err(|error| ConnectionFailure {
+                        error: ManagedError::Configuration(error),
+                        retry: target,
+                    });
+                ConnectionResult::Agent { purpose, result }
+            });
+            return;
         }
         let client = self.client.clone();
         let (agent_id, settings) = match target {
@@ -2136,6 +2176,8 @@ async fn run_inner(
         btw_events,
         screen: screen::Controller::new(None),
         client: client.clone(),
+        local: local_launch.map(local::LocalState::new),
+        feature_overlay: None,
         pending_voice: None,
         voice_selection: Default::default(),
         voice_tasks: JoinSet::new(),
@@ -5869,6 +5911,8 @@ mod tests {
             clone_panel: None,
             voice: None,
             client: ManagedClient::new("http://127.0.0.1:9", api_key).unwrap(),
+            local: None,
+            feature_overlay: None,
             agent: None,
             startup_attach: false,
             pending_resume: None,
