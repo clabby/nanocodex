@@ -27,6 +27,12 @@ name older updaters fetch (`nanocodex-x86_64-pc-windows-msvc.exe` and
 `nanocodex2-x86_64-pc-windows-msvc.exe` on Windows). `SHA256SUMS` lists both.
 x86_64 Linux also contains the static VM guest.
 
+Linux x86_64 and Apple Silicon bundles include a platform voice runtime archive.
+The voice jobs verify initialization and relocation before upload; the updater
+checks its checksum and installs it under the selected version's
+`nanocodex-resources/voice`. Windows currently has no voice archive. Native voice
+payloads are release components, not outputs of an ordinary Rust debug build.
+
 Ordinary debug builds use Cargo's incremental cache without a provenance build
 script. CLI, Hand, shared executable support, and terminal rendering are separate
 packages. CLI-only edits leave the Hand package cached. A plain development build
@@ -64,6 +70,8 @@ builds is verified only on a real Mac.
 platform bundle atomically and exposes the CLI as `nanocodex`, `nc`, and `ncl`
 under `$NANOCODEX_DIR/bin`; the invoked name selects the managed tree
 (`nanocodex`, `nc`) or the local agent tree (`ncl`, or `nanocodex --local`).
+The verified Hand companion is exposed as `nanocodex-hand` and `nc-hand`.
+These names are aliases for the two role executables, not extra Cargo binaries.
 `nanocodex update --branch NAME` and `nanocodex update --pr NUMBER` fetch source into a temporary
 checkout, compile the CLI and Hand locally, and install them together; when the
 built Hand reports the running Hand's identity, only the CLI changes.
