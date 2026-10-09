@@ -77,7 +77,10 @@ pub(super) fn extract(archive: &[u8], parent: &Path) -> Result<String> {
     let mut total = 0_u64;
     let mut receipt = String::new();
     let mut entries = 0_usize;
-    for entry in archive.entries().wrap_err("invalid Nanocodex.app archive")? {
+    for entry in archive
+        .entries()
+        .wrap_err("invalid Nanocodex.app archive")?
+    {
         let mut entry = entry.wrap_err("invalid Nanocodex.app archive entry")?;
         let kind = entry.header().entry_type();
         if matches!(
@@ -244,7 +247,11 @@ fn info_plist(version: &str) -> String {
 pub(super) fn wrap(hand: &[u8], version: &str, parent: &Path) -> Result<String> {
     let contents = parent.join("Nanocodex.app/Contents");
     super::store::atomic_write(&contents.join("MacOS/nanocodex2"), hand, true)?;
-    super::store::atomic_write(&contents.join("Info.plist"), info_plist(version).as_bytes(), false)?;
+    super::store::atomic_write(
+        &contents.join("Info.plist"),
+        info_plist(version).as_bytes(),
+        false,
+    )?;
     sign(&parent.join(BUNDLE))?;
     verify_signature(&parent.join(BUNDLE))?;
     receipt_of(parent)

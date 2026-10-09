@@ -136,7 +136,11 @@ pub(crate) fn cli_binary() -> io::Result<PathBuf> {
         // installation's active CLI.
         if let Some(root) = running
             .ancestors()
-            .find(|directory| directory.file_name().is_some_and(|name| name == "hand-versions"))
+            .find(|directory| {
+                directory
+                    .file_name()
+                    .is_some_and(|name| name == "hand-versions")
+            })
             .and_then(Path::parent)
         {
             candidates.push(root.join("current").join(file_name("nanocodex")));

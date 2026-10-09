@@ -68,7 +68,10 @@ fn installed_root_for(executable: &Path) -> Option<PathBuf> {
         // versions/<key>/, or hand-versions/<identity>/ for a Hand stored
         // once per identity.
         let versions = directory.parent()?;
-        if !matches!(versions.file_name()?.to_str()?, "versions" | "hand-versions") {
+        if !matches!(
+            versions.file_name()?.to_str()?,
+            "versions" | "hand-versions"
+        ) {
             return None;
         }
         versions.parent()?

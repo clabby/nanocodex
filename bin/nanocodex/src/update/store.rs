@@ -488,11 +488,7 @@ impl VersionStore {
     /// `store_hand`: an unchanged Hand keeps one path and one signature, so
     /// installing it again never re-signs or moves the running Hand.
     #[cfg(unix)]
-    fn store_hand_app(
-        &self,
-        key: &str,
-        build: impl FnOnce(&Path) -> Result<String>,
-    ) -> Result<()> {
+    fn store_hand_app(&self, key: &str, build: impl FnOnce(&Path) -> Result<String>) -> Result<()> {
         validate_key(key)?;
         let identity = self.hand_identity_of(key).ok_or_else(|| {
             eyre!("Nanocodex version {key} has no Hand identity; its Hand cannot be bundled")
@@ -522,7 +518,11 @@ impl VersionStore {
             fs::rename(staging.path().join(super::app::BUNDLE), &bundle)
                 .wrap_err_with(|| format!("failed to install {}", bundle.display()))?;
             // The receipt is written last; without it the bundle is incomplete.
-            atomic_write(&directory.join(super::app::RECEIPT), receipt.as_bytes(), false)?;
+            atomic_write(
+                &directory.join(super::app::RECEIPT),
+                receipt.as_bytes(),
+                false,
+            )?;
         }
         atomic_symlink(
             &self.version_dir(key).join(super::app::BUNDLE),
@@ -1187,9 +1187,14 @@ mod tests {
         fs::write(contents.join("Info.plist"), b"<plist/>").unwrap();
         fs::write(contents.join("_CodeSignature/CodeResources"), b"sealed").unwrap();
         fs::write(contents.join("MacOS/nanocodex2"), hand).unwrap();
-        fs::set_permissions(contents.join("MacOS/nanocodex2"), fs::Permissions::from_mode(0o755))
-            .unwrap();
-        let archive = work.path().join("nanocodex-app-aarch64-apple-darwin.tar.gz");
+        fs::set_permissions(
+            contents.join("MacOS/nanocodex2"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let archive = work
+            .path()
+            .join("nanocodex-app-aarch64-apple-darwin.tar.gz");
         let mut tar = std::process::Command::new("tar");
         tar.env("COPYFILE_DISABLE", "1").arg("--no-xattrs");
         if let Some(format) = format {
@@ -1221,7 +1226,9 @@ mod tests {
             header.set_size(4);
             header.set_mode(mode);
             header.set_cksum();
-            archive.append_data(&mut header, path, &b"hand"[..]).unwrap();
+            archive
+                .append_data(&mut header, path, &b"hand"[..])
+                .unwrap();
         }
         let mut header = tar::Header::new_gnu();
         header.set_size(0);
@@ -1259,11 +1266,9 @@ mod tests {
         let first = store.hand_executable("1.0.0").canonicalize().unwrap();
         assert_eq!(
             first,
-            directory
-                .path()
-                .canonicalize()
-                .unwrap()
-                .join(format!("hand-versions/{HAND_A}/Nanocodex.app/Contents/MacOS/nanocodex2"))
+            directory.path().canonicalize().unwrap().join(format!(
+                "hand-versions/{HAND_A}/Nanocodex.app/Contents/MacOS/nanocodex2"
+            ))
         );
         assert_eq!(
             directory
@@ -1281,7 +1286,10 @@ mod tests {
             .install_bundle_with_hand("1.0.1", b"cli-2", b"hand-a", Some(HAND_A), None, None)
             .unwrap();
         store
-            .install_hand_app("1.0.1", &release_app_archive(b"hand-a-resigned", Some("pax")))
+            .install_hand_app(
+                "1.0.1",
+                &release_app_archive(b"hand-a-resigned", Some("pax")),
+            )
             .unwrap();
         store.activate("1.0.1").unwrap();
         let second = store.hand_executable("1.0.1").canonicalize().unwrap();
@@ -1293,7 +1301,10 @@ mod tests {
         // for rollback.
         install_release(&store, "2.0.0", HAND_B, b"hand-b");
         store.activate("2.0.0").unwrap();
-        assert_ne!(store.hand_executable("2.0.0").canonicalize().unwrap(), first);
+        assert_ne!(
+            store.hand_executable("2.0.0").canonicalize().unwrap(),
+            first
+        );
         store.activate("1.0.1").unwrap();
         assert!(store.is_cached_bundle("1.0.1", false).unwrap());
         assert_eq!(
@@ -1311,7 +1322,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = VersionStore::at(directory.path());
         install_release(&store, "1.0.0", HAND_A, b"hand-a");
-        let bundle = directory.path().join(format!("hand-versions/{HAND_A}/Nanocodex.app"));
+        let bundle = directory
+            .path()
+            .join(format!("hand-versions/{HAND_A}/Nanocodex.app"));
         fs::write(bundle.join("Contents/Info.plist"), b"tampered").unwrap();
         assert!(!store.has_hand_app("1.0.0").unwrap());
         assert!(!store.is_cached_bundle("1.0.0", false).unwrap());
@@ -1326,7 +1339,12 @@ mod tests {
         let aside = fs::read_dir(bundle.parent().unwrap())
             .unwrap()
             .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".corrupt-app-"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".corrupt-app-")
+            })
             .count();
         assert_eq!(aside, 1);
 
@@ -1345,13 +1363,29 @@ mod tests {
             .unwrap();
         for archive in [
             crafted_app_archive("Nanocodex.app/../escaped", tar::EntryType::Regular, 0o755),
-            crafted_app_archive("Nanocodex.app/Contents/link", tar::EntryType::Symlink, 0o755),
+            crafted_app_archive(
+                "Nanocodex.app/Contents/link",
+                tar::EntryType::Symlink,
+                0o755,
+            ),
             crafted_app_archive("Nanocodex.app/Contents/hard", tar::EntryType::Link, 0o755),
-            crafted_app_archive("Nanocodex.app/Contents/._Info.plist", tar::EntryType::Regular, 0o755),
+            crafted_app_archive(
+                "Nanocodex.app/Contents/._Info.plist",
+                tar::EntryType::Regular,
+                0o755,
+            ),
             crafted_app_archive("Other.app/Contents/x", tar::EntryType::Regular, 0o755),
-            crafted_app_archive("Nanocodex.app/Contents/info.plist", tar::EntryType::Regular, 0o755),
+            crafted_app_archive(
+                "Nanocodex.app/Contents/info.plist",
+                tar::EntryType::Regular,
+                0o755,
+            ),
             // The Hand inside the bundle must be executable.
-            crafted_app_archive("Nanocodex.app/Contents/Resources/x", tar::EntryType::Regular, 0o644),
+            crafted_app_archive(
+                "Nanocodex.app/Contents/Resources/x",
+                tar::EntryType::Regular,
+                0o644,
+            ),
             b"not a gzip archive".to_vec(),
         ] {
             assert!(store.install_hand_app("1.0.1", &archive).is_err());

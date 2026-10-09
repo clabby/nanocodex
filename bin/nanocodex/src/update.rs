@@ -443,7 +443,7 @@ impl Update {
         let voice_name = voice::asset_name(binary_asset_name()?);
         let checksum_manifest =
             download(&client, find_asset(&release, CHECKSUMS_ASSET)?, false).await?;
-        let voice_asset = optional_voice_asset(&release, &checksum_manifest, &voice_name)?;
+        let voice_asset = optional_release_asset(&release, &checksum_manifest, &voice_name)?;
         let app_asset = match app::asset_name() {
             Some(name) => optional_release_asset(&release, &checksum_manifest, name)?,
             None => None,
@@ -1784,17 +1784,10 @@ fn find_asset<'a>(release: &'a Release, name: &str) -> Result<&'a ReleaseAsset> 
         })
 }
 
-/// An optional asset is used only with its checksum; advertising either
-/// without the other fails closed. Older releases lack both.
+/// An optional asset (voice runtime, macOS app bundle) is used only with its
+/// checksum; advertising either without the other fails closed. Releases that
+/// predate the asset lack both.
 fn optional_release_asset<'a>(
-    release: &'a Release,
-    manifest: &[u8],
-    name: &str,
-) -> Result<Option<&'a ReleaseAsset>> {
-    optional_voice_asset(release, manifest, name)
-}
-
-fn optional_voice_asset<'a>(
     release: &'a Release,
     manifest: &[u8],
     name: &str,
@@ -1809,7 +1802,7 @@ fn optional_voice_asset<'a>(
         checksum_for(manifest, name)?;
         return find_asset(release, name).map(Some);
     }
-    Ok(None) // Compatibility with releases that predate packaged voice.
+    Ok(None)
 }
 
 fn find_preferred_asset<'a>(
@@ -2086,20 +2079,20 @@ mod tests {
             assets: vec![],
         };
         assert!(
-            optional_voice_asset(&release, b"", &name)
+            optional_release_asset(&release, b"", &name)
                 .unwrap()
                 .is_none()
         );
         let manifest = format!("{}  {name}\n", "a".repeat(64));
-        assert!(optional_voice_asset(&release, manifest.as_bytes(), &name).is_err());
+        assert!(optional_release_asset(&release, manifest.as_bytes(), &name).is_err());
         release.assets.push(ReleaseAsset {
             id: 1,
             name: name.clone(),
             browser_download_url: "https://example.invalid/voice".into(),
         });
-        assert!(optional_voice_asset(&release, b"", &name).is_err());
+        assert!(optional_release_asset(&release, b"", &name).is_err());
         assert!(
-            optional_voice_asset(&release, manifest.as_bytes(), &name)
+            optional_release_asset(&release, manifest.as_bytes(), &name)
                 .unwrap()
                 .is_some()
         );
