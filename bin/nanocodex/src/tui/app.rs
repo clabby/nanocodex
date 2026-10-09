@@ -578,7 +578,10 @@ impl Conversation {
         self.materialize_code_parent(&payload.call_id);
         let arguments = summarize_tool_arguments(&payload.tool, &payload.arguments);
         let name = present_tool_name(&payload.tool, &payload.arguments);
-        self.status = format!("Running {name}");
+        // A detached Code Mode cell can start nested calls after its turn ended.
+        if self.running {
+            self.status = format!("Running {name}");
+        }
         let call_id = payload.call_id;
         let status = ToolStatus::Running;
         if self.transcript.has_tool_parent(&call_id) {
@@ -749,7 +752,12 @@ impl Conversation {
                 .set_raw_tool_result(&payload.call_id, payload.result.clone());
         }
         self.note_unseen_output();
-        "Working".clone_into(&mut self.status);
+        // Late results from a detached Code Mode cell arrive after the turn ended.
+        self.status = if self.running {
+            "Working".to_owned()
+        } else {
+            "Ready".to_owned()
+        };
         true
     }
 
