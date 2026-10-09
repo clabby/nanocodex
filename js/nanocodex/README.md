@@ -340,7 +340,11 @@ retains its child task tree, conversations, and results across runtime shutdown
 and reconstruction. Cloudflare teardown preserves the children's authorization
 and pinned routes so completed children can receive follow-up messages after
 restoration. Explicitly closing a child releases its bindings and keeps it closed
-after reconstruction. Child messages remain in the separate task-tree journal,
+after reconstruction. If three consecutive automatic resumes are lost before the
+child's turn settles, its next reconstruction reports `subagent recovery exhausted`
+and stops automatic recovery. The child retains its history and can receive an
+explicit delegation after any uncertain tool effects have been reconciled.
+Child messages remain in the separate task-tree journal,
 not the root conversation stream. Children of roots without durability live only
 for the lifetime of the runtime. Obsolete child checkpoint tables from older
 versions are discarded; current child state belongs to the root journal. Use
@@ -633,8 +637,9 @@ binding crate at build time and exposed by a small branded JS configuration;
 adding a dynamic component ABI would be a separate feature with a much larger
 contract and runtime cost.
 
-The root owns the task tree. `agent.session.shutdown()` closes every child
-before stopping the root driver; applications do not maintain a parallel JS
+The root owns the task tree. `agent.session.shutdown()` stops every child runtime
+before stopping the root driver, preserving durable children for reconstruction.
+Applications do not maintain a parallel JS
 scheduler or reimplement the communication tools.
 
 ## Persistent workspaces

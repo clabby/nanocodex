@@ -2347,17 +2347,25 @@ impl Registry {
                     }
                 }
             }
-            let final_journal = if let Some(store) = self.store_for(&root) {
-                let checkpoints = self
-                    .checkpoints
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let scope = state.scope_mut(&root);
-                let payload = scope.journal_payload(&root, &checkpoints)?;
-                scope.journal_frozen = true;
-                Some((store, payload))
-            } else {
-                None
+            // A repeated shutdown (for example a retry after a failed first
+            // flush) must not replace the pre-teardown journal with its
+            // live Closing/Closed statuses.
+            let frozen = state
+                .scopes
+                .get(&root)
+                .is_some_and(|scope| scope.journal_frozen);
+            let final_journal = match self.store_for(&root) {
+                Some(store) if !frozen => {
+                    let checkpoints = self
+                        .checkpoints
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let scope = state.scope_mut(&root);
+                    let payload = scope.journal_payload(&root, &checkpoints)?;
+                    scope.journal_frozen = true;
+                    Some((store, payload))
+                }
+                _ => None,
             };
             // Freeze and transition under one state lock. Explicit closes that
             // won message_lock are already reflected in this durable snapshot.

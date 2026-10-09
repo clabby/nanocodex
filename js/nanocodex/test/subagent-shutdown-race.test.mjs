@@ -245,3 +245,69 @@ test('shutdown during every automatic child resume stops at the durable recovery
     }, null, 2));
   }
 });
+
+test('a failed final journal flush cannot let shutdown cleanup persist closed children', { timeout: 30_000 }, async () => {
+  const module = await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url));
+  const errors = [], saves = [];
+  let calls = 0, failNextJournal = false;
+  const server = createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks));
+      const output = body.input.at(-1)?.type === 'custom_tool_call_output'
+        ? [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'CHILD_DONE' }] }]
+        : [{ type: 'custom_tool_call', call_id: `submit-${calls}`, name: 'exec',
+          input: `text(await tools.submit_result(${JSON.stringify({ output: 'SURVIVES_FAILED_FLUSH' })}));` }];
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(`data: ${JSON.stringify({ type: 'response.completed', response: { id: `response-${++calls}`, status: 'completed', output,
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`);
+    } catch (error) { errors.push(String(error)); response.destroy(error); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const durabilityId = 'durable-failed-final-flush';
+  const memory = createMemoryDurabilityStore(durabilityId);
+  // One synthetic storage outage on the subagent journal during shutdown.
+  const durability = { ...memory, replace(selected, request) {
+    const journal = selected.endsWith(':subagents');
+    if (journal && failNextJournal) {
+      failNextJournal = false;
+      saves.push({ selected, outcome: 'synthetic outage' });
+      throw new Error('synthetic subagent journal outage');
+    }
+    const result = memory.replace(selected, request);
+    if (journal) saves.push({ selected, outcome: result.status });
+    return result;
+  } };
+  const options = { module, durabilityId, durability, model: 'gpt-6.1-sol', thinking: 'low', codeEvaluator,
+    transport: Transport.openAi({ apiKey: 'synthetic', apiBaseUrl: `http://127.0.0.1:${server.address().port}/v1`, stateless: true }) };
+  let root, restored, shutdownError;
+  try {
+    root = await Agent.create(options);
+    const child = await Subagents.spawn(root, { role: 'retained', task: 'Submit the requested result.', outputSchema: { type: 'string' } });
+    const completed = await Subagents.wait(root, { agentIds: [child.agent_id], timeoutMs: 5_000 });
+    assert.equal(completed.agents[0].status.state, 'completed', JSON.stringify(completed));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    failNextJournal = true;
+    await root.session.shutdown().catch(error => { shutdownError = String(error); });
+    // Let runtime release and any retried teardown finish before reopening.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    root = await Agent.create(options);
+    restored = await Subagents.list(root, { includeCompleted: true });
+    assert.equal(failNextJournal, false, 'the shutdown flush hit the synthetic outage');
+    assert.deepEqual(restored.agents.find(agent => agent.agent_id === child.agent_id).status,
+      { state: 'completed', output: 'SURVIVES_FAILED_FLUSH' }, JSON.stringify({ restored, saves, shutdownError }));
+    assert.deepEqual(errors, []);
+  } finally {
+    await root?.session.shutdown();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    const output = new URL('../../../output/subagent-shutdown-race/', import.meta.url);
+    await mkdir(output, { recursive: true });
+    await writeFile(new URL('failed-final-flush.json', output), JSON.stringify({
+      command: 'node --test js/nanocodex/test/subagent-shutdown-race.test.mjs',
+      expected: 'one failed final journal save during shutdown leaves the completed child completed after reconstruction',
+      saves, shutdownError, restored, errors,
+    }, null, 2));
+  }
+});
