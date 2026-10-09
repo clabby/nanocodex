@@ -51,6 +51,8 @@ pub(super) struct Build {
     pub(super) sha: String,
     pub(super) cli: Vec<u8>,
     pub(super) hand: Vec<u8>,
+    /// Identity the compiled Hand reports (absent for older source trees).
+    pub(super) hand_identity: Option<String>,
 }
 
 /// How the fetched revision packages its CLI and Hand.
@@ -238,11 +240,12 @@ pub(super) async fn build(
             bail!("failed to sign the locally compiled Hand: {status}");
         }
     }
-    if layout == Layout::Single {
+    let hand_identity = if layout == Layout::Single {
         local::verify_single(&cli_path).await?;
+        None
     } else {
-        local::verify_pair(&cli_path, &hand_path).await?;
-    }
+        local::verify_pair(&cli_path, &hand_path).await?
+    };
     if let Some(bundle) = screen_bundle {
         let status = Command::new("python3")
             .arg(root.join("scripts/tests/linux-screen-helpers-bundle.py"))
@@ -266,7 +269,12 @@ pub(super) async fn build(
     } else {
         std::fs::read(&hand_path).wrap_err("failed to read the compiled Hand")?
     };
-    Ok(Build { sha, cli, hand })
+    Ok(Build {
+        sha,
+        cli,
+        hand,
+        hand_identity,
+    })
 }
 
 async fn layout(root: &Path) -> Result<Layout> {
