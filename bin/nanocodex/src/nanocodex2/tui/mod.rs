@@ -2326,6 +2326,10 @@ async fn run_inner(
         None
     });
     presentation_setup.spawn_blocking(detect_system_scheme);
+    let mut feature_updates = runtime
+        .local
+        .as_mut()
+        .and_then(|local| local.features.take_updates());
     let initial_prompt = runtime
         .local
         .as_mut()
@@ -2573,6 +2577,9 @@ async fn run_inner(
             terminal
                 .draw(|frame| {
                     app.render(frame);
+                    if let Some(overlay) = &mut runtime.feature_overlay {
+                        overlay.render(frame, frame.area(), app.theme());
+                    }
                     if let Some(flow) = &mut runtime.secure_input {
                         flow.render(frame);
                     }
@@ -2598,6 +2605,14 @@ async fn run_inner(
                 (Some(&mut voice.status), Some(&mut voice.transcripts))
             });
         tokio::select! {
+            Some(update) = async {
+                match feature_updates.as_mut() {
+                    Some(updates) => updates.recv().await,
+                    None => pending().await,
+                }
+            } => {
+                stopping |= apply_feature_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+            }
             _ = tmux_tick.tick(), if tmux.is_some() => {
                 if let Some(publisher) = &mut tmux && !(runtime.startup_attach && runtime.agent_id.is_empty()) {
                     let status = if runtime.recovery.is_some() { "reconnecting" }
@@ -2839,6 +2854,35 @@ async fn run_inner(
                     let drain = flow.take_drain();
                     if drain { drain_private_input(&mut input, &mut runtime).await; }
                     runtime.secure_input_action(action);
+                    scheduler.request_immediate(Instant::now());
+                    continue;
+                }
+                // A feature overlay (Claude interaction, branch navigator) is modal.
+                if let Some(overlay) = &mut runtime.feature_overlay {
+                    match &event {
+                        Event::Key(key) if key.kind != KeyEventKind::Release => {
+                            if overlay.key(*key) == features::OverlayOutcome::Close {
+                                runtime.feature_overlay = None;
+                                if let Some(local) = &mut runtime.local {
+                                    local.features.overlay_state(false);
+                                }
+                            }
+                            scheduler.request_immediate(Instant::now());
+                            continue;
+                        }
+                        Event::Paste(text) => {
+                            overlay.paste(text);
+                            scheduler.request_immediate(Instant::now());
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                if let (Some(local), Event::Key(key)) = (&mut runtime.local, &event)
+                    && key.kind == KeyEventKind::Press
+                    && local.with_features(|features, cx| features.key(key, cx))
+                        == features::KeyOutcome::Consumed
+                {
                     scheduler.request_immediate(Instant::now());
                     continue;
                 }
@@ -4106,6 +4150,74 @@ fn fresh_thread_settings(was_routed: bool, settings: AgentSettings) -> AgentSett
 
 fn new_agent_settings() -> AgentSettings {
     AgentSettings::default()
+}
+
+/// Applies one request from a feature module (see `features`).
+async fn apply_feature_update(
+    update: features::FeatureUpdate,
+    app: &mut AppNode,
+    runtime: &mut DriverRuntime,
+    terminal: &mut TerminalSession,
+    scheduler: &mut RenderScheduler,
+) -> Result<bool, ManagedError> {
+    use features::FeatureUpdate;
+    let main = |pane: Option<PaneId>| pane.unwrap_or(PaneId::Main);
+    let update = match update {
+        FeatureUpdate::Notice { pane, message } => app.update(AppEvent::NotifySuccess {
+            pane: main(pane),
+            message,
+        }),
+        FeatureUpdate::Error { pane, message } => app.update(AppEvent::NotifyError {
+            pane: main(pane),
+            error: message,
+        }),
+        FeatureUpdate::Submit { pane, text } => {
+            let pane = main(pane);
+            let prompt = Submission::text(text);
+            let id = TurnId::new(runtime.next_turn);
+            runtime.next_turn = runtime.next_turn.saturating_add(1);
+            let record = runtime.record_submission(id, &prompt)?;
+            let update = app.update(AppEvent::Transcript { pane, record });
+            if runtime.active_shells == 0 {
+                runtime.start_submission(pane, id, prompt);
+            } else {
+                runtime.pending_submission = Some((pane, id, prompt));
+            }
+            update
+        }
+        FeatureUpdate::Record { pane, event } => {
+            let record = runtime.local_record(event)?;
+            app.update(AppEvent::Transcript {
+                pane: main(pane),
+                record,
+            })
+        }
+        FeatureUpdate::OpenOverlay(overlay) => {
+            runtime.feature_overlay = Some(overlay);
+            if let Some(local) = &mut runtime.local {
+                local.features.overlay_state(true);
+            }
+            scheduler.request_immediate(Instant::now());
+            return Ok(false);
+        }
+        FeatureUpdate::CloseOverlay => {
+            if runtime.feature_overlay.take().is_some()
+                && let Some(local) = &mut runtime.local
+            {
+                local.features.overlay_state(false);
+            }
+            scheduler.request_immediate(Instant::now());
+            return Ok(false);
+        }
+        FeatureUpdate::ReplaceAgent(_)
+        | FeatureUpdate::OpenPane(_)
+        | FeatureUpdate::ClosePane(_)
+        | FeatureUpdate::Capabilities(_) => app.update(AppEvent::NotifyError {
+            pane: PaneId::Main,
+            error: "This feature action is not wired into the unified TUI yet".to_owned(),
+        }),
+    };
+    apply_update(update, app, runtime, terminal, scheduler).await
 }
 
 async fn apply_update(

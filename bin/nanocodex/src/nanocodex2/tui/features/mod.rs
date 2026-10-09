@@ -190,7 +190,7 @@ pub(crate) trait Feature: Send {
 /// Every feature of one TUI session plus their shared update channel.
 pub(crate) struct Features {
     host: FeatureHost,
-    updates: mpsc::UnboundedReceiver<FeatureUpdate>,
+    updates: Option<mpsc::UnboundedReceiver<FeatureUpdate>>,
     features: Vec<Box<dyn Feature>>,
 }
 
@@ -199,7 +199,7 @@ impl Features {
         let (sender, updates) = mpsc::unbounded_channel();
         Self {
             host: FeatureHost { sender },
-            updates,
+            updates: Some(updates),
             features: vec![
                 Box::new(claude_interaction::ClaudeInteraction::default()),
                 Box::new(claude_scheduler::ClaudeScheduler::default()),
@@ -279,12 +279,9 @@ impl Features {
         }
     }
 
-    /// The next feature update; pending forever when none arrive.
-    pub(crate) async fn next(&mut self) -> FeatureUpdate {
-        match self.updates.recv().await {
-            Some(update) => update,
-            None => std::future::pending().await,
-        }
+    /// Hands the update receiver to the driver's select loop (once).
+    pub(crate) fn take_updates(&mut self) -> Option<mpsc::UnboundedReceiver<FeatureUpdate>> {
+        self.updates.take()
     }
 }
 

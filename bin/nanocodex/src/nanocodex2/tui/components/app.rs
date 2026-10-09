@@ -303,6 +303,10 @@ pub(crate) struct AppNode {
 }
 
 impl AppNode {
+    pub(crate) const fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
     pub(crate) fn new(theme: Theme, workspace: PathBuf, mut root: RootNode) -> Self {
         root.set_theme_mode(theme.mode());
         Self {
