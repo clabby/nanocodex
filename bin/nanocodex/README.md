@@ -619,6 +619,20 @@ a screen publisher alone does not provide agent control.
 The legacy `--browser`, `--browser-executable`, and
 `NANOCODEX_BROWSER_EXECUTABLE` options are rejected with guidance to use CUA.
 
+The host browser utilities are an optional `browser` Cargo feature, so ordinary
+and release builds do not link the Chromium automation crate:
+
+- `nanocodex cookies list|sync` copies cookies for one exact origin from a local
+  Chromium-family profile into Vault. Without the feature the command exits with
+  an error naming the feature; the Nanocodex Chrome extension captures the
+  current site's cookies into the same Vault cookie jars.
+- `nanocodex credits buy` (`tempo` feature) uses Link Checkout automation only
+  with `browser`; otherwise it says so and opens Stripe Checkout in the system
+  browser.
+
+Build them with `cargo build -p nanocodex-bin --features browser` (add `tempo` for
+credits).
+
 The on-demand `host` pool remains libkrun-only; Docker is available through the
 single `hand` command and the `nanocodex_vm::docker` library API.
 

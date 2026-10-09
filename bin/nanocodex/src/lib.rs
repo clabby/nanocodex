@@ -6,6 +6,7 @@
 mod auth;
 mod benchmark;
 mod browser;
+#[cfg_attr(not(feature = "browser"), path = "browser_cookie_sync_disabled.rs")]
 mod browser_cookie_sync;
 mod clipboard;
 mod config;
@@ -152,6 +153,10 @@ enum Command {
     /// Revoke and remove this installation's Nanocodex Connect login.
     Logout(login::Logout),
     /// Inspect or synchronize local browser cookies and the encrypted account Vault.
+    #[cfg_attr(
+        not(feature = "browser"),
+        command(about = "Unavailable in this build: requires the optional `browser` feature.")
+    )]
     Cookies(browser_cookie_sync::Cookies),
     /// Inspect or purchase Nanocodex NANOUSD credits.
     #[cfg(feature = "tempo")]
@@ -763,6 +768,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "browser")]
     #[test]
     fn cookie_commands_auto_detect_supported_browsers_for_an_exact_origin() {
         let cli = Cli::try_parse_from([

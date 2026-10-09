@@ -21,6 +21,11 @@ tempo = [
     "dep:nanocodex-egress",
     "dep:nanousd",
 ]
+# Host browser utilities driven by the nanocodex-browser CDP automation crate:
+# `nanocodex cookies` and the Link Checkout automation in `credits buy`. Agents
+# reach browsers through a Hand's CUA tools, so ordinary and release builds
+# omit it; without it those commands explain how to enable it.
+browser = ["dep:nanocodex-browser"]
 # Criterion cases over the production shared TUI renderer (benches/nanocodex2_tui.rs).
 tui-bench = ["dep:criterion"]
 
@@ -71,7 +76,7 @@ nanocodex = { workspace = true, features = ["claude-tools", "workspace-tools"] }
 nanocodex-bin-shared.workspace = true
 nanocodex-cli-auth.workspace = true
 nanocodex-durability = { workspace = true, features = ["sqlite"] }
-nanocodex-browser.workspace = true
+nanocodex-browser = { workspace = true, optional = true }
 nanocodex-observability = { workspace = true, features = ["cli"] }
 nanocodex-subagents = { workspace = true, features = ["claude"] }
 nanocodex-voice.workspace = true
