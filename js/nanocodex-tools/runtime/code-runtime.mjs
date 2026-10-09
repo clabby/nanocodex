@@ -1017,6 +1017,9 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     executeCodeObserved,
     waitCodeObserved,
     executeTool,
+    subagentStatus(sessionId, status) {
+      subagentSessions?.status?.(sessionId, status);
+    },
     bindSubagentSession(sessionId, context, hostContextRef) {
       if (hostContextRef !== undefined
         && (typeof hostContextRef !== "string" || hostContextRef.length === 0)) {

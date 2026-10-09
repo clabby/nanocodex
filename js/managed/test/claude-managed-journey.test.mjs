@@ -91,7 +91,7 @@ const assertStrict = definitions => assert.deepEqual(definitions.map(tool=>tool.
 
 test('Managed Code Mode Claude and mixed-family public delegation, account gates, cancellation and recovery', {timeout:240_000}, async () => {
   await mkdir(evidence,{recursive:true});
-  const trace = [], upstream = [], providerErrors = [], mediaRequests = [], deniedCalls = []; let calls=0, summaries=0, writes=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, catalogRequests=0, catalogHold, mf;
+  const trace = [], upstream = [], providerErrors = [], mediaRequests = [], deniedCalls = []; let calls=0, summaries=0, writes=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, catalogRequests=0, catalogHold, hostedJourney, releaseHostedChild, mf;
   const framingRequests = {crOnly:0,truncated:0}, activeSteerRequests = [];
   let releaseActiveSteer;
   const mcpTrace = [], mcpOrigins = new Set(['https://developers.openai.com','https://mcp.tempo.xyz','https://mercator.sh','https://docs.mcp.cloudflare.com','https://viem.sh','https://vocs.dev']);
@@ -146,17 +146,30 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       }
       if (body.model==='gpt-6-luna') {
         assert.match(body.instructions,/Write a short session title/);
-        assert.match(encoded,/Delegate mixed Claude child|Try disconnected mixed child|Delegate nested gateway grandchild|GPT_MCP_DISCOVERY_PROBE|MCP_LAZY_/,'only the Codex gateway root requests a sidebar title');
+        assert.match(encoded,/Delegate mixed Claude child|Try disconnected mixed child|Delegate nested gateway grandchild|GPT_MCP_DISCOVERY_PROBE|MCP_LAZY_|HOSTED_IDLE_/,'only the Codex gateway root requests a sidebar title');
         sidebarCalls++;
         return Response.json({id:'synthetic-title',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Verify native Claude delegation'}]}],usage:{input_tokens:2,output_tokens:2,total_tokens:4}});
       }
       responsesAttempts++;
+      let output;
+      if (hostedJourney && encoded.includes(hostedJourney.marker)) {
+        if (encoded.includes(hostedJourney.childTask)) {
+          hostedJourney.childCalls++;
+          if (hostedJourney.childCalls===1) {
+            hostedJourney.childEntered();
+            await hostedJourney.childGate;
+          }
+          const submitted=body.input.some(item=>item.type==='custom_tool_call'&&item.input.includes('tools.submit_result('));
+          if (!submitted) output=[{type:'custom_tool_call',call_id:'hosted-child-submit-'+responsesAttempts,name:'exec',input:nestedCode('submit_result',{output:hostedJourney.childOutput})}];
+          else output=[{type:'message',role:'assistant',content:[{type:'output_text',text:'Hosted child finished'}]}];
+          return new Response(`data: ${JSON.stringify({type:'response.completed',response:{id:'hosted-child-'+responsesAttempts,status:'completed',output,usage:{input_tokens:10,output_tokens:2,total_tokens:12}}})}\n\n`,{headers:{'content-type':'text/event-stream'}});
+        }
+      }
       assert.equal(allowResponses,true,'only an explicitly selected Codex child may use Responses');
       assert.equal(body.model,'gpt-6.1-sol');
       assert.match(encoded,/CANONICAL_CODEX_PROOF/);
       assertStrict([...(body.tools??[]),...(body.input??[]).filter(item=>item.type==='additional_tools').flatMap(item=>item.tools)]);
       upstream.push({provider:'openai',model:body.model,body});
-      let output;
       if(!encoded.includes('CODEX_EFFECT_ACK')) {
         codexWrites++;
         output=[{type:'custom_tool_call',call_id:'codex-effect-'+responsesAttempts,name:'exec',input:'const effect = await tools.exec_command({cmd:"printf CODEX_DURABLE_CHILD_PROOF > /brain/codex-child.txt",workdir:"/brain"}); if (effect.exit_code !== 0) throw new Error(JSON.stringify(effect)); text("CODEX_EFFECT_ACK");'}];
@@ -187,6 +200,18 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
         .map(message=>typeof message.content==='string'?message.content:message.content.map(part=>part.text??'').join('')).join('\n');
       const identities=[...instructions.matchAll(/<runtime_model_identity>\nmodel_id: ([^\n]+)\n/g)].map(match=>match[1]);
       assert.deepEqual(identities,[body.model.split('/').at(-1)],'runtime identity agrees with the actual gateway model');
+      if (hostedJourney && body.model.split('/').at(-1)===hostedJourney.rootModel && JSON.stringify(body.messages).includes(hostedJourney.marker)) {
+        hostedJourney.rootRequests++;
+        if (hostedJourney.rootInitialCompleted) {
+          hostedJourney.continuationRequests++;
+          if (hostedJourney.continuationRequests===1) return use('list_agents',{include_completed:true});
+          assert.equal(receiptValue(latest.content).agents[0].status.output,hostedJourney.childOutput);
+          return reply({content:hostedJourney.rootOutput},'stop');
+        }
+        if (latest.role!=='tool') return use('spawn_agent',{role:'hosted completion child',task:hostedJourney.childTask,harness:hostedJourney.childHarness,model:hostedJourney.childModel,thinking:'low',output_contract:{kind:'string'}});
+        hostedJourney.rootInitialCompleted=true;
+        return reply({content:'CLAUDE_TOOL_DONE_HOSTED_CHILD_DELEGATED'},'stop');
+      }
       if (JSON.stringify(body.messages).includes('MODEL_IDENTITY_PROBE')) {
         assert.equal(body.model,'xiaomi/mimo-v2.6-pro');
         if (JSON.stringify(latest.content).includes('arent u mimo')) {
@@ -308,6 +333,32 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       const disabledChild = encodedHistory.includes('Try disabled canonical child');
       const code = source => sse({type:'tool_use',id:`exec-${calls}`,name:'exec',input:{code:source}},'tool_use',`message-${calls}`);
       const use = (name, input) => code(nestedCode(name,input));
+      if (hostedJourney && encodedHistory.includes(hostedJourney.marker)
+        && (body.model===hostedJourney.rootModel || (hostedJourney.childHarness==='claude' && body.model===hostedJourney.childModel))) {
+        if (hostedJourney.childHarness==='claude' && body.model===hostedJourney.childModel && body.model!==hostedJourney.rootModel) {
+          hostedJourney.childCalls++;
+          if (hostedJourney.childCalls===1) {
+            hostedJourney.childEntered();
+            await hostedJourney.childGate;
+          }
+          if (!encodedHistory.includes('tools.submit_result(')) return use('submit_result',{output:hostedJourney.childOutput});
+          return sse({type:'text',text:'Hosted child finished'},'end_turn',`message-${calls}`);
+        }
+        hostedJourney.rootRequests++;
+        if (hostedJourney.rootInitialCompleted) {
+          hostedJourney.continuationRequests++;
+          if (hostedJourney.continuationRequests===1) return use('list_agents',{include_completed:true});
+          assert.equal(receiptValue(result.content).agents[0].status.output,hostedJourney.childOutput);
+          return sse({type:'text',text:hostedJourney.rootOutput},'end_turn',`message-${calls}`);
+        }
+        if (!encodedHistory.includes('tools.spawn_agent(')) return use('spawn_agent',{role:'hosted completion child',task:hostedJourney.childTask,harness:hostedJourney.childHarness,model:hostedJourney.childModel,thinking:'low',output_contract:{kind:'string'}});
+        if (hostedJourney.sourceOutcome==='cancelled') {
+          hostedJourney.rootHeld=true;
+          return new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode('event: message_start\ndata: '+JSON.stringify({type:'message_start',message:{id:'hosted-cancel',role:'assistant',model:body.model,content:[],usage:{input_tokens:10,output_tokens:0}}})+'\n\n'));}}),{headers:{'content-type':'text/event-stream'}});
+        }
+        hostedJourney.rootInitialCompleted=true;
+        return sse({type:'text',text:'CLAUDE_TOOL_DONE_HOSTED_CHILD_DELEGATED'},'end_turn',`message-${calls}`);
+      }
       const uses = body.messages.flatMap(message=>Array.isArray(message.content)?message.content.filter(block=>block.type==='tool_use').flatMap(usedNested):[]);
       const resultText = result ? (typeof result.content==='string'?result.content:result.content.map(block=>block.text??'').join('\n')) : '';
       const running = resultText.match(/Script running with cell ID ([^\s]+)/)?.[1];
@@ -475,6 +526,95 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       await new Promise(r=>setTimeout(r,40));
     }
     assert.equal(status.state,expected,JSON.stringify(status));if(expected==='completed')assert.match(JSON.stringify(status),/CLAUDE_TOOL_DONE_/);return status;
+  };
+  const hostedCompletion=async({rootFamily,rootModel,childHarness,childModel,sourceOutcome='completed'})=>{
+    let releaseChild, signalChild;
+    const marker=`HOSTED_IDLE_${rootFamily.toUpperCase()}_${sourceOutcome.toUpperCase()}_ROOT`;
+    const childOutput=`${marker}_CHILD_RESULT`;
+    const rootOutput=`CLAUDE_TOOL_DONE_INTEGRATED: ${childOutput}`;
+    hostedJourney={marker,childTask:`${marker}_CHILD_TASK submit your structured result`,childOutput,rootOutput,
+      rootFamily,rootModel,childHarness,childModel,sourceOutcome,rootInitialCompleted:false,rootRequests:0,continuationRequests:0,childCalls:0,
+      childGate:new Promise(resolve=>{releaseChild=resolve;releaseHostedChild=resolve;}),childEntered:()=>signalChild?.(),
+      childEnteredPromise:new Promise(resolve=>{signalChild=resolve;})};
+    const agent=(await call('/v1/agents','POST',rootFamily==='codex'?{}:{settings:{model:rootModel,thinking:'low',reasoning_mode:'standard',fast_mode:false}},201)).agent_id;
+    if(rootFamily==='codex')await call(`/v1/agents/${agent}/routing`,'POST',{model:rootModel,thinking:'low'});
+    const turnId=`journey-${marker.toLowerCase()}`;
+    const accepted=await call(`/v1/agents/${agent}/turns`,'POST',{input:`${marker}: delegate a child and finish this turn before it completes`,id:turnId},202);
+    let childDeadline;
+    try { await Promise.race([hostedJourney.childEnteredPromise,new Promise((_,reject)=>{childDeadline=setTimeout(()=>reject(new Error(`${marker} child never reached its provider gate`)),30000);})]); }
+    finally { clearTimeout(childDeadline); }
+    if (sourceOutcome==='cancelled') {
+      for(let n=0;n<150&&!hostedJourney.rootHeld;n++)await new Promise(resolve=>setTimeout(resolve,40));
+      assert.equal(hostedJourney.rootHeld,true,'root remains active after spawning');
+      await call(`/v1/agents/${agent}/turns/${turnId}/cancel`,'POST',undefined,202);
+      let cancelled;
+      for(let n=0;n<150;n++){
+        cancelled=await call(`/v1/agents/${agent}/turns/${turnId}`);
+        if(cancelled.state==='cancelled')break;
+        await new Promise(resolve=>setTimeout(resolve,40));
+      }
+      assert.equal(cancelled.state,'cancelled');
+      releaseChild();releaseHostedChild=undefined;
+      let history;
+      for(let n=0;n<150;n++){
+        history=await call(`/v1/agents/${agent}/events/history?after=0&limit=256`);
+        if(history.data.some(row=>row.agent_id!==undefined&&row.event?.type==='run.completed'))break;
+        await new Promise(resolve=>setTimeout(resolve,40));
+      }
+      assert.ok(history.data.some(row=>row.agent_id!==undefined&&row.event?.type==='run.completed'),'child completes after root cancellation');
+      // Observe enough event-loop turns for an erroneous asynchronous admission.
+      for(let n=0;n<10;n++){
+        await new Promise(resolve=>setTimeout(resolve,40));
+        history=await call(`/v1/agents/${agent}/events/history?after=0&limit=256`);
+        assert.equal(history.data.filter(row=>row.type==='turn_accepted').length,1,'completion does not undo root cancellation');
+      }
+      assert.equal(hostedJourney.continuationRequests,0);
+      await writeFile(resolve(evidence,`${marker}.json`),JSON.stringify(history,null,2));
+      trace.push({scenario:'hosted cancelled parent stays stopped',rootFamily,childHarness,child_completed:true,automatic_parent_turns:0});
+      hostedJourney=undefined;
+      return;
+    }
+    let initial;
+    for(let n=0;n<600;n++){
+      initial=await call(`/v1/agents/${agent}/turns/${accepted.turn_id??turnId}`);
+      if(['completed','failed','cancelled'].includes(initial.state))break;
+      await new Promise(resolve=>setTimeout(resolve,40));
+    }
+    assert.equal(initial.state,'completed',JSON.stringify(initial));
+    assert.match(JSON.stringify(initial),/CLAUDE_TOOL_DONE_HOSTED_CHILD_DELEGATED/);
+    const beforeRelease=await call(`/v1/agents/${agent}/events/history?after=0&limit=256`);
+    assert.equal(beforeRelease.data.filter(row=>row.type==='turn_completed'&&row.id===turnId).length,1,'original root turn is complete while its child remains gated');
+    const spawn=beforeRelease.data.find(row=>row.agent_id===undefined&&row.event?.type==='tool.result'&&row.event.payload.tool==='spawn_agent');
+    assert.ok(spawn,JSON.stringify(beforeRelease));
+    const childId=spawn.event.payload.structured_result.agent_id;
+    assert.ok(childId,'the public root tool result identifies its managed child');
+    assert.equal(beforeRelease.data.filter(row=>row.agent_id===childId&&row.event?.type==='tool.result'&&row.event.payload.tool==='submit_result').length,0,'child has not completed before release');
+    releaseChild();releaseHostedChild=undefined;
+    let completedHistory;
+    for(let n=0;n<600;n++){
+      completedHistory=await call(`/v1/agents/${agent}/events/history?after=0&limit=256`);
+      if(completedHistory.data.some(row=>row.type==='turn_completed'&&row.final_message===rootOutput))break;
+      await new Promise(resolve=>setTimeout(resolve,40));
+    }
+    const automatic=completedHistory.data.filter(row=>row.type==='turn_completed'&&row.final_message===rootOutput);
+    assert.equal(automatic.length,1,'one idle-only managed continuation publishes one public result');
+    assert.equal(hostedJourney.continuationRequests,2,'the automatic turn inspects the child then answers');
+    assert.equal(hostedJourney.rootRequests,4,'two original requests and two continuation requests');
+    assert.equal(hostedJourney.childCalls,2,'the child submits its result and completes one Code Mode follow-up');
+    const childCompletions=completedHistory.data.filter(row=>row.agent_id===childId&&row.event?.type==='tool.result'&&row.event.payload.tool==='submit_result');
+    assert.equal(childCompletions.length,1,'the direct child completion is integrated once');
+    assert.equal(childCompletions[0].event.payload.structured_result.accepted,true);
+    assert.match(automatic[0].final_message,new RegExp(childOutput),'the public automatic turn result carries the integrated child output');
+    trace.push({scenario:'hosted automatic child completion',rootFamily,childHarness,root_turn_id:turnId,child_agent_id:childId,
+      original_completed_while_child_gated:true,automatic_turn_id:automatic[0].turn_id,integrated_child_output:true,
+      child_completion_count:childCompletions.length,automatic_inference_count:hostedJourney.continuationRequests});
+    const listing=completedHistory.data.find(row=>row.agent_id===undefined&&row.turn_id===automatic[0].id&&row.event?.type==='tool.result'&&row.event.payload.tool==='list_agents');
+    assert.equal(listing?.event.payload.structured_result.agents[0].status.output,childOutput,'automatic parent fetches the real completed child result');
+    assert.equal(completedHistory.data.filter(row=>row.type==='turn_accepted').length,2,'exactly one autonomous turn is admitted');
+    await writeFile(resolve(evidence,`${marker}.json`),JSON.stringify(completedHistory,null,2));
+    const result={agent,childId,history:completedHistory};
+    hostedJourney=undefined;
+    return result;
   };
   try {
     mf=new Miniflare(options);
@@ -665,6 +805,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     await turn(canonical,'Delegate canonical Claude child','journey-canonical-child');
     assert.equal(canonicalWrites,1);
     const canonicalHistory=await call(`/v1/agents/${canonical}/events/history?after=0&limit=256`);
+    assert.equal(canonicalHistory.data.filter(row=>row.agent_id===undefined&&row.event?.type==='run.started').length,1,'active wait produces one root run without a redundant continuation');
     assert.ok(canonicalHistory.data.some(row=>row.agent_id!==undefined && row.event?.type==='tool.result' && row.event.payload.tool==='Write'),'canonical child execution appears in public child events');
     assert.match(JSON.stringify(canonicalHistory),/CANONICAL_DURABLE_CHILD_PROOF/);
     const unavailableCanonical=(await call('/v1/agents','POST',{},201)).agent_id;
@@ -799,6 +940,8 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     catalogOutage=false;
     const mobileSelection=await call(`/v1/agents/${reverse}/routing`,'POST',{model:'claude-sonnet-4-6',thinking:'low'});
     assert.equal(mobileSelection.automatic,false);assert.equal(mobileSelection.settings.model,'claude-sonnet-4-6');
+    await hostedCompletion({rootFamily:'claude',rootModel:'claude-sonnet-4-6',childHarness:'codex',childModel:'gpt-6.1-sol'});
+    await hostedCompletion({rootFamily:'claude',rootModel:'claude-sonnet-4-6',childHarness:'codex',childModel:'gpt-6.1-sol',sourceOutcome:'cancelled'});
     await turn(reverse,'Delegate canonical Codex child','journey-reverse-child');
     assert.equal(codexWrites,1,'explicit Claude→Codex delegation executes one real Code Mode effect');
     assert.equal((await call(`/v1/agents/${reverse}`)).settings.model,'claude-sonnet-4-6');
@@ -852,6 +995,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     const legacy=await call('/v1/models');for(const model of ['@cf/zai-org/glm-5.3','kimi-k3','mimo-v2.6-pro'])assert.ok(legacy.data.some(row=>row.id===model));
     const gateway=await call('/v1/agents','POST',{},201);await call(`/v1/agents/${gateway.agent_id}/routing`,'POST',{model:'kimi-k3',thinking:'low'});assert.equal((await call(`/v1/agents/${gateway.agent_id}`)).settings.model,'kimi-k3');
     catalogOutage=false;
+    await hostedCompletion({rootFamily:'codex',rootModel:'kimi-k3',childHarness:'claude',childModel:'claude-opus-4-6'});
     await turn(gateway.agent_id,'Delegate mixed Claude child','journey-mixed-child');
     assert.equal(canonicalWrites,2,'Codex-family gateway root executes native Claude child');
     const mixedHistory=await call(`/v1/agents/${gateway.agent_id}/events/history?after=0&limit=256`);
@@ -891,6 +1035,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     console.info('CLAUDE_MANAGED_JOURNEY',{calls,summaries,writes,canonicalWrites,codexWrites,nestedWrites,sidebarCalls,holds,responsesAttempts,DOReopens:5,framingRequests,activeSteerRequests:activeSteerRequests.length,modelTools:['exec','wait'],nestedTools:['Write','Read','Bash'],actualModels:catalog.data.map(m=>m.id),staleSelectionDenied:true,gatewayOnlyDefault:gatewayOnly.default_model,unsupportedOnlyAvailable:unsupportedOnly.availability.claude.available,exactToolAllowlist:true});
   } finally {
     releaseActiveSteer?.();
+    releaseHostedChild?.();
     await mf?.dispose();
     await writeFile(resolve(evidence,'public-api-trace.json'),JSON.stringify(trace,null,2));
     await writeFile(resolve(evidence,'provider-trace.json'),JSON.stringify(upstream,null,2));

@@ -1409,7 +1409,7 @@ export function applyManagedSubagentLifecycle(
   storage: DurableObjectStorage,
   bindings: ManagedSubagentBindings,
   value: unknown,
-): void {
+): ManagedSubagentAuthorizationRow | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("invalid managed subagent lifecycle event");
   }
@@ -1436,9 +1436,9 @@ export function applyManagedSubagentLifecycle(
       || !["pending", "running", "completed", "failed", "interrupted", "closing", "closed"].includes((event.status as { state: string }).state)) {
       throw new Error("managed subagent status does not match live authorization");
     }
-    // Status is observational. Only bind/release change the child's authority;
-    // completed children remain available for canonical follow-up messages.
-    return;
+    // Completion retains the child's authority and history for follow-up. The
+    // host may use its original binding to continue an idle root conversation.
+    return (event.status as { state: string }).state === "completed" ? retained : undefined;
   }
   if (type === "release") {
     if (Object.keys(event).some((key) => !["type", "rootSessionId", "sessionId", "hostContextRef"].includes(key))
@@ -10400,6 +10400,7 @@ export class DurableAgentSession extends DurableComputerObject {
   ): Promise<CloudflareAgent.Agent> {
     const constructionStartedAt = performance.now();
     let phaseStartedAt = constructionStartedAt;
+    const runtimeGeneration = this.#runtimeOwnershipGeneration;
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
     const multiplayer = session.runtime_profile === "multiplayer";
@@ -11400,7 +11401,13 @@ export class DurableAgentSession extends DurableComputerObject {
         inferenceForSession,
         preserveRootTransport: !this.#threadRoute(),
         subagentLifecycle: (event: unknown) => {
-          applyManagedSubagentLifecycle(this.ctx.storage, bindings, event);
+          const completed = applyManagedSubagentLifecycle(this.ctx.storage, bindings, event);
+          if (completed?.parentAgentId === null) {
+            this.ctx.waitUntil(this.#track(this.#continueAfterSubagent(completed, bindings, runtimeGeneration)).catch(error => {
+              if (error instanceof ManagedRequestError && error.code === "subagent_continuation_superseded") return;
+              console.warn({ type: "managed.subagent_continuation_failed", error_kind: errorKind(error) });
+            }));
+          }
         },
         ...(this.#threadRoute()?.backend === "workers_ai" ? {
           workersAi: {
@@ -11869,6 +11876,43 @@ export class DurableAgentSession extends DurableComputerObject {
       throw new ManagedRequestError(403, "forbidden", "goal tools require the root persistent thread and full account tool authority");
     }
     return id;
+  }
+
+  async #continueAfterSubagent(
+    child: ManagedSubagentAuthorizationRow,
+    bindings: ManagedSubagentBindings,
+    runtimeGeneration: number,
+  ): Promise<void> {
+    const session = this.#session();
+    if (!session) return;
+    // Match the CLI: a completion wakes only an idle parent. Active turns can
+    // inspect their children themselves, including through wait_agent.
+    const canContinue = () => this.#runtimeOwnershipGeneration === runtimeGeneration && this.#agent !== undefined
+      && !this.#deleting && !this.#deleted && !this.#streamError
+      && !this.#durabilityExported && this.#durabilityImportState !== "pending"
+      && this.#subagentBindings === bindings && bindings.authorizations.get(child.sessionId) === child
+      && this.#session()?.authorization_epoch === session.authorization_epoch
+      && this.#session()?.accepted_turns === session.accepted_turns
+      && this.#recoverableTurnCount() === 0 && this.#turns.size === 0;
+    if (!canContinue()) return;
+    const source = await this.#findManagedTurn(child.host_context_ref);
+    if (!source || source.state !== "completed" || !canContinue()) return;
+    // A later cancellation/failure must not be undone by an older child's result.
+    const latest = this.ctx.storage.sql.exec<{ state: string }>(
+      "SELECT state FROM managed_turns ORDER BY rowid DESC LIMIT 1",
+    ).toArray()[0];
+    if (latest && latest.state !== "completed") return;
+    const input: PromptInput = `[Subagent ${child.agentId} completed]
+
+A direct subagent completed after the previous turn ended. Continue the current task by inspecting its structured result. Call list_agents with include_completed=true, find agent ${child.agentId}, integrate and verify the relevant findings, finish any remaining work, and then respond to the user. Do not merely repeat the raw subagent result.
+
+<subagent_completion agent_id="${child.agentId}" />`;
+    const id = `subagent:${crypto.randomUUID()}`;
+    await this.#submitManagedTurn(id, input, await hashManagedInput(input), null, true,
+      parseTurnAuthorization(child.authorization_json), () => {
+        if (!canContinue()) throw new ManagedRequestError(409, "subagent_continuation_superseded",
+          "the parent changed before subagent continuation admission");
+      }, undefined, "unknown", {}, false);
   }
 
   async #continueGoal(): Promise<void> {

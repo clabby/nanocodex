@@ -21,6 +21,12 @@ configuration requesting them fails before inference with an explicit removed
 capability error; legacy IDs are never aliased to canonical children.
 `BashOutput` continues to poll retained native shell sessions.
 
+When a direct subagent completes after its parent turn has ended, the hosted
+thread automatically starts a continuation to inspect and integrate its result.
+This works across harnesses and uses the child's captured permissions. Completion
+while the parent is active (including in `wait_agent`) does not add another turn;
+failed or cancelled parent work is not automatically restarted.
+
 Claude steering accepts identified corrections with the same durable receipt,
 deduplication, and pending-withdrawal contract as Codex. Consumption emits
 `run.steered` with the caller's `message_id`; acknowledgement means the input is
