@@ -1,12 +1,11 @@
 //! Deterministic identity of the standalone Hand (nanocodex-hand) build.
 //!
 //! The identity is a SHA-256 over length-prefixed, sorted records of every
-//! input that can change the Hand executable:
+//! conservative source and toolchain input set for the Hand executable:
 //!
 //! * file contents (by workspace-relative path) of every path package in the
 //!   Cargo.lock closure of nanocodex-bin, minus the explicit CLI-only paths in
-//!   hand-identity.toml (proven unreachable from the Hand, see
-//!   scripts/check-hand-identity-exclusions.sh);
+//!   hand-identity.toml (the CLI executable root and terminal renderers);
 //! * the closure's resolved Cargo.lock entries (name, version, source,
 //!   checksum, dependency edges) and the workspace manifest/config files;
 //! * compiler (rustc -vV), target, profile, optimisation/debug settings,
@@ -396,7 +395,13 @@ fn hash_tree(
                 }
                 pending.push(relative);
             } else if kind.is_symlink() {
-                hasher.record("symlink", name, fs::read_link(entry.path())?.to_string_lossy().into_owned());
+                let target = entry.path().canonicalize()?;
+                if !target.starts_with(root) || !target.is_file() {
+                    return Err(format!("Hand identity source symlink {name} must resolve to a file inside the workspace").into());
+                }
+                println!("cargo:rerun-if-changed={}", target.display());
+                hasher.record("symlink-target", name.clone(), relative_name(target.strip_prefix(root)?));
+                hasher.record("file", name, fs::read(target)?);
             } else {
                 hasher.record("file", name, fs::read(entry.path())?);
             }
