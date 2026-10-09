@@ -256,10 +256,12 @@ fn prompts(thread: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Reopens the branch `thread` in place. Branch threads are known Codex threads,
-/// so the relaunch needs no disk access here; the connection task loads it.
+/// Reopens the branch `thread` in place without disk access here; the connection
+/// task finds the Codex thread or Claude session and loads it.
 pub(crate) fn switch(launch: &LocalLaunch, thread: &str) {
-    let launch = sessions::codex_launch(launch, sessions::Resume::Codex(thread.to_owned()));
+    // Branches of a Claude conversation are Claude sessions; resolve the harness
+    // in the connection task.
+    let launch = sessions::codex_launch(launch, sessions::Resume::Session(thread.to_owned()));
     BRANCH_HOST.with_host(|host| host.send(FeatureUpdate::Relaunch(Box::new(launch))));
 }
 

@@ -224,6 +224,93 @@ finally:
                        "ok": bool(steered) and "SLOW_PROMPT" in json.dumps(steered[0].get("input", [])) and "not collapsed" not in s})
     except Exception as error:
         checks.append({"check": "btw/split/close", "ok": False, "error": str(error)})
+
+    # Claude parity: legacy edited a Claude session's first prompt as a fresh session,
+    # refused later prompts, and switched back to the original conversation.
+    claude_requests, claude_frames = [], []
+    S2 = S + "-claude"
+    claude_server = None
+    try:
+        class Claude(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length", "0"))))
+                claude_requests.append({"path": self.path, "body": body})
+                last = ""
+                for message in reversed(body.get("messages", [])):
+                    if message.get("role") == "user":
+                        content = message.get("content")
+                        last = content if isinstance(content, str) else " ".join(
+                            b.get("text", "") for b in content if isinstance(b, dict))
+                        break
+                marker = next((m for m in ("CLAUDE_EDITED", "CLAUDE_SECOND", "CLAUDE_FIRST") if m in last), "UNKNOWN")
+                events = [
+                    {"type": "message_start", "message": {"id": "msg_" + uuid4().hex, "type": "message", "role": "assistant",
+                     "model": body.get("model", "claude"), "content": [], "usage": {"input_tokens": 10, "output_tokens": 0}}},
+                    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "REPLY_" + marker}},
+                    {"type": "content_block_stop", "index": 0},
+                    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}},
+                    {"type": "message_stop"},
+                ]
+                payload = "".join("data: " + json.dumps(e) + "\n\n" for e in events).encode()
+                self.send_response(200); self.send_header("content-type", "text/event-stream")
+                self.send_header("content-length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+            def log_message(self, *a): pass
+
+        claude_server = ThreadingHTTPServer(("127.0.0.1", 0), Claude)
+        threading.Thread(target=claude_server.serve_forever, daemon=True).start()
+        chome, cws = art / "claude-home", art / "claude-ws"; chome.mkdir(exist_ok=True); cws.mkdir(exist_ok=True)
+        cenv = {**env, "HOME": str(chome), "CODEX_HOME": str(chome)}
+        ccommon = ["--claude", "--claude-api-key", "synthetic-claude-key", "--claude-messages-url",
+                   f"http://127.0.0.1:{claude_server.server_address[1]}/v1/messages", "--browser=none",
+                   "--mcp-defaults", "false", "--mcp-codex-config", "false", "--web-search", "false",
+                   "--image-generation", "false", "--subagents", "false", "--memory", "false"]
+        ccmd = "env " + " ".join(shlex.quote(f"{k}={v}") for k, v in cenv.items()) + " " + shlex.join([str(binary), *ccommon, "--cwd", str(cws)])
+        tmux("new-session", "-d", "-x", "170", "-y", "50", "-s", S2, "-c", str(cws), ccmd + "; echo EXITED $?",
+             ";", "set-option", "-t", S2, "remain-on-exit", "on")
+        def cscreen():
+            out = tmux("capture-pane", "-p", "-t", S2 + ":0.0").stdout
+            claude_frames.append(out); (art / "claude-frames.txt").write_text("\n=====FRAME=====\n".join(claude_frames)); return out
+        def cwait(pred, what, timeout=40):
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                s = cscreen()
+                if pred(s): return s
+                time.sleep(0.5)
+            raise AssertionError(f"timed out: {what}")
+        def ckeys(*k): tmux("send-keys", "-t", S2 + ":0.0", *k)
+        def ctyp(t): tmux("send-keys", "-t", S2 + ":0.0", "-l", t)
+        cwait(lambda s: "Enter send" in s, "claude composer", 40)
+        ctyp("CLAUDE_FIRST"); ckeys("Enter"); cwait(lambda s: "REPLY_CLAUDE_FIRST" in s, "claude first answer")
+        ctyp("CLAUDE_SECOND"); ckeys("Enter"); cwait(lambda s: "REPLY_CLAUDE_SECOND" in s, "claude second answer")
+        ckeys("C-M-b")
+        s = cwait(lambda s: "Prompts on this branch" in s, "claude navigator", 20)
+        checks.append({"check": "Claude navigator lists the journal's prompts", "ok": "1. CLAUDE_FIRST" in s and "2. CLAUDE_SECOND" in s})
+        ckeys("e"); time.sleep(0.5)
+        for _ in range(len("CLAUDE_SECOND")): ckeys("BSpace")
+        ctyp("CLAUDE_LATER"); ckeys("Enter"); time.sleep(1); s = cscreen()
+        checks.append({"check": "Claude later-prompt edit is refused like legacy", "ok": "ncl rewind" in s})
+        ckeys("Up"); ckeys("e"); time.sleep(0.5)
+        for _ in range(len("CLAUDE_FIRST")): ckeys("BSpace")
+        before = len(claude_requests)
+        ctyp("CLAUDE_EDITED"); ckeys("Enter")
+        s = cwait(lambda s: "REPLY_CLAUDE_EDITED" in s, "edited first prompt answer", 60)
+        edited = [r for r in claude_requests[before:] if "CLAUDE_EDITED" in json.dumps(r["body"].get("messages", []))]
+        history = json.dumps(edited[0]["body"].get("messages", [])) if edited else ""
+        checks.append({"check": "Claude first-prompt edit starts a fresh session with only the edited prompt",
+                       "ok": bool(edited) and "CLAUDE_FIRST" not in history and "CLAUDE_SECOND" not in history
+                       and "REPLY_CLAUDE_SECOND" not in s})
+        ckeys("C-M-b"); s = cwait(lambda s: "Branches" in s and "(current)" in s, "claude branches", 20)
+        ckeys("Up"); ckeys("Enter")
+        s = cwait(lambda s: "REPLY_CLAUDE_FIRST" in s and "REPLY_CLAUDE_SECOND" in s, "switch back to the original Claude session", 60)
+        checks.append({"check": "switch back to the original Claude session replays it", "ok": "REPLY_CLAUDE_EDITED" not in s})
+    except Exception as error:
+        checks.append({"check": "Claude branch editing", "ok": False, "error": str(error)})
+    finally:
+        tmux("kill-session", "-t", S2)
+        if claude_server:
+            claude_server.shutdown()
+        (art / "claude-requests.json").write_text(json.dumps(claude_requests, indent=1)[:2000000])
     screen()
     (art / "requests.json").write_text(json.dumps(requests, indent=1)[:2000000])
     (art / "outcome.json").write_text(json.dumps({"success": all(c["ok"] for c in checks), "checks": checks, "requests": len(requests)}, indent=2))

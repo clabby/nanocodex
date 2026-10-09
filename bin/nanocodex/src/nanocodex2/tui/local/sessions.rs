@@ -36,6 +36,9 @@ use crate::nanocodex2::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Resume {
     Codex(String),
+    /// A saved session of either harness (branch switch); the connection task
+    /// resolves it with [`relaunch`] so lookups stay off the input loop.
+    Session(String),
     /// A branch started by editing an earlier prompt: reopen `thread`, or copy
     /// `fork` into a new thread first (None for both: a fresh session), and submit
     /// `prompt` once it connects.
@@ -301,6 +304,14 @@ pub(crate) struct Built {
 /// Builds the local agent for `launch`, reopening its saved session if any. File work
 /// (branch copies, rollout materialization) runs on the blocking pool.
 pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
+    if let Some(Resume::Session(id)) = &launch.resume {
+        let base = launch.clone();
+        let id = id.clone();
+        let resolved = tokio::task::spawn_blocking(move || relaunch(&base, &id))
+            .await
+            .wrap_err("session lookup task failed")??;
+        return Box::pin(build(&resolved)).await;
+    }
     let thread = match &launch.resume {
         Some(
             Resume::Codex(thread)
