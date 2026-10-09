@@ -11,6 +11,7 @@ import {
   destroy,
   exportDurabilityState,
   importDurabilityState,
+  prepareTransport,
 } from "../cloudflare/Agent.mjs";
 import * as HostAgent from "../host/Agent.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
@@ -1912,3 +1913,60 @@ test("host shutdown closes a transferred preparation socket that resolves late",
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(socket.closed, true);
 });
+
+test("idle root transport preparation is adopted by the next turn and never reuses a closed socket", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  class ProviderSocket extends EventTarget {
+    readyState = 1;
+    bufferedAmount = 0;
+    sent = 0;
+    accept() {}
+    close() { this.readyState = 3; }
+    // The provider closes an idle socket between turns.
+    drop() {
+      this.readyState = 3;
+      this.dispatchEvent(Object.assign(new Event("close"), { code: 1000, reason: "idle" }));
+    }
+    send() {
+      this.sent += 1;
+      queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
+        type: "response.completed", response: { id: "resp_" + this.sent, status: "completed", end_turn: true,
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } }) })));
+    }
+  }
+  const sockets = [];
+  const owner = durableOwner(new MemoryStorage(), { async fetch(_input, init) {
+    assert.equal(init.headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
+    const socket = new ProviderSocket();
+    sockets.push(socket);
+    return { status: 101, headers: new Headers(), webSocket: socket };
+  } });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const agent = await create(module, owner);
+  try {
+    assert.equal((await agent.turn.prompt({ input: "Return OK." }).result()).finalMessage, "OK");
+    assert.equal(sockets.length, 1, "the first turn adopts the construction preconnection");
+    assert.equal(prepareTransport(agent), false, "an open root socket is never duplicated");
+
+    sockets[0].drop();
+    assert.equal(prepareTransport(agent), true);
+    assert.equal(prepareTransport(agent), true, "preparation is coalesced");
+    await settle();
+    assert.equal(sockets.length, 2, "the idle socket is reopened before the next prompt");
+    assert.equal((await agent.turn.prompt({ input: "Return OK." }).result()).finalMessage, "OK");
+    assert.equal(sockets.length, 2, "the next root turn adopts the prepared socket");
+    assert.equal(sockets[1].sent, 1);
+
+    sockets[1].drop();
+    assert.equal(prepareTransport(agent), true);
+    await settle();
+    sockets[2].drop();
+    assert.equal((await agent.turn.prompt({ input: "Return OK." }).result()).finalMessage, "OK");
+    assert.equal(sockets[2].sent, 0, "a prepared socket closed before adoption is discarded");
+    assert.equal(sockets.length, 4);
+    assert.equal(sockets[3].sent, 1);
+  } finally { await agent.session.shutdown(); }
+  assert.equal(prepareTransport(agent), false, "a released Agent never prepares");
+});
+

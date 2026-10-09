@@ -85,6 +85,12 @@ export function pruneDurableReceipts(
   options?: Readonly<{ terminalReceiptRetention?: number | undefined }>,
 ): Promise<void>;
 
+/**
+ * @internal Reopens an idle root Responses WebSocket before the next turn.
+ * Returns false when one is already open or the Agent uses HTTP inference.
+ */
+export function prepareTransport(agent: Agent): boolean;
+
 /** Atomically steers an active Cloudflare Agent turn or starts a new turn. */
 export function route(
   agent: Agent,

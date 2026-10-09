@@ -67,6 +67,11 @@ const APPLICATION_OPTIONS = new Set([
   "tools",
 ]);
 const lifecycles = new WeakMap();
+// Exposed root Agent -> speculative idle-transport preparation (internal seam).
+const transportPreparations = new WeakMap();
+// A reopened idle socket is speculative; release it if no root turn adopts it.
+const IDLE_TRANSPORT_PREPARATION_MS = 60_000;
+const WEBSOCKET_OPEN = 1;
 
 /** @internal Binds the package-owned module to the public Cloudflare namespace. */
 export function bindAgent(module, hostAgent = HostAgent) {
@@ -82,7 +87,19 @@ export function bindAgent(module, hostAgent = HostAgent) {
     exportDurabilityHead,
     importDurabilityState: (owner, archive) => importDurabilityState(owner, archive, module),
     route,
+    prepareTransport,
   });
+}
+
+/**
+ * @internal Reopens this Agent's idle root Responses WebSocket before its next
+ * turn. Returns false when a root socket is already open/connecting or the
+ * Agent has no WebSocket transport. The socket carries no request; the next
+ * root connection adopts it only while it is still open, otherwise it opens
+ * normally. Failures never reach a turn.
+ */
+export function prepareTransport(agent) {
+  return transportPreparations.get(agent)?.() ?? false;
 }
 
 /** Copies the latest safe committed boundary as a resumable SessionSnapshot. */
@@ -601,6 +618,42 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
   }) : createWorkersAiResponses(workersAi.ai);
   const frontierEndpoint = routedInference ? cloudflareEgress({ binding: scopeCloudflareEgress(egress, subject) }) : undefined;
   const startup = deferred();
+  // Latest root-thread socket and an optional reopened idle socket. Children
+  // and turn-state reconnects never adopt the speculative connection.
+  let rootSocket;
+  let idlePreparation;
+  let released = false;
+  const discardIdlePreparation = () => {
+    const prepared = idlePreparation;
+    idlePreparation = undefined;
+    if (prepared === undefined) return;
+    clearTimeout(prepared.timer);
+    void prepared.connection.dispose().catch(() => {});
+  };
+  const prepareIdleTransport = () => {
+    if (released || directInference || typeof endpoint.createWebSocket !== "function") return false;
+    if (idlePreparation !== undefined) return true;
+    if (rootSocket !== undefined && rootSocket.readyState <= WEBSOCKET_OPEN) return false;
+    const connection = prepareConnection(endpoint, sessionId);
+    const timer = setTimeout(() => {
+      if (idlePreparation?.connection === connection) discardIdlePreparation();
+    }, IDLE_TRANSPORT_PREPARATION_MS);
+    idlePreparation = { connection, timer };
+    return true;
+  };
+  const adoptIdlePreparation = async (url, id, request) => {
+    const prepared = idlePreparation;
+    if (prepared === undefined || request.authorization === "preconnect" || request.turnState
+      || (request.threadId ?? id) !== sessionId || id !== sessionId || url !== endpoint.websocketUrl) return undefined;
+    idlePreparation = undefined;
+    clearTimeout(prepared.timer);
+    try {
+      const opened = await prepared.connection.take(url, id, { ...request, authorization: "preconnect" });
+      if (opened.socket.readyState === WEBSOCKET_OPEN) return opened;
+      try { opened.socket.close(); } catch { /* Already closed. */ }
+    } catch { /* Speculation failed; the turn opens its own socket. */ }
+    return undefined;
+  };
   const transport = Transport.hostManaged({
     ...endpoint,
     stateless: directInference,
@@ -678,8 +731,9 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
       try {
         const preparation = request.authorization === "preconnect" ? preparedConnection : undefined;
         if (preparation !== undefined) preparedConnection = undefined;
-        const opened = await (preparation === undefined
-          ? endpoint.createWebSocket(url, id, request) : preparation.take(url, id, request));
+        const opened = preparation !== undefined ? await preparation.take(url, id, request)
+          : await adoptIdlePreparation(url, id, request) ?? await endpoint.createWebSocket(url, id, request);
+        if ((request.threadId ?? id) === sessionId) rootSocket = opened.socket;
         if (request.authorization === "preconnect") startup.resolve();
         return { ...opened, socket: responseControlsSocket(opened.socket, internalRuntime?.responseControls, internalRuntime?.onRequestShape, internalRuntime?.onResponseCreateSent) };
       } catch (error) {
@@ -767,7 +821,10 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
     }));
     const active = {};
     lifecycle.active = active;
+    transportPreparations.set(exposed, prepareIdleTransport);
     observeAgentRelease(exposed, () => {
+      released = true;
+      discardIdlePreparation();
       if (lifecycle.active === active) lifecycle.active = undefined;
     });
     commitCloudflareAgentSession(sessionReservation);

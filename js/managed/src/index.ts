@@ -1020,7 +1020,16 @@ type SessionSocketAttachment = Readonly<{
   sessionId: string;
   authorization: TurnAuthorization;
   replayAfter: string | null;
+  /** When the upgrade's live authority reached this object; consumed by the first prompt. */
+  authorizedAt?: number;
 }>;
+
+// The upgrade itself resolved the key's live authority immediately before
+// this object accepted the socket. A prompt that follows within this bound is
+// part of that same client request (nanocodex2 run sends it right after
+// ready), so it reuses that authority instead of a second key round trip.
+// Later prompts, and every prompt after this bound, revalidate the key.
+const SOCKET_UPGRADE_AUTHORITY_REUSE_MS = 2_000;
 
 type HistoryProjectionOutboxRow = {
   source_cursor: string;
@@ -7074,6 +7083,7 @@ export class DurableAgentSession extends DurableComputerObject {
       authorization,
       replayAfter: cursor === latestCursor ? null : cursor,
       caller,
+      ...(authorization.apiKeyId ? { authorizedAt: Date.now() } : {}),
     } satisfies SessionSocketAttachment);
     this.ctx.acceptWebSocket(server, ["client"]);
     this.#send(server, {
@@ -7472,8 +7482,16 @@ export class DurableAgentSession extends DurableComputerObject {
       return;
     }
     try {
-      const requestHash = await hashManagedInput(command.input);
       const attachment = socket.deserializeAttachment() as SessionSocketAttachment | null;
+      // Consume the upgrade's authority before any await: only the first
+      // prompt on this socket, and only inside the bound, may reuse it.
+      const upgradeAuthority = attachment?.authorizedAt !== undefined
+        && Date.now() - attachment.authorizedAt <= SOCKET_UPGRADE_AUTHORITY_REUSE_MS;
+      if (attachment?.authorizedAt !== undefined) {
+        const { authorizedAt: _consumed, ...retained } = attachment;
+        socket.serializeAttachment(retained satisfies SessionSocketAttachment);
+      }
+      const requestHash = await hashManagedInput(command.input);
       const submission = await this.#submitManagedTurn(
         command.id,
         command.input,
@@ -7482,6 +7500,7 @@ export class DurableAgentSession extends DurableComputerObject {
         true,
         attachment?.authorization ?? { capabilities: [] },
         undefined, undefined, "websocket", attachment?.caller,
+        true, undefined, upgradeAuthority,
       );
       if (!submission.created) {
         this.#send(socket, {
@@ -8900,6 +8919,7 @@ export class DurableAgentSession extends DurableComputerObject {
     caller: CallerContext = {},
     userInitiated = true,
     beforeReplay?: () => void,
+    upgradeAuthority = false,
   ): Promise<ManagedTurnSubmission> {
     await this.#requireContextMembership(true);
     await this.#settingsMutationTail;
@@ -8979,8 +8999,9 @@ export class DurableAgentSession extends DurableComputerObject {
     }
     // A native socket can outlive an explicit permission approval. Revalidate
     // its exact key for each new user turn; retained/replayed work stays pinned.
+    // Only the first prompt arriving right after the live upgrade reuses it.
     if (userInitiated && transport === "websocket" && authorization.apiKeyId) {
-      authorization = await this.#refreshApiKeyAuthorization(authorization);
+      if (!upgradeAuthority) authorization = await this.#refreshApiKeyAuthorization(authorization);
       if (!authorization.capabilities.includes("agents:write") || !authorization.capabilities.includes("tools:use"))
         throw new ManagedRequestError(403, "forbidden", "the login no longer permits agent turns");
     }
@@ -10030,6 +10051,9 @@ export class DurableAgentSession extends DurableComputerObject {
     const expiresAt = Date.now() + this.#idleTimeoutMs();
     this.#preparationExpiresAt = expiresAt;
     this.#warmPersonalization();
+    // A resident Agent may have closed its idle model socket. Reopen it now so
+    // the prompt's first model call does not pay the egress/relay handshake.
+    this.#prepareModelTransport();
     if (this.#preparationTask) return;
     const task = (async () => {
       await this.#settingsMutationTail;
@@ -10037,7 +10061,10 @@ export class DurableAgentSession extends DurableComputerObject {
       if (!session) return;
       // All speculative work belongs to this task; a prompt reuses the same reads.
       await performanceStage("conversation.prepare", async () => {
-        const results = await Promise.allSettled([this.#ensureAgent(), this.#startupAccountInfo(session, authorization)]);
+        const results = await Promise.allSettled([
+          this.#ensureAgent().then((agent) => { this.#prepareModelTransport(agent); return agent; }),
+          this.#startupAccountInfo(session, authorization),
+        ]);
         for (const result of results) if (result.status === "rejected") throw result.reason;
       });
       this.#preparationExpiresAt = Math.max(this.#preparationExpiresAt, expiresAt);
@@ -10049,6 +10076,15 @@ export class DurableAgentSession extends DurableComputerObject {
       if (this.#preparationTask === task) this.#preparationTask = undefined;
       await this.#scheduleNextAlarm();
     }));
+  }
+
+  #prepareModelTransport(agent: CloudflareAgent.Agent | undefined = this.#agent): void {
+    if (agent === undefined || this.#deleting || this.#deleted || this.#agent !== agent) return;
+    try {
+      if (CloudflareAgent.prepareTransport(agent)) this.#observe("managed.transport.prepared", {});
+    } catch (error) {
+      this.#observe("managed.transport.prepare_failed", { error_kind: errorKind(error) }, "warn");
+    }
   }
 
   #startupAccountInfo(session: SessionRow, authorization: TurnAuthorization): Promise<AccountInfo> {
