@@ -52,7 +52,9 @@ impl Feature for ClaudeScheduler {
             Err(error) => {
                 cx.host.error(
                     Some(PaneId::Main),
-                    format!("Scheduler paused: {error}. Reopen the session after fixing its journal."),
+                    format!(
+                        "Scheduler paused: {error}. Reopen the session after fixing its journal."
+                    ),
                 );
                 self.scheduler = None;
                 return;
@@ -72,8 +74,10 @@ impl Feature for ClaudeScheduler {
                 if let Some(token) = &due.iteration_token {
                     drop(claude_frontend::finish(&session, token, false));
                 }
-                cx.host
-                    .error(Some(PaneId::Main), format!("Scheduled prompt withheld: {error}"));
+                cx.host.error(
+                    Some(PaneId::Main),
+                    format!("Scheduled prompt withheld: {error}"),
+                );
                 return;
             }
         };

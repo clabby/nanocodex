@@ -1234,8 +1234,11 @@ async fn revoked_attachment_stops_reconnecting_while_rejections_back_off() -> Re
         .build()?;
 
     let (target, attempts) = rejecting_endpoint("410 Gone").await?;
-    let connected =
-        tokio::time::timeout(Duration::from_secs(5), tools.clone().attach(target).connect()).await?;
+    let connected = tokio::time::timeout(
+        Duration::from_secs(5),
+        tools.clone().attach(target).connect(),
+    )
+    .await?;
     let error = connected.err();
     ensure!(
         matches!(error, Some(AttachmentError::Fenced(_))),

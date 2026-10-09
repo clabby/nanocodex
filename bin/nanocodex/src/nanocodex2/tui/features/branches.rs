@@ -15,7 +15,10 @@ impl Feature for Branches {
     fn command(&mut self, pane: PaneId, command: &FeatureCommand, cx: &FeatureContext<'_>) -> bool {
         match command {
             FeatureCommand::Branches => {
-                cx.host.error(Some(pane), "/branches is not available yet in the unified TUI");
+                cx.host.error(
+                    Some(pane),
+                    "/branches is not available yet in the unified TUI",
+                );
                 true
             }
             #[allow(unreachable_patterns)]

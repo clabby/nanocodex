@@ -121,7 +121,9 @@ fn summary(session: &LocalSession, fallback: &Path) -> SessionSummary {
         updated_at_unix_ms: session
             .updated
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+            .map_or(0, |elapsed| {
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+            }),
         model: session
             .model
             .clone()
@@ -137,7 +139,10 @@ fn summary(session: &LocalSession, fallback: &Path) -> SessionSummary {
 }
 
 /// Content search over local session transcripts for the /attach picker.
-pub(crate) fn search(query: &str, limit: usize) -> Result<Vec<nanocodex_managed::SessionSearchHit>> {
+pub(crate) fn search(
+    query: &str,
+    limit: usize,
+) -> Result<Vec<nanocodex_managed::SessionSearchHit>> {
     let home = crate::config::default_codex_home()?;
     let terms = query
         .split_whitespace()
@@ -195,11 +200,20 @@ fn excerpt(text: &str, term: &str) -> String {
     while !text.is_char_boundary(begin) {
         begin -= 1;
     }
-    text[begin..].chars().take(200).collect::<String>().replace('\n', " ")
+    text[begin..]
+        .chars()
+        .take(200)
+        .collect::<String>()
+        .replace('\n', " ")
 }
 
 fn single_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect()
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(120)
+        .collect()
 }
 
 /// Returns `base` relaunched against the saved session `id` (Codex thread UUID
@@ -298,7 +312,10 @@ pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
 
 /// The visible history of a resumed session as managed history events, so the
 /// driver projects it exactly like a managed session's durable history.
-pub(in crate::nanocodex2::tui) fn history_window(transcript: &[RolloutTranscriptItem], request_id: &str) -> HistoryWindow {
+pub(in crate::nanocodex2::tui) fn history_window(
+    transcript: &[RolloutTranscriptItem],
+    request_id: &str,
+) -> HistoryWindow {
     let mut replay = Replay {
         request_id,
         events: Vec::new(),
@@ -322,7 +339,10 @@ pub(in crate::nanocodex2::tui) fn history_window(transcript: &[RolloutTranscript
             }
             RolloutTranscriptItem::Reasoning(text) => {
                 replay.ensure_turn();
-                replay.agent("reasoning.summary.delta", json!({"model_call_index": replay.call, "text": text}));
+                replay.agent(
+                    "reasoning.summary.delta",
+                    json!({"model_call_index": replay.call, "text": text}),
+                );
             }
             RolloutTranscriptItem::Assistant(text) => {
                 replay.ensure_turn();
@@ -501,7 +521,9 @@ impl Picker {
 
 fn render(frame: &mut Frame<'_>, sessions: &[LocalSession], picker: &mut Picker, now: SystemTime) {
     let area = frame.area();
-    let block = Block::default().title(" Resume a thread ").borders(Borders::ALL);
+    let block = Block::default()
+        .title(" Resume a thread ")
+        .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [summary, list, footer] = Layout::vertical([
@@ -516,7 +538,10 @@ fn render(frame: &mut Frame<'_>, sessions: &[LocalSession], picker: &mut Picker,
                 format!("  {} resumable threads", sessions.len()),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Line::styled("  Newest activity first", Style::default().fg(Color::DarkGray)),
+            Line::styled(
+                "  Newest activity first",
+                Style::default().fg(Color::DarkGray),
+            ),
         ]),
         summary,
     );
@@ -553,8 +578,13 @@ fn session_item(session: &LocalSession, selected: bool, now: SystemTime) -> List
             .unwrap_or("(workspace unavailable)"),
     )
     .into_owned();
-    let location = if session.archived { "archived" } else { "active" };
-    let preview = sanitized(session.preview.as_deref().unwrap_or("(prompt unavailable)")).into_owned();
+    let location = if session.archived {
+        "archived"
+    } else {
+        "active"
+    };
+    let preview =
+        sanitized(session.preview.as_deref().unwrap_or("(prompt unavailable)")).into_owned();
     ListItem::new(vec![
         Line::styled(
             format!("{marker} {} · {preview}", format_age(session.updated, now)),
@@ -577,7 +607,12 @@ fn session_item(session: &LocalSession, selected: bool, now: SystemTime) -> List
 
 fn sanitized(value: &str) -> Cow<'_, str> {
     if value.chars().any(char::is_control) {
-        Cow::Owned(value.chars().filter(|character| !character.is_control()).collect())
+        Cow::Owned(
+            value
+                .chars()
+                .filter(|character| !character.is_control())
+                .collect(),
+        )
     } else {
         Cow::Borrowed(value)
     }
@@ -601,5 +636,8 @@ fn saturating_isize(value: usize) -> isize {
 
 /// No saved sessions: the error `ncl resume` reports.
 pub(crate) fn none_found(home: &Path) -> eyre::Report {
-    eyre!("no resumable Codex or Claude sessions found under {}", home.display())
+    eyre!(
+        "no resumable Codex or Claude sessions found under {}",
+        home.display()
+    )
 }

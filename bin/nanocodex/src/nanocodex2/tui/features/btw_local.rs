@@ -49,7 +49,10 @@ static ACTIVE: Mutex<Option<Side>> = Mutex::new(None);
 
 /// The open side thread, if any.
 pub(crate) fn active() -> Option<Side> {
-    ACTIVE.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    ACTIVE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 /// Forgets the side thread (after /collapse or /split handed it off).
@@ -241,7 +244,9 @@ impl Feature for LocalBtw {
                 }));
                 tokio::spawn(async move { drop(side.agent.shutdown().await) });
             }
-            Err(error) => cx.host.error(Some(pane), format!("BTW was not collapsed: {error}")),
+            Err(error) => cx
+                .host
+                .error(Some(pane), format!("BTW was not collapsed: {error}")),
         }
         true
     }
@@ -269,9 +274,12 @@ fn collapse_prompt(main_busy: bool) -> Result<(Side, (String, String)), &'static
 
 fn collapse_btw_prompt(thread_id: &str) -> (String, String) {
     let display = format!("BTW Codex thread ID: {thread_id}");
-    (display, format!(
-        "The user completed a /btw side exploration in local Codex thread {thread_id}. Read that thread and incorporate its relevant findings into the main task. Use `read_session` with source `local` and session_id `{thread_id}` when available; otherwise locate the local Codex rollout by this thread ID and inspect it with local tools."
-    ))
+    (
+        display,
+        format!(
+            "The user completed a /btw side exploration in local Codex thread {thread_id}. Read that thread and incorporate its relevant findings into the main task. Use `read_session` with source `local` and session_id `{thread_id}` when available; otherwise locate the local Codex rollout by this thread ID and inspect it with local tools."
+        ),
+    )
 }
 
 fn inline_collapse_btw_prompt(exchanges: &[(bool, String)]) -> (String, String) {
@@ -325,7 +333,10 @@ fn inline_collapse_btw_prompt(exchanges: &[(bool, String)]) -> (String, String) 
     for block in kept {
         transcript.push_str(&block);
     }
-    (display, format!(
-        "The user finished a /btw side conversation forked from this conversation. It ran separately while this thread continued, so its answers may reflect earlier context and any tool activity in it is not shown. Incorporate its relevant findings into the main task; do not repeat work it already settled unless current evidence contradicts it.\n\n<btw_conversation>\n{transcript}</btw_conversation>"
-    ))
+    (
+        display,
+        format!(
+            "The user finished a /btw side conversation forked from this conversation. It ran separately while this thread continued, so its answers may reflect earlier context and any tool activity in it is not shown. Incorporate its relevant findings into the main task; do not repeat work it already settled unless current evidence contradicts it.\n\n<btw_conversation>\n{transcript}</btw_conversation>"
+        ),
+    )
 }

@@ -80,7 +80,9 @@ impl super::DriverRuntime {
             return Err("no local session".to_owned());
         };
         local.launch = match session {
-            Some(id) => sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?,
+            Some(id) => {
+                sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?
+            }
             None => sessions::fresh(&local.launch),
         };
         let connecting = local.connect();
@@ -131,10 +133,7 @@ impl LocalState {
                 session_id: backend.handle.session_id().to_string(),
                 workspace: backend.workspace.clone(),
                 settings: local_settings(&backend),
-                history: sessions::history_window(
-                    &backend.transcript,
-                    backend.handle.session_id(),
-                ),
+                history: sessions::history_window(&backend.transcript, backend.handle.session_id()),
             };
             let replaced = slot
                 .lock()
@@ -150,7 +149,11 @@ impl LocalState {
 
     /// Adopts the backend built by [`Self::connect`] and attaches features.
     pub(crate) async fn adopt(&mut self, capabilities: Capabilities) {
-        let built = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let built = self
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let Some((mut backend, bridge)) = built else {
             return;
         };
@@ -217,7 +220,11 @@ impl LocalState {
         if let Some(bridge) = self.bridge.take() {
             bridge.abort();
         }
-        let pending = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let pending = self
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some((backend, bridge)) = pending {
             bridge.abort();
             backend.shutdown().await?;

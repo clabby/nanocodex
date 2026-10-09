@@ -87,15 +87,17 @@ impl Bridge {
         }
         if root {
             let terminal = match event.kind {
-                AgentEventKind::RunCompleted => self.current.clone().map(|id| {
-                    ManagedEventData::TurnCompleted {
-                        id,
-                        final_message: std::mem::take(&mut self.final_message),
-                        usage: None,
-                        citations: Vec::new(),
-                        usage_error: None,
-                    }
-                }),
+                AgentEventKind::RunCompleted => {
+                    self.current
+                        .clone()
+                        .map(|id| ManagedEventData::TurnCompleted {
+                            id,
+                            final_message: std::mem::take(&mut self.final_message),
+                            usage: None,
+                            citations: Vec::new(),
+                            usage_error: None,
+                        })
+                }
                 AgentEventKind::RunFailed => self.current.clone().map(|id| {
                     let error = failure_text(event);
                     if error.to_ascii_lowercase().contains("cancel") {

@@ -40,7 +40,10 @@ impl Feature for Mcp {
             _ => return false,
         };
         let Some(handle) = self.handle.clone() else {
-            cx.host.error(Some(pane), format!("MCP server {name}: MCP is not configured"));
+            cx.host.error(
+                Some(pane),
+                format!("MCP server {name}: MCP is not configured"),
+            );
             return true;
         };
         let host = cx.host.clone();
@@ -70,7 +73,10 @@ async fn login_server(handle: McpHandle, name: String, pane: PaneId, host: Featu
             format!("MCP server {name}: failed to open OAuth page: {error}; open {url} manually"),
         );
     }
-    host.notice(Some(pane), format!("Authorizing MCP server {name} in browser"));
+    host.notice(
+        Some(pane),
+        format!("Authorizing MCP server {name} in browser"),
+    );
     match login.wait().await {
         Ok(tool_count) => host.notice(
             Some(pane),

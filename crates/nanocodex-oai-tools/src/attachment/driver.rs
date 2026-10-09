@@ -39,7 +39,8 @@ const STABLE_CONNECTION: Duration = Duration::from_millis(250);
 
 const HEARTBEAT_TIMEOUT_REASON: &str = "attachment heartbeat timed out";
 /// Fenced reason when the endpoint reports the attachment permanently gone (HTTP 410).
-pub(crate) const ATTACHMENT_REVOKED_REASON: &str = "attachment endpoint permanently revoked this attachment";
+pub(crate) const ATTACHMENT_REVOKED_REASON: &str =
+    "attachment endpoint permanently revoked this attachment";
 #[cfg(not(test))]
 const MAX_REJECTED_BACKOFF: Duration = Duration::from_secs(60);
 #[cfg(test)]
@@ -155,14 +156,21 @@ pub(crate) async fn run(
             other => {
                 // An HTTP rejection proves the endpoint is reachable but refusing
                 // this attachment; back off further than for transport loss.
-                let rejected = matches!(&other, Ok(Err(tokio_tungstenite::tungstenite::Error::Http(_))));
+                let rejected = matches!(
+                    &other,
+                    Ok(Err(tokio_tungstenite::tungstenite::Error::Http(_)))
+                );
                 connection_span.in_scope(|| tracing::warn!(target: "nanocodex_oai_tools::attachment", stage = "attachment.socket.connect_failed", reason_code = if rejected { "http_rejected" } else if other.is_err() { "connect_timeout" } else { "connect_failure" }, reconnect_delay_ms = backoff.as_millis() as u64, pending_calls = active.len(), "attachment connection attempt failed"));
                 let _ = status.send(AttachmentStatus::Disconnected);
                 previous_delay = backoff;
                 if wait_backoff(&mut commands, backoff).await {
                     break Ok(());
                 }
-                backoff = (backoff * 2).min(if rejected { MAX_REJECTED_BACKOFF } else { Duration::from_secs(5) });
+                backoff = (backoff * 2).min(if rejected {
+                    MAX_REJECTED_BACKOFF
+                } else {
+                    Duration::from_secs(5)
+                });
                 continue;
             }
         };

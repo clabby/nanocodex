@@ -1722,7 +1722,11 @@ mod supported {
             Ok(Ok((attachment, _events))) => {
                 let watched = attachment.clone();
                 tokio::spawn(async move {
-                    if watched.closed().await.is_err_and(|error| error.is_revoked()) {
+                    if watched
+                        .closed()
+                        .await
+                        .is_err_and(|error| error.is_revoked())
+                    {
                         ATTACHMENT_REVOKED.notify_one();
                     }
                 });
