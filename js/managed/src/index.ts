@@ -1416,6 +1416,42 @@ function sameManagedSubagentDescriptor(
     && row.task === descriptorDigest(descriptor.task);
 }
 
+/** Lifecycle rejection with a stable, content-free reason for host logs. */
+class ManagedSubagentLifecycleError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "ManagedSubagentLifecycleError";
+    this.code = code;
+  }
+}
+
+const SUBAGENT_STATUS_STATES = ["pending", "running", "completed", "failed", "interrupted", "closing", "closed"];
+const STALE_STATUS_REPORT_LIMIT = 256;
+/**
+ * Children whose stale status was already reported. Module scope survives
+ * Durable Object reconstruction within an isolate, where every rebuild
+ * restores the same children and replays their status.
+ */
+const staleStatusReports = new Set<string>();
+
+/**
+ * A status can outlive the binding it describes: the child was released or
+ * closed, the session deleted its bindings, or a later bind replaced the
+ * spawning-turn context. Status is observational and grants no authority, so
+ * such an update is dropped with one structured warning per child instead of
+ * failing every later update.
+ */
+function dropStaleSubagentStatus(rootSessionId: string, sessionId: string, reason: string): undefined {
+  const key = `${rootSessionId}:${sessionId}:${reason}`;
+  if (!staleStatusReports.has(key)) {
+    if (staleStatusReports.size >= STALE_STATUS_REPORT_LIMIT) staleStatusReports.clear();
+    staleStatusReports.add(key);
+    console.warn({ type: "managed.subagent_status_dropped", reason, root_session_id: rootSessionId, session_id: sessionId });
+  }
+  return undefined;
+}
+
 /** Managed half of the private live Cloudflare subagent lifecycle. */
 export function applyManagedSubagentLifecycle(
   storage: DurableObjectStorage,
@@ -1441,12 +1477,20 @@ export function applyManagedSubagentLifecycle(
   const retained = bindings.authorizations.get(sessionId);
   if (type === "status") {
     if (Object.keys(event).some(key => !["type", "rootSessionId", "sessionId", "descriptor", "hostContextRef", "status"].includes(key))
-      || retained === undefined || retained.root_session_id !== rootSessionId
-      || retained.host_context_ref !== hostContextRef
-      || !sameManagedSubagentDescriptor(retained, managedSubagentDescriptor(event.descriptor))
       || !event.status || typeof event.status !== "object" || Array.isArray(event.status)
-      || !["pending", "running", "completed", "failed", "interrupted", "closing", "closed"].includes((event.status as { state: string }).state)) {
-      throw new Error("managed subagent status does not match live authorization");
+      || !SUBAGENT_STATUS_STATES.includes((event.status as { state: string }).state)) {
+      throw new ManagedSubagentLifecycleError("invalid_subagent_status", "invalid managed subagent status");
+    }
+    const descriptor = managedSubagentDescriptor(event.descriptor);
+    if (descriptor.sessionId !== sessionId) {
+      throw new ManagedSubagentLifecycleError("subagent_status_authority_mismatch", "managed subagent status does not match live authorization");
+    }
+    if (retained === undefined) return dropStaleSubagentStatus(rootSessionId, sessionId, "binding_missing");
+    if (retained.root_session_id !== rootSessionId || !sameManagedSubagentDescriptor(retained, descriptor)) {
+      throw new ManagedSubagentLifecycleError("subagent_status_authority_mismatch", "managed subagent status does not match live authorization");
+    }
+    if (retained.host_context_ref !== hostContextRef) {
+      return dropStaleSubagentStatus(rootSessionId, sessionId, "host_context_superseded");
     }
     // Completion retains the child's authority and history for follow-up. The
     // host may use its original binding to continue an idle root conversation.
@@ -1457,7 +1501,7 @@ export function applyManagedSubagentLifecycle(
       || retained === undefined
       || retained.root_session_id !== rootSessionId
       || retained.host_context_ref !== hostContextRef) {
-      throw new Error("managed subagent release does not match live authorization");
+      throw new ManagedSubagentLifecycleError("subagent_release_mismatch", "managed subagent release does not match live authorization");
     }
     bindings.authorizations.delete(sessionId);
     bindings.routes.delete(sessionId);
@@ -1470,13 +1514,13 @@ export function applyManagedSubagentLifecycle(
   }
   const descriptor = managedSubagentDescriptor(event.descriptor);
   if (descriptor.sessionId !== sessionId) {
-    throw new Error("managed subagent session does not match its descriptor");
+    throw new ManagedSubagentLifecycleError("subagent_descriptor_mismatch", "managed subagent session does not match its descriptor");
   }
   if (retained !== undefined) {
     if (retained.root_session_id !== rootSessionId
       || retained.host_context_ref !== hostContextRef
       || !sameManagedSubagentDescriptor(retained, descriptor)) {
-      throw new Error("managed subagent binding conflicts with live authorization");
+      throw new ManagedSubagentLifecycleError("subagent_binding_conflict", "managed subagent binding conflicts with live authorization");
     }
     return;
   }
@@ -1486,19 +1530,19 @@ export function applyManagedSubagentLifecycle(
       "SELECT authorization_json FROM managed_turns WHERE id = ?",
       hostContextRef,
     ).toArray()[0];
-    if (turn === undefined) throw new Error("managed subagent authorization turn is missing");
+    if (turn === undefined) throw new ManagedSubagentLifecycleError("subagent_authorization_turn_missing", "managed subagent authorization turn is missing");
     authorizationJson = JSON.stringify(parseTurnAuthorization(turn.authorization_json));
   } else {
     const parent = [...bindings.authorizations.values()].find(row =>
       row.root_session_id === rootSessionId && row.agentId === descriptor.parentAgentId);
     if (parent === undefined || parent.host_context_ref !== hostContextRef) {
-      throw new Error("managed nested subagent authorization parent is missing");
+      throw new ManagedSubagentLifecycleError("subagent_parent_missing", "managed nested subagent authorization parent is missing");
     }
     authorizationJson = JSON.stringify(parseTurnAuthorization(parent.authorization_json));
   }
   if (descriptor.sessionId === rootSessionId || [...bindings.authorizations.values()].some(row =>
     row.root_session_id === rootSessionId && row.agentId === descriptor.agentId)) {
-    throw new Error("managed subagent identity conflicts with live authorization");
+    throw new ManagedSubagentLifecycleError("subagent_identity_conflict", "managed subagent identity conflicts with live authorization");
   }
   bindings.authorizations.set(descriptor.sessionId, {
     ...descriptor,
