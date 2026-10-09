@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::version;
 
+mod app;
 mod automatic;
 mod local;
 mod source;

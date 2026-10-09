@@ -438,6 +438,97 @@ impl VersionStore {
         Ok(bytes.to_vec())
     }
 
+    /// The Hand a version runs: its linked `Nanocodex.app` when present,
+    /// otherwise the standalone `nanocodex2`.
+    pub(super) fn hand_executable(&self, key: &str) -> PathBuf {
+        if self.links_hand_app(key) {
+            self.version_dir(key).join(super::app::EXECUTABLE)
+        } else {
+            self.version_dir(key).join(NANOCODEX2_BINARY_NAME)
+        }
+    }
+
+    fn links_hand_app(&self, key: &str) -> bool {
+        fs::symlink_metadata(self.version_dir(key).join(super::app::BUNDLE)).is_ok()
+    }
+
+    /// Whether a version links the complete, receipt-verified bundle stored
+    /// for its Hand identity.
+    pub(super) fn has_hand_app(&self, key: &str) -> Result<bool> {
+        validate_key(key)?;
+        let Some(identity) = self.hand_identity_of(key) else {
+            return Ok(false);
+        };
+        let link = self.version_dir(key).join(super::app::BUNDLE);
+        if fs::read_link(&link).ok() != Some(hand_app_link(&identity)) {
+            return Ok(false);
+        }
+        super::app::cached(&self.root.join(HAND_VERSIONS_DIR).join(identity))
+    }
+
+    /// Store a released `Nanocodex.app` archive for this version's Hand
+    /// identity and link the version to it. The caller has verified the
+    /// archive checksum and that its Hand reports the same identity.
+    #[cfg(unix)]
+    pub(super) fn install_hand_app(&self, key: &str, archive: &[u8]) -> Result<()> {
+        self.store_hand_app(key, |parent| super::app::extract(archive, parent))
+    }
+
+    /// Wrap this version's development Hand into a locally signed
+    /// `Nanocodex.app` and link the version to it.
+    #[cfg(unix)]
+    pub(super) fn wrap_hand_app(&self, key: &str, version: &str) -> Result<()> {
+        let hand = fs::read(self.version_dir(key).join(NANOCODEX2_BINARY_NAME))
+            .wrap_err_with(|| format!("failed to read the Hand of Nanocodex version {key}"))?;
+        self.store_hand_app(key, |parent| super::app::wrap(&hand, version, parent))
+    }
+
+    /// The first complete bundle stored for an identity is kept, exactly like
+    /// `store_hand`: an unchanged Hand keeps one path and one signature, so
+    /// installing it again never re-signs or moves the running Hand.
+    #[cfg(unix)]
+    fn store_hand_app(
+        &self,
+        key: &str,
+        build: impl FnOnce(&Path) -> Result<String>,
+    ) -> Result<()> {
+        validate_key(key)?;
+        let identity = self.hand_identity_of(key).ok_or_else(|| {
+            eyre!("Nanocodex version {key} has no Hand identity; its Hand cannot be bundled")
+        })?;
+        let directory = self.root.join(HAND_VERSIONS_DIR).join(&identity);
+        if !super::app::cached(&directory)? {
+            fs::create_dir_all(&directory)
+                .wrap_err_with(|| format!("failed to create {}", directory.display()))?;
+            let staging = tempfile::Builder::new()
+                .prefix(".app-")
+                .tempdir_in(&directory)
+                .wrap_err("failed to stage Nanocodex.app")?;
+            let receipt = build(staging.path())?;
+            super::app::verify_signature(&staging.path().join(super::app::BUNDLE))?;
+            let bundle = directory.join(super::app::BUNDLE);
+            remove_if_present(&directory.join(super::app::RECEIPT))?;
+            if fs::symlink_metadata(&bundle).is_ok() {
+                // Incomplete or corrupt: set it aside (a running Hand keeps
+                // its open file) instead of deleting it.
+                let aside = tempfile::Builder::new()
+                    .prefix(".corrupt-app-")
+                    .tempdir_in(&directory)?
+                    .keep();
+                fs::rename(&bundle, aside.join(super::app::BUNDLE))
+                    .wrap_err_with(|| format!("failed to set aside {}", bundle.display()))?;
+            }
+            fs::rename(staging.path().join(super::app::BUNDLE), &bundle)
+                .wrap_err_with(|| format!("failed to install {}", bundle.display()))?;
+            // The receipt is written last; without it the bundle is incomplete.
+            atomic_write(&directory.join(super::app::RECEIPT), receipt.as_bytes(), false)?;
+        }
+        atomic_symlink(
+            &self.version_dir(key).join(super::app::BUNDLE),
+            &hand_app_link(&identity),
+        )
+    }
+
     pub(super) fn voice_repair_directory(
         &self,
         key: &str,
@@ -465,6 +556,7 @@ impl VersionStore {
 
     pub(super) fn is_cached_bundle(&self, key: &str, requires_vm_guest: bool) -> Result<bool> {
         Ok(self.is_cached(key)?
+            && (!self.links_hand_app(key) || self.has_hand_app(key)?)
             && file_matches_checksum(
                 &self.version_dir(key).join(NANOCODEX2_BINARY_NAME),
                 &self.version_dir(key).join(NANOCODEX2_CHECKSUM_FILE),
@@ -479,6 +571,9 @@ impl VersionStore {
     pub(super) fn validate_activation(&self, key: &str) -> Result<()> {
         if !self.is_cached(key)? {
             bail!("Nanocodex version {key} is not installed or its checksum is invalid");
+        }
+        if self.links_hand_app(key) && !self.has_hand_app(key)? {
+            bail!("Nanocodex version {key} links an incomplete or corrupt Nanocodex.app");
         }
         if self
             .version_dir(key)
@@ -1000,6 +1095,14 @@ fn atomic_symlink(path: &Path, target: &Path) -> Result<()> {
     let temporary = staging.path().join("link");
     symlink(target, &temporary)?;
     fs::rename(&temporary, path).wrap_err_with(|| format!("failed to install {}", path.display()))
+}
+
+/// versions/<key>/Nanocodex.app -> ../../hand-versions/<identity>/Nanocodex.app
+fn hand_app_link(identity: &str) -> PathBuf {
+    Path::new("../..")
+        .join(HAND_VERSIONS_DIR)
+        .join(identity)
+        .join(super::app::BUNDLE)
 }
 
 fn validate_key(key: &str) -> Result<()> {
