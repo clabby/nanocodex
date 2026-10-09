@@ -412,6 +412,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Test Hand reuse against a fake release store
+        shell: bash
+        run: scripts/release/test-reuse-unchanged-hand.sh
       - name: Republish an unchanged Hand
         env:
           GH_TOKEN: ${{ github.token }}
