@@ -2135,23 +2135,41 @@ pub(crate) async fn run(
     client: &ManagedClient,
     agent_id: Option<String>,
 ) -> Result<(), ManagedError> {
-    run_inner(client, Some(agent_id)).await
+    run_inner(client, Some(agent_id), None).await
 }
 
 pub(crate) async fn run_new(client: &ManagedClient) -> Result<(), ManagedError> {
-    run_inner(client, None).await
+    run_inner(client, None, None).await
+}
+
+/// The local, non-durable TUI (`ncl`, `nanocodex --local`). It runs the same
+/// driver as the managed TUI; account-only features are hidden by capability.
+pub(crate) async fn run_local(launch: local::agent::LocalLaunch) -> Result<(), ManagedError> {
+    // Managed-only effects are hidden in local mode; this unroutable client only
+    // backs code paths that capabilities never reach.
+    let api_key = nanocodex_managed::ManagedApiKey::parse(format!(
+        "ncx_live_{}_{}",
+        "0".repeat(12),
+        "0".repeat(43)
+    ))?;
+    let client = ManagedClient::new("http://127.0.0.1:9", api_key)?;
+    run_inner(&client, None, Some(launch)).await
 }
 
 /// `Some(id)` attaches, `Some(None)` opens the in-TUI picker, and `None` creates.
 async fn run_inner(
     client: &ManagedClient,
     attach: Option<Option<String>>,
+    local_launch: Option<local::agent::LocalLaunch>,
 ) -> Result<(), ManagedError> {
     let first_frame = crate::nanocodex2::startup_timing::Stage::new("tui_first_frame");
-    let workspace = HostConfig::load()
-        .map_err(|error| ManagedError::Configuration(error.to_string()))?
-        .workspace()
-        .to_path_buf();
+    let workspace = match &local_launch {
+        Some(launch) => launch.args.cwd().to_path_buf(),
+        None => HostConfig::load()
+            .map_err(|error| ManagedError::Configuration(error.to_string()))?
+            .workspace()
+            .to_path_buf(),
+    };
     // Paint the hosted defaults immediately. New creation uses this same policy;
     // attach hydrates retained settings in connect_agent, where failures already
     // have retry semantics. Optional catalog discovery never gates startup.
@@ -2290,8 +2308,10 @@ async fn run_inner(
     scheduler.presented(Instant::now());
     drop(first_frame);
     let mut catalog_setup = JoinSet::new();
-    let catalog_client = client.clone();
-    catalog_setup.spawn(async move { catalog_client.models().await });
+    if local_launch.is_none() {
+        let catalog_client = client.clone();
+        catalog_setup.spawn(async move { catalog_client.models().await });
+    }
     // An updater can hold reload's coordination lock. Keep registration owned,
     // but wait off the input loop so it becomes available after contention clears.
     // Dropping the JoinSet also drops any uncollected registration and its lease.
@@ -3175,6 +3195,10 @@ async fn run_inner(
                             stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
                         }
                         ConnectionResult::Agent { purpose, result: Ok((agent, managed_events, agent_id, workspace, history, warning, settings, created, active_turns)) } => {
+                            if let Some(local) = &mut runtime.local {
+                                let capabilities = local.capabilities();
+                                local.adopt(capabilities).await;
+                            }
                             if matches!(purpose, ConnectionPurpose::Bug(_)) {
                                 runtime.detach_bug_source();
                             }
@@ -4027,6 +4051,14 @@ async fn run_inner(
             .expect("reload request requires a registration")
             .restart(&runtime.agent_id)
             .map_err(ManagedError::Configuration);
+    }
+    if let Some(mut local) = runtime.local.take() {
+        // A local agent is not durable: stop it and release VM/browser/MPP.
+        drop(runtime.agent.take());
+        return local
+            .shutdown()
+            .await
+            .map_err(|error| ManagedError::Configuration(format!("{error:#}")));
     }
     let Some(agent) = runtime.agent.take() else {
         return Ok(());
