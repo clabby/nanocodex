@@ -19,9 +19,10 @@ version with that identity, so a CLI-only update keeps the Hand's path and bytes
 On macOS the Hand also runs from a signed bundle,
 `hand-versions/<identity>/Nanocodex.app` (linked as `versions/<key>/Nanocodex.app`):
 releases ship it as `nanocodex-app-aarch64-apple-darwin.tar.gz`, local and source
-pairs are wrapped and signed with identifier `com.nanocodex.hand` (ad hoc, or the
-certificate named by `NANOCODEX_MACOS_SIGNING_IDENTITY`). The first verified bundle
-stored for an identity is kept, so re-signed copies of an unchanged Hand never
+pairs are wrapped and signed with identifier `com.nanocodex.hand` using the identity
+named by `NANOCODEX_CODESIGN_IDENTITY`, else the single installed Developer ID
+Application identity, else ad hoc. The first verified bundle stored for an
+identity is kept, so re-signed copies of an unchanged Hand never
 replace it. An installed standalone Hand with the same identity stays in place
 until an explicit `--restart-hand` moves the service into the bundle. For a CLI
 containing both command trees, `bin/{nanocodex,nanocodex2,nc,ncl}` all link

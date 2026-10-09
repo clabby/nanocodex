@@ -449,13 +449,16 @@ impl VersionStore {
     }
 
     /// The Hand a version runs: its linked `Nanocodex.app` when present,
-    /// otherwise the standalone `nanocodex2`.
+    /// otherwise the standalone `nanocodex2`. Resolved to the canonical
+    /// `hand-versions/<identity>/...` file, so service records name the
+    /// Hand's own stable path rather than a CLI version's link.
     pub(super) fn hand_executable(&self, key: &str) -> PathBuf {
-        if self.links_hand_app(key) {
+        let linked = if self.links_hand_app(key) {
             self.version_dir(key).join(super::app::EXECUTABLE)
         } else {
             self.version_dir(key).join(NANOCODEX2_BINARY_NAME)
-        }
+        };
+        fs::canonicalize(&linked).unwrap_or(linked)
     }
 
     fn links_hand_app(&self, key: &str) -> bool {
@@ -1401,7 +1404,11 @@ mod tests {
             assert!(!store.has_hand_app("1.0.1").unwrap());
             assert_eq!(
                 store.hand_executable("1.0.1"),
-                store.version_dir("1.0.1").join(NANOCODEX2_BINARY_NAME)
+                directory
+                    .path()
+                    .canonicalize()
+                    .unwrap()
+                    .join(format!("hand-versions/{HAND_B}/nanocodex2"))
             );
         }
         assert!(!directory.path().join("hand-versions/escaped").exists());

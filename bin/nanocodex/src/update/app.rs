@@ -24,10 +24,17 @@ pub(super) const EXECUTABLE: &str = "Nanocodex.app/Contents/MacOS/nanocodex2";
 /// Per-file digests of a stored bundle, written beside it after it is in place.
 pub(super) const RECEIPT: &str = "Nanocodex.app.sha256";
 /// The code-signing identifier (and CFBundleIdentifier) of every Hand build.
+#[cfg(unix)]
 pub(super) const IDENTIFIER: &str = "com.nanocodex.hand";
-/// A stable local signing identity for development bundles, e.g. an
-/// "Apple Development" or self-signed code-signing certificate name.
-pub(super) const SIGNING_IDENTITY_ENV: &str = "NANOCODEX_MACOS_SIGNING_IDENTITY";
+/// The code-signing identity (certificate name or SHA-1) for development
+/// bundles. Without it a single installed "Developer ID Application" identity
+/// is used, and only without any such identity is the bundle signed ad hoc.
+#[cfg(unix)]
+pub(super) const SIGNING_IDENTITY_ENV: &str = "NANOCODEX_CODESIGN_IDENTITY";
+/// Accepted alias of [`SIGNING_IDENTITY_ENV`].
+#[cfg(unix)]
+const SIGNING_IDENTITY_ALIAS_ENV: &str = "NANOCODEX_MACOS_SIGNING_IDENTITY";
+#[cfg(unix)]
 const ENTITLEMENTS: &str = include_str!("../../../../nanocodex-vm.entitlements");
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ENTRIES: usize = 64;
@@ -199,6 +206,7 @@ pub(super) fn cached(parent: &Path) -> Result<bool> {
 }
 
 /// Receipt of an already-complete bundle (used after local signing).
+#[cfg(unix)]
 pub(super) fn receipt_of(parent: &Path) -> Result<String> {
     let files = tree(parent)?.ok_or_else(|| eyre!("Nanocodex.app contains a link"))?;
     if !has_required(&files) {
@@ -212,6 +220,7 @@ pub(super) fn receipt_of(parent: &Path) -> Result<String> {
     Ok(receipt)
 }
 
+#[cfg(unix)]
 fn info_plist(version: &str) -> String {
     // CFBundleVersion accepts only numeric dotted versions.
     let numeric = version
@@ -241,9 +250,9 @@ fn info_plist(version: &str) -> String {
 }
 
 /// Wrap a development Hand into `parent/Nanocodex.app` exactly like the
-/// release bundle and sign it with the release identifier and entitlements.
-/// With [`SIGNING_IDENTITY_ENV`] the signature uses that stable certificate;
-/// otherwise it is ad hoc.
+/// release bundle and sign it with the release identifier and entitlements,
+/// using the identity chosen by [`signing_identity`].
+#[cfg(unix)]
 pub(super) fn wrap(hand: &[u8], version: &str, parent: &Path) -> Result<String> {
     let contents = parent.join("Nanocodex.app/Contents");
     super::store::atomic_write(&contents.join("MacOS/nanocodex2"), hand, true)?;
@@ -264,23 +273,24 @@ fn codesign(arguments: &[&std::ffi::OsStr]) -> Result<std::process::Output> {
         .wrap_err("failed to run /usr/bin/codesign")
 }
 
+#[cfg(unix)]
 fn sign(bundle: &Path) -> Result<()> {
     if !cfg!(target_os = "macos") {
         bail!("signing Nanocodex.app requires macOS");
     }
-    let identity = std::env::var(SIGNING_IDENTITY_ENV)
-        .ok()
-        .filter(|identity| !identity.trim().is_empty());
+    let identity = signing_identity()?;
     if identity.is_none() {
         eprintln!(
-            "warning: signing the development Nanocodex.app ad hoc; set {SIGNING_IDENTITY_ENV} to a code-signing certificate so macOS privacy grants survive Hand changes"
+            "warning: no Developer ID Application identity found; signing the development Nanocodex.app ad hoc. Set {SIGNING_IDENTITY_ENV} to a code-signing identity so macOS privacy grants survive Hand changes"
         );
     }
     let entitlements = tempfile::NamedTempFile::new()?;
     fs::write(entitlements.path(), ENTITLEMENTS)?;
     let identity = identity.unwrap_or_else(|| "-".to_owned());
+    // Development signatures stay offline: no secure timestamp request.
     let output = codesign(&[
         "--force".as_ref(),
+        "--timestamp=none".as_ref(),
         "--sign".as_ref(),
         identity.as_ref(),
         "--identifier".as_ref(),
@@ -299,8 +309,61 @@ fn sign(bundle: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The explicit identity from [`SIGNING_IDENTITY_ENV`] (or its alias), which
+/// must be a valid installed code-signing identity; otherwise the one valid
+/// "Developer ID Application" identity, if exactly one is installed. Several
+/// candidates are ambiguous and fail rather than pick one silently.
+#[cfg(unix)]
+fn signing_identity() -> Result<Option<String>> {
+    let explicit = [SIGNING_IDENTITY_ENV, SIGNING_IDENTITY_ALIAS_ENV]
+        .into_iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name, value.trim().to_owned()))
+                .filter(|(_, value)| !value.is_empty())
+        });
+    let output = std::process::Command::new("/usr/bin/security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .wrap_err("failed to list code-signing identities with /usr/bin/security")?;
+    // Lines look like:  1) <SHA-1> "Developer ID Application: Name (TEAMID)"
+    let identities: Vec<(String, String)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (_, rest) = line.trim().split_once(") ")?;
+            let (hash, name) = rest.split_once(' ')?;
+            Some((hash.to_owned(), name.trim().trim_matches('"').to_owned()))
+        })
+        .collect();
+    if let Some((variable, identity)) = explicit {
+        if !identities
+            .iter()
+            .any(|(hash, name)| hash.eq_ignore_ascii_case(&identity) || *name == identity)
+        {
+            bail!("{variable}={identity:?} is not a valid code-signing identity in the keychain");
+        }
+        return Ok(Some(identity));
+    }
+    let developer_id: Vec<&(String, String)> = identities
+        .iter()
+        .filter(|(_, name)| name.starts_with("Developer ID Application:"))
+        .collect();
+    match developer_id.as_slice() {
+        [] => Ok(None),
+        [(hash, name)] => {
+            eprintln!("Signing the development Nanocodex.app with {name}");
+            Ok(Some(hash.clone()))
+        }
+        _ => bail!(
+            "several Developer ID Application identities are installed; choose one with {SIGNING_IDENTITY_ENV}"
+        ),
+    }
+}
+
 /// On macOS, require an intact signature sealed with [`IDENTIFIER`]. Other
 /// platforms never run the bundle and only check its structure.
+#[cfg(unix)]
 pub(super) fn verify_signature(bundle: &Path) -> Result<()> {
     if !cfg!(target_os = "macos") {
         return Ok(());
