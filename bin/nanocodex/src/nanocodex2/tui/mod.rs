@@ -2432,7 +2432,8 @@ async fn run_inner(
     let mut stopping = false;
     #[cfg(unix)]
     let mut control_server = if nanocodex_tui_control::Server::enabled() {
-        Some(nanocodex_tui_control::Server::start("managed").map_err(terminal_error)?)
+        // FEATURE-HOOK: wp2 the local TUI registers as kind "native".
+        Some(nanocodex_tui_control::Server::start(if runtime.local.is_some() { "native" } else { "managed" }).map_err(terminal_error)?)
     } else {
         None
     };
@@ -2731,7 +2732,17 @@ async fn run_inner(
                 }
                 pending::<Option<nanocodex_tui_control::Command>>().await
             } => {
-                if let Some(command) = command { control::dispatch(command, runtime.control_bridge.as_ref().unwrap(), &runtime, &mut control_tasks); }
+                if let Some(command) = command {
+                    if runtime.local.is_some() {
+                        // FEATURE-HOOK: wp2 local control: rollout history and the in-process agent.
+                        let bridge = runtime.control_bridge.clone().unwrap();
+                        if let Some(update) = local::control::dispatch(command, &bridge, &mut runtime, &mut app, &mut control_tasks) {
+                            stopping |= apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+                        }
+                    } else {
+                        control::dispatch(command, runtime.control_bridge.as_ref().unwrap(), &runtime, &mut control_tasks);
+                    }
+                }
             }
             Some(result) = control_tasks.join_next(), if !control_tasks.is_empty() => {
                 if let Ok((command, result, settings, session)) = result {
