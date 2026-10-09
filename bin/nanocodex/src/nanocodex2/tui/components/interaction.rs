@@ -371,10 +371,8 @@ impl FeatureOverlay for InteractionOverlay {
                     self.chosen.insert(index);
                 }
             }
-            KeyCode::Char(character) => {
-                if self.input.len() < 8192 {
-                    self.input.push(character);
-                }
+            KeyCode::Char(character) if self.input.len() < 8192 => {
+                self.input.push(character);
             }
             _ => {}
         }

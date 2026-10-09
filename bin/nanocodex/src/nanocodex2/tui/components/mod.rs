@@ -5,7 +5,7 @@
 
 mod actions;
 mod app;
-// FEATURE-HOOK: wp2 branch navigator overlay.
+// Branch navigator overlay.
 mod branch_navigator;
 mod code_review;
 mod composer;

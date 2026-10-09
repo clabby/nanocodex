@@ -28,7 +28,7 @@ pub(crate) enum Capability {
     ManagedSessions,
     /// Managed /btw fork through the account service.
     ManagedBtw,
-    /// Local /btw fork through the agent handle (WP2).
+    /// Local /btw fork through the agent handle.
     LocalBtw,
     Reload,
     Handoff,
@@ -36,14 +36,14 @@ pub(crate) enum Capability {
     Routing,
     /// ElevenLabs/managed voice protocol.
     VoiceManaged,
-    /// OpenAI Realtime voice from the local agent configuration (WP4).
+    /// OpenAI Realtime voice from the local agent configuration.
     VoiceRealtime,
     Mcp,
     Branches,
     CollapseSplit,
     ClaudeHost,
     Eval,
-    /// Local session source for the resume picker (WP2).
+    /// Local session source for the resume picker.
     LocalSessions,
 }
 

@@ -3,8 +3,7 @@
 //! before it, and switching reopens another branch in place. Ctrl+Alt+Up/Down
 //! cycles branches without the navigator.
 //!
-//! Ported from the legacy TUI (`edit_historical`, `switch_main_branch`, branch
-//! navigator). Branches are durable Codex threads: an edit copies the current
+//! Branches are durable Codex threads: an edit copies the current
 //! rollout through the completed turns before the edited prompt
 //! (`rollout_fork`), so every branch can also be resumed later with `ncl resume`.
 

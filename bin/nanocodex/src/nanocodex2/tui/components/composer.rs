@@ -82,7 +82,7 @@ pub(crate) enum SettingsCommand {
     SetEffort(ReasoningEffort),
     OpenModel,
     SetModel(Model),
-    // FEATURE-HOOK: wp1/wp4 local feature commands (/mcp, /benchmark)
+    // Local feature commands (/mcp, /benchmark)
     Feature(crate::nanocodex2::tui::features::FeatureCommand),
     Invalid(String),
 }
@@ -166,7 +166,7 @@ impl SettingsCommand {
             } else {
                 Self::Zoom
             }),
-            // FEATURE-HOOK: wp4 /mcp and /benchmark (legacy local commands)
+            // /mcp and /benchmark
             "/mcp" => Some(match (parts.next(), parts.next(), parts.next()) {
                 (Some("login"), Some(name), None) => Self::Feature(
                     crate::nanocodex2::tui::features::FeatureCommand::McpLogin(name.to_owned()),
@@ -178,7 +178,7 @@ impl SettingsCommand {
                 }
                 _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload [server]".into()),
             }),
-            // FEATURE-HOOK: wp2 local /btw collapse/split and the branch navigator
+            // Local /btw collapse/split and the branch navigator
             "/collapse" | "/split" | "/branches" => Some(if parts.next().is_some() {
                 Self::Invalid(format!("Usage: {command}"))
             } else {
@@ -194,7 +194,7 @@ impl SettingsCommand {
                 ),
             )),
             "/voice" => {
-                // FEATURE-HOOK: wp4 arguments the managed grammar rejects may still be
+                // Arguments the managed grammar rejects may still be
                 // local Realtime controls (e.g. platform voices); the driver shows the
                 // managed error when no local agent handles them.
                 let arguments = input.trim_start()[command.len()..].trim();

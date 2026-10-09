@@ -35,7 +35,7 @@ mod shell;
 mod sites;
 mod spinner;
 mod sudo_input;
-mod telemetry; // FEATURE-HOOK: wp3
+mod telemetry;
 mod terminal;
 mod theme;
 mod tmux;
@@ -514,7 +514,7 @@ enum ConnectionResult {
         request_id: u64,
         result: Option<Result<AgentList, ManagedError>>,
     },
-    /// FEATURE-HOOK: wp2 local session discovery, read off the input loop.
+    /// Local session discovery, read off the input loop.
     LocalSessions {
         pane: PaneId,
         request_id: u64,
@@ -577,7 +577,7 @@ struct DriverRuntime {
     /// The local backend for ncl; None for managed sessions.
     local: Option<local::LocalState>,
     feature_overlay: Option<Box<dyn features::FeatureOverlay>>,
-    // FEATURE-HOOK: wp1/wp4 feature-submitted turns and their receipts.
+    // Feature-submitted turns and their receipts.
     feature_instructions: HashMap<TurnId, String>,
     feature_completions: HashMap<TurnId, Vec<tokio::sync::oneshot::Sender<bool>>>,
     feature_turns: HashSet<TurnId>,
@@ -955,7 +955,7 @@ impl DriverRuntime {
                         ..Default::default()
                     })
             })
-            // FEATURE-HOOK: wp4 local Realtime voice status.
+            // Local Realtime voice status.
             .or_else(|| self.local_voice_status.clone())
     }
 
@@ -1574,7 +1574,7 @@ impl DriverRuntime {
         Ok(record)
     }
 
-    /// FEATURE-HOOK: wp1/wp4 resolves feature receipts and busy state from turn records.
+    /// Resolves feature receipts and busy state from turn records.
     fn feature_turn_event(&mut self, event: &LocalEvent) {
         let Some(local) = self.local.as_mut() else {
             return;
@@ -1620,7 +1620,7 @@ impl DriverRuntime {
             }
             return;
         };
-        // FEATURE-HOOK: wp1/wp4 private instructions and typed-prompt hooks.
+        // Private instructions and typed-prompt hooks.
         let mut agent_prompt = prompt.agent_prompt();
         let mut rejection = None;
         if let Some(local) = &mut self.local {
@@ -1648,7 +1648,7 @@ impl DriverRuntime {
         }
         self.submitted_turns.insert(managed_request_id.clone());
         self.unacknowledged_inputs
-            .insert(id, (pane, managed_request_id.clone(), prompt.clone()));
+            .insert(id, (pane, managed_request_id.clone(), prompt));
         self.local_managed_turns
             .insert(id, managed_request_id.clone());
         self.admitting.insert(id);
@@ -2341,11 +2341,11 @@ async fn run_inner(
     let mut app = AppNode::new(Theme::default(), workspace.clone(), root);
     let mut reload: Option<crate::nanocodex2::reload::Registration> = None;
     let mut reload_requested = false;
-    let _observability = telemetry::install_observability(); // FEATURE-HOOK: wp3
+    let _observability = telemetry::install_observability();
     let mut terminal = TerminalSession::enter().await.map_err(terminal_error)?;
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
-    let mut wp3 = Wp3Hooks::new(); // FEATURE-HOOK: wp3
+    let mut wp3 = Wp3Hooks::new();
     let (btw_events, mut btw_updates) = mpsc::unbounded_channel();
     let is_local = local_launch.is_some();
     let mut runtime = DriverRuntime {
@@ -2541,14 +2541,14 @@ async fn run_inner(
     clone_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tmux = tmux::Publisher::new();
     let mut tmux_tick = tokio::time::interval(Duration::from_secs(2));
-    // FEATURE-HOOK: wp1 idle tick (Claude scheduler) while local main is idle.
+    // Idle tick (Claude scheduler) while local main is idle.
     let mut feature_tick = tokio::time::interval(Duration::from_secs(1));
     feature_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tmux_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stopping = false;
     #[cfg(unix)]
     let mut control_server = if nanocodex_tui_control::Server::enabled() {
-        // FEATURE-HOOK: wp2 the local TUI registers as kind "native".
+        // The local TUI registers as kind "native".
         Some(
             nanocodex_tui_control::Server::start(if runtime.local.is_some() {
                 "native"
@@ -2753,7 +2753,7 @@ async fn run_inner(
             );
         }
         if scheduler.is_due(Instant::now()) {
-            let render_started = Instant::now(); // FEATURE-HOOK: wp3
+            let render_started = Instant::now();
             let draw = terminal
                 .draw(|frame| {
                     app.render(frame);
@@ -2765,7 +2765,7 @@ async fn run_inner(
                     }
                 })
                 .map_err(terminal_error)?;
-            wp3.presented(&app, &mut terminal, &runtime.agent_id, render_started, draw); // FEATURE-HOOK: wp3
+            wp3.presented(&app, &mut terminal, &runtime.agent_id, render_started, draw);
             runtime.screen.size.send_if_modified(|size| {
                 let current = app.screen_size();
                 if *size == current {
@@ -2859,7 +2859,7 @@ async fn run_inner(
             } => {
                 if let Some(command) = command {
                     if runtime.local.is_some() {
-                        // FEATURE-HOOK: wp2 local control: rollout history and the in-process agent.
+                        // Local control: rollout history and the in-process agent.
                         let bridge = runtime.control_bridge.clone().unwrap();
                         if let Some(update) = local::control::dispatch(command, &bridge, &mut runtime, &mut app, &mut control_tasks) {
                             stopping |= apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
@@ -3051,7 +3051,7 @@ async fn run_inner(
                     .transpose()
                     .map_err(terminal_error)?
                     .ok_or_else(|| terminal_error(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")))?;
-                wp3.notifier.observe_event(&event); // FEATURE-HOOK: wp3 (focus only)
+                wp3.notifier.observe_event(&event);
                 // SECURITY: intercept BEFORE ordinary AppEvent, clipboard,
                 // screen, composer, shell, debug/control, export or history.
                 if let Some(flow) = &mut runtime.secure_input {
@@ -3123,7 +3123,7 @@ async fn run_inner(
             }, if runtime.managed_events_open => {
                 match event {
                     Some(event) => {
-                        wp3.received(&runtime.agent_id, telemetry::Received::managed(&event)); // FEATURE-HOOK: wp3
+                        wp3.received(&runtime.agent_id, telemetry::Received::managed(&event));
                         if let Some(bridge) = &runtime.control_bridge { let mut value=serde_json::to_value(&event).unwrap_or_default(); value["session_id"]=serde_json::json!(runtime.agent_id); bridge.publish("managed.event",value); }
                         runtime.observed_cursor.clone_from(&event.cursor);
                         if let Some(request_id) = event.data.turn_id() {
@@ -3848,10 +3848,10 @@ async fn run_inner(
                         match outcome {
                             Ok(settings) => {
                                 runtime.settings = settings;
-                                if let Some(local) = &mut runtime.local {
-                                    if let Ok(model) = settings.model.as_str().parse() {
-                                        local.launch.args.select_tui_model(model, settings.thinking, settings.fast_mode);
-                                    }
+                                if let Some(local) = &mut runtime.local
+                                    && let Ok(model) = settings.model.as_str().parse()
+                                {
+                                    local.launch.args.select_tui_model(model, settings.thinking, settings.fast_mode);
                                 }
                                 if matches!(mutation, SettingsMutation::Complete(_)) && let Some(root) = app.root_mut(pane) {
                                     let mode = reasoning_mode_from_managed(settings.reasoning_mode);
@@ -4467,7 +4467,7 @@ async fn apply_feature_update(
             }
             update
         }
-        // FEATURE-HOOK: wp2 branch switch/edit reopens another session in place.
+        // Branch switch/edit reopens another session in place.
         FeatureUpdate::Relaunch(launch) if launch.resume.is_some() => {
             match runtime.local_switch(ConnectionPurpose::Resume(PaneId::Main), *launch) {
                 Ok(task) => runtime.pending_resume = Some((task, PaneId::Main)),
@@ -4497,7 +4497,7 @@ async fn apply_feature_update(
             runtime.local_voice_status = status;
             app.update(AppEvent::VoiceStatus(runtime.voice_status()))
         }
-        // FEATURE-HOOK: wp2 /collapse and /split close the local side pane.
+        // /collapse and /split close the local side pane.
         FeatureUpdate::ClosePane(pane) => app.close_fork(pane),
         FeatureUpdate::Capabilities(capabilities) => {
             if let Some(root) = app.root_mut(PaneId::Main) {
@@ -4541,7 +4541,7 @@ async fn apply_update(
                     continue;
                 }
                 if runtime.local.is_some() {
-                    // FEATURE-HOOK: wp2 local /btw forks the in-process agent.
+                    // Local /btw forks the in-process agent.
                     let Some(main) = runtime.agent.clone() else {
                         absorb(
                             app.update(AppEvent::ForkFailed {
@@ -4596,7 +4596,7 @@ async fn apply_update(
                     && let Some(btw) = runtime.btw.take()
                 {
                     if runtime.local.is_some() {
-                        // FEATURE-HOOK: wp2 dropping the request channel makes the local
+                        // Dropping the request channel makes the local
                         // side task cancel its turn and shut its forked agent down.
                         drop(btw.commands);
                     } else {
@@ -4667,7 +4667,7 @@ async fn apply_update(
                 if pane != PaneId::Main {
                     match effect {
                         RootEffect::Feature(command) => {
-                            // FEATURE-HOOK: wp2 /collapse and /split typed in the side pane.
+                            // /collapse and /split typed in the side pane.
                             let handled = runtime.local.as_mut().is_some_and(|local| {
                                 local.with_features(|features, cx| {
                                     features.command(pane, &command, cx)
@@ -4773,7 +4773,7 @@ async fn apply_update(
                         unreachable!("workspace commands are handled by AppNode")
                     }
                     RootEffect::Feature(command) => {
-                        // FEATURE-HOOK: wp1/wp4 feature command dispatch.
+                        // Feature command dispatch.
                         let handled = runtime.local.as_mut().is_some_and(|local| {
                             local.with_features(|features, cx| features.command(pane, &command, cx))
                         });
@@ -4788,7 +4788,7 @@ async fn apply_update(
                         }
                     }
                     RootEffect::Voice(command) if runtime.local.is_some() => {
-                        // FEATURE-HOOK: wp4 local Realtime voice.
+                        // Local Realtime voice.
                         use crate::nanocodex2::voice::{Command, Provider};
                         let argument = match command {
                             Command::Toggle => Some(String::new()),
@@ -5754,7 +5754,7 @@ async fn apply_update(
                     }
                     RootEffect::AutoRoute => runtime.enable_autoroute(pane),
                     RootEffect::SetModel(model) if runtime.local.is_some() => {
-                        // FEATURE-HOOK: wp1 local model/harness switch before the first prompt.
+                        // Local model/harness switch before the first prompt.
                         let command = features::FeatureCommand::SwitchModel(model.to_string());
                         let handled = runtime.local.as_mut().is_some_and(|local| {
                             local.with_features(|features, cx| features.command(pane, &command, cx))

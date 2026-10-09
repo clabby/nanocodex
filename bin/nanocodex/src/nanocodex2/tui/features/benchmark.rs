@@ -1,4 +1,4 @@
-//! /benchmark [profile] (WP4): asks the local agent to run the repository's
+//! /benchmark [profile]: asks the local agent to run the repository's
 //! benchmark workflow. Port of the legacy classify_submission arm: the
 //! transcript shows the typed command while the agent receives the private
 //! workflow instruction from [crate::benchmark::prompt].
