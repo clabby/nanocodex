@@ -1172,6 +1172,207 @@ pub(super) fn atomic_write(path: &Path, contents: &[u8], executable: bool) -> Re
 mod tests {
     use super::*;
 
+    const HAND_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HAND_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// A Nanocodex.app archived exactly as scripts/release/macos-sign-hand.sh
+    /// does (minus codesign, which only macOS has).
+    fn release_app_archive(hand: &[u8], format: Option<&str>) -> Vec<u8> {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().unwrap();
+        let contents = work.path().join("Nanocodex.app/Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::create_dir_all(contents.join("_CodeSignature")).unwrap();
+        fs::write(contents.join("Info.plist"), b"<plist/>").unwrap();
+        fs::write(contents.join("_CodeSignature/CodeResources"), b"sealed").unwrap();
+        fs::write(contents.join("MacOS/nanocodex2"), hand).unwrap();
+        fs::set_permissions(contents.join("MacOS/nanocodex2"), fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let archive = work.path().join("nanocodex-app-aarch64-apple-darwin.tar.gz");
+        let mut tar = std::process::Command::new("tar");
+        tar.env("COPYFILE_DISABLE", "1").arg("--no-xattrs");
+        if let Some(format) = format {
+            tar.arg(format!("--format={format}"));
+        }
+        let status = tar
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(work.path())
+            .arg("Nanocodex.app")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::read(archive).unwrap()
+    }
+
+    fn crafted_app_archive(name: &str, kind: tar::EntryType, mode: u32) -> Vec<u8> {
+        let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        for (path, mode) in [
+            ("Nanocodex.app/Contents/Info.plist", 0o644),
+            ("Nanocodex.app/Contents/_CodeSignature/CodeResources", 0o644),
+            ("Nanocodex.app/Contents/MacOS/nanocodex2", mode),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(4);
+            header.set_mode(mode);
+            header.set_cksum();
+            archive.append_data(&mut header, path, &b"hand"[..]).unwrap();
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_entry_type(kind);
+        if kind.is_symlink() || kind.is_hard_link() {
+            header.set_link_name("/etc/passwd").unwrap();
+        }
+        header.set_cksum();
+        // append_data rejects '..'; write the raw name like a hostile archive.
+        let bytes = name.as_bytes();
+        header.as_old_mut().name[..bytes.len()].copy_from_slice(bytes);
+        header.set_cksum();
+        archive.append(&header, std::io::empty()).unwrap();
+        archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn install_release(store: &VersionStore, key: &str, identity: &str, hand: &[u8]) {
+        store
+            .install_bundle_with_hand(key, b"cli", hand, Some(identity), None, None)
+            .unwrap();
+        store
+            .install_hand_app(key, &release_app_archive(hand, None))
+            .unwrap();
+    }
+
+    #[test]
+    fn release_app_is_shared_by_cli_versions_with_an_unchanged_hand() {
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let store = VersionStore::at(directory.path());
+        install_release(&store, "1.0.0", HAND_A, b"hand-a");
+        store.activate("1.0.0").unwrap();
+        assert!(store.is_cached_bundle("1.0.0", false).unwrap());
+        let first = store.hand_executable("1.0.0").canonicalize().unwrap();
+        assert_eq!(
+            first,
+            directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(format!("hand-versions/{HAND_A}/Nanocodex.app/Contents/MacOS/nanocodex2"))
+        );
+        assert_eq!(
+            directory
+                .path()
+                .join("current/Nanocodex.app/Contents/MacOS/nanocodex2")
+                .canonicalize()
+                .unwrap(),
+            first
+        );
+        let inode = fs::metadata(&first).unwrap().ino();
+
+        // A CLI-only release: a re-signed archive of the same Hand never
+        // replaces the stored bundle, so path and signature stay put.
+        store
+            .install_bundle_with_hand("1.0.1", b"cli-2", b"hand-a", Some(HAND_A), None, None)
+            .unwrap();
+        store
+            .install_hand_app("1.0.1", &release_app_archive(b"hand-a-resigned", Some("pax")))
+            .unwrap();
+        store.activate("1.0.1").unwrap();
+        let second = store.hand_executable("1.0.1").canonicalize().unwrap();
+        assert_eq!(second, first);
+        assert_eq!(fs::metadata(&second).unwrap().ino(), inode);
+        assert_eq!(fs::read(&second).unwrap(), b"hand-a");
+
+        // A changed Hand gets its own bundle; the previous one stays intact
+        // for rollback.
+        install_release(&store, "2.0.0", HAND_B, b"hand-b");
+        store.activate("2.0.0").unwrap();
+        assert_ne!(store.hand_executable("2.0.0").canonicalize().unwrap(), first);
+        store.activate("1.0.1").unwrap();
+        assert!(store.is_cached_bundle("1.0.1", false).unwrap());
+        assert_eq!(
+            directory
+                .path()
+                .join("current/Nanocodex.app/Contents/MacOS/nanocodex2")
+                .canonicalize()
+                .unwrap(),
+            first
+        );
+    }
+
+    #[test]
+    fn corrupt_release_app_blocks_activation_until_reinstalled() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = VersionStore::at(directory.path());
+        install_release(&store, "1.0.0", HAND_A, b"hand-a");
+        let bundle = directory.path().join(format!("hand-versions/{HAND_A}/Nanocodex.app"));
+        fs::write(bundle.join("Contents/Info.plist"), b"tampered").unwrap();
+        assert!(!store.has_hand_app("1.0.0").unwrap());
+        assert!(!store.is_cached_bundle("1.0.0", false).unwrap());
+        assert!(store.activate("1.0.0").is_err());
+        assert!(fs::read_link(directory.path().join("current")).is_err());
+
+        store
+            .install_hand_app("1.0.0", &release_app_archive(b"hand-a", None))
+            .unwrap();
+        assert!(store.is_cached_bundle("1.0.0", false).unwrap());
+        // The corrupt bundle was set aside, not deleted under a running Hand.
+        let aside = fs::read_dir(bundle.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".corrupt-app-"))
+            .count();
+        assert_eq!(aside, 1);
+
+        // Unlisted files inside the sealed bundle also invalidate it.
+        fs::write(bundle.join("Contents/MacOS/extra"), b"x").unwrap();
+        assert!(!store.is_cached_bundle("1.0.0", false).unwrap());
+    }
+
+    #[test]
+    fn hostile_or_incomplete_app_archives_change_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = VersionStore::at(directory.path());
+        install_release(&store, "1.0.0", HAND_A, b"hand-a");
+        store
+            .install_bundle_with_hand("1.0.1", b"cli-2", b"hand-b", Some(HAND_B), None, None)
+            .unwrap();
+        for archive in [
+            crafted_app_archive("Nanocodex.app/../escaped", tar::EntryType::Regular, 0o755),
+            crafted_app_archive("Nanocodex.app/Contents/link", tar::EntryType::Symlink, 0o755),
+            crafted_app_archive("Nanocodex.app/Contents/hard", tar::EntryType::Link, 0o755),
+            crafted_app_archive("Nanocodex.app/Contents/._Info.plist", tar::EntryType::Regular, 0o755),
+            crafted_app_archive("Other.app/Contents/x", tar::EntryType::Regular, 0o755),
+            crafted_app_archive("Nanocodex.app/Contents/info.plist", tar::EntryType::Regular, 0o755),
+            // The Hand inside the bundle must be executable.
+            crafted_app_archive("Nanocodex.app/Contents/Resources/x", tar::EntryType::Regular, 0o644),
+            b"not a gzip archive".to_vec(),
+        ] {
+            assert!(store.install_hand_app("1.0.1", &archive).is_err());
+            assert!(!store.has_hand_app("1.0.1").unwrap());
+            assert_eq!(
+                store.hand_executable("1.0.1"),
+                store.version_dir("1.0.1").join(NANOCODEX2_BINARY_NAME)
+            );
+        }
+        assert!(!directory.path().join("hand-versions/escaped").exists());
+        assert!(store.has_hand_app("1.0.0").unwrap());
+        // A version without a Hand identity is never bundled.
+        store
+            .install_bundle_with_hand("0.9.0", b"cli-0", b"hand-0", None, None, None)
+            .unwrap();
+        assert!(
+            store
+                .install_hand_app("0.9.0", &release_app_archive(b"hand-0", None))
+                .is_err()
+        );
+    }
+
     #[test]
     fn native_launchers_switch_atomically_and_fall_back_for_older_versions() {
         use std::os::unix::fs::{MetadataExt, symlink};
