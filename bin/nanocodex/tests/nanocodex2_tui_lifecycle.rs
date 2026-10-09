@@ -668,6 +668,290 @@ async fn stalled_tmux_hint_keeps_terminal_usable_and_reaps_helper() {
     );
 }
 
+/// Accountless `nanocodex --local` drives the unified TUI with only the external
+/// Responses socket stubbed: `--prompt` is admitted exactly once and streams its
+/// reply, the native tui-control session is discoverable and idle, and the
+/// managed-only /share command explains the account requirement without model
+/// input or managed HTTP. Evidence: output/local-tui-journey/<run>/.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without_http() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio_tungstenite::tungstenite::Message as Frame;
+
+    const PROMPT: &str = "hello from the local journey";
+    const REPLY: &str = "LOCAL_PROMPT_REPLY";
+    const LIMIT: Duration = Duration::from_secs(30);
+    let artifact = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../output/local-tui-journey")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&artifact).unwrap();
+
+    // The only external dependency: a loopback Responses websocket that
+    // answers warmups empty and every generation with one streamed reply.
+    let responses = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", responses.local_addr().unwrap());
+    let generations = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let recorded = generations.clone();
+    let provider = tokio::spawn(async move {
+        while let Ok((stream, _)) = responses.accept().await {
+            let recorded = recorded.clone();
+            tokio::spawn(async move {
+                let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                while let Some(Ok(frame)) = socket.next().await {
+                    let Frame::Text(text) = frame else {
+                        continue;
+                    };
+                    let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                    let item = json!({"type":"message","id":"msg_local","role":"assistant","status":"completed",
+                        "content":[{"type":"output_text","text":REPLY,"annotations":[]}]});
+                    let output = if request["generate"] == false {
+                        vec![]
+                    } else {
+                        recorded.lock().unwrap().push(request);
+                        for event in [
+                            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_local","role":"assistant","content":[]}}),
+                            json!({"type":"response.output_text.delta","output_index":0,"delta":"LOCAL_PROMPT_"}),
+                            json!({"type":"response.output_text.delta","output_index":0,"delta":"REPLY"}),
+                            json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                        ] {
+                            if socket
+                                .send(Frame::Text(event.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        vec![item]
+                    };
+                    let completed = json!({"type":"response.completed","response":{"id":"resp_local","status":"completed","output":output,
+                        "usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,
+                            "output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}});
+                    if socket
+                        .send(Frame::Text(completed.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    // Any managed HTTP from the accountless TUI would connect here.
+    let managed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    managed.set_nonblocking(true).unwrap();
+    let managed_origin = format!("http://{}", managed.local_addr().unwrap());
+
+    let mut terminal = Terminal::start_with_command(&managed_origin, false, None, |command| {
+        command.env_remove("NANOCODEX_API_KEY");
+        command.args([
+            "--local",
+            "--prompt",
+            PROMPT,
+            "--api-key",
+            "synthetic-openai-key",
+            "--websocket-url",
+            endpoint.as_str(),
+            "--browser=none",
+            "--mcp-defaults",
+            "false",
+            "--mcp-codex-config",
+            "false",
+            "--web-search",
+            "false",
+            "--image-generation",
+            "false",
+            "--memory",
+            "false",
+            "--subagents",
+            "false",
+        ]);
+    });
+    let workspace = terminal._workspace.path().to_path_buf();
+    let screen = |terminal: &Terminal| terminal.screen.lock().unwrap().screen().contents();
+    let evidence = |terminal: &Terminal, step: &str| {
+        std::fs::write(
+            artifact.join(format!("{step}.screen.txt")),
+            screen(terminal),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact.join("terminal.log"),
+            terminal.output.lock().unwrap().as_slice(),
+        )
+        .unwrap();
+        std::fs::write(
+            artifact.join("provider.json"),
+            serde_json::to_vec_pretty(&*generations.lock().unwrap()).unwrap(),
+        )
+        .unwrap();
+    };
+    std::fs::write(
+        artifact.join("scenario.json"),
+        serde_json::to_vec_pretty(&json!({
+            "reproduce":"cargo test --locked -p nanocodex-bin --test nanocodex2_tui_lifecycle terminal_local_prompt_replies_once_and_rejects_account_commands_without_http -- --nocapture",
+            "command":["nanocodex","--local","--prompt",PROMPT,"--websocket-url",&endpoint],
+            "expected":["one generation containing the --prompt text","streamed reply visible","native control session idle","/share rejected as needing an account","no model input or managed HTTP for /share","Ctrl+C Ctrl+C exits successfully"],
+            "boundary":"shipped nanocodex executable in a 160x32 PTY without an account; only the external Responses websocket is a loopback fixture"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    eprintln!("journey evidence: {}", artifact.display());
+
+    let deadline = std::time::Instant::now() + LIMIT;
+    while !screen(&terminal).contains(REPLY) {
+        if std::time::Instant::now() > deadline {
+            evidence(&terminal, "reply-timeout");
+            panic!(
+                "--prompt reply never rendered; evidence {}",
+                artifact.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Give a duplicated startup submission time to reach the provider.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    evidence(&terminal, "reply");
+    {
+        let generations = generations.lock().unwrap();
+        assert_eq!(
+            generations.len(),
+            1,
+            "--prompt must be admitted exactly once; evidence {}",
+            artifact.display()
+        );
+        assert!(
+            generations[0].to_string().contains(PROMPT),
+            "{}",
+            generations[0]
+        );
+    }
+    assert_eq!(
+        screen(&terminal).matches(PROMPT).count(),
+        1,
+        "{}",
+        screen(&terminal)
+    );
+    assert_eq!(
+        screen(&terminal).matches(REPLY).count(),
+        1,
+        "{}",
+        screen(&terminal)
+    );
+
+    // A second client finds the native control registration for this session.
+    let instances = workspace.join(".codex/nanocodex/tui/instances");
+    let registration = loop {
+        let found = std::fs::read_dir(&instances).ok().and_then(|mut entries| {
+            let path = entries.next()?.ok()?.path();
+            serde_json::from_slice::<Value>(&std::fs::read(path).ok()?).ok()
+        });
+        if let Some(value) = found.filter(|value| value["active_session_id"].is_string()) {
+            break value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no native control registration in {}",
+            instances.display()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    std::fs::write(artifact.join("registration.json"), serde_json::to_vec_pretty(&json!({
+        "instance_id":registration["instance_id"],"active_session_id":registration["active_session_id"]})).unwrap()).unwrap();
+    let socket = tokio::net::UnixStream::connect(registration["socket_path"].as_str().unwrap())
+        .await
+        .unwrap();
+    let (read, mut write) = socket.into_split();
+    let mut lines = tokio::io::BufReader::new(read).lines();
+    let auth = json!({"protocol_version":1,"instance_id":registration["instance_id"],"auth_token":registration["auth_token"]});
+    write
+        .write_all(format!("{auth}\n").as_bytes())
+        .await
+        .unwrap();
+    let hello: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+    assert!(hello.get("snapshot").is_some(), "{hello}");
+    let request = json!({"id":"local-journey-state","method":"state.get","params":{}});
+    write
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .unwrap();
+    let state = loop {
+        let line = tokio::time::timeout(LIMIT, lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        if frame["id"] == "local-journey-state" {
+            break frame["result"].clone();
+        }
+    };
+    std::fs::write(
+        artifact.join("control-state.json"),
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        state["active_session_id"], registration["active_session_id"],
+        "{state}"
+    );
+    assert_eq!(state["state"]["execution"], "idle", "{state}");
+
+    // Managed-only commands explain the account requirement and stay local.
+    terminal.prompt("/share", "\r");
+    let deadline = std::time::Instant::now() + LIMIT;
+    while !screen(&terminal).contains("/share needs a Nanocodex account session") {
+        if std::time::Instant::now() > deadline {
+            evidence(&terminal, "share-timeout");
+            panic!(
+                "/share did not explain the account requirement; evidence {}",
+                artifact.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    evidence(&terminal, "share");
+    assert_eq!(
+        generations.lock().unwrap().len(),
+        1,
+        "/share must not become model input"
+    );
+    assert!(
+        matches!(managed.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "the accountless TUI contacted the managed service"
+    );
+
+    terminal.input("\x03");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    terminal.input("\x03");
+    let deadline = std::time::Instant::now() + LIMIT;
+    let status = loop {
+        if let Some(status) = terminal.child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            evidence(&terminal, "exit-timeout");
+            panic!(
+                "Ctrl+C Ctrl+C did not exit; evidence {}",
+                artifact.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    evidence(&terminal, "exit");
+    assert!(
+        status.success(),
+        "{status:?}; evidence {}",
+        artifact.display()
+    );
+    provider.abort();
+}
 fn prompt_text(input: &Value) -> String {
     match input {
         Value::String(text) => text.clone(),
