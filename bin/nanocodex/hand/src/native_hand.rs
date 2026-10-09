@@ -895,7 +895,14 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(20), async {
             let first = catalogs.recv().await.unwrap();
             let second = catalogs.recv().await.unwrap();
-            assert_eq!(first, second);
+            // Each outbound connection carries its own connection_id; the
+            // rest of the catalog stays pinned across the reconnect.
+            assert_ne!(first["connection_id"], second["connection_id"]);
+            let mut pinned = [first.clone(), second.clone()];
+            for catalog in &mut pinned {
+                catalog.as_object_mut().unwrap().remove("connection_id");
+            }
+            assert_eq!(pinned[0], pinned[1]);
             assert!(
                 second["tools"]
                     .as_array()
