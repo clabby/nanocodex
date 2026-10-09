@@ -385,6 +385,8 @@ pub(crate) enum RootEffect {
         reasoning_mode: ReasoningMode,
     },
     SetModel(Model),
+    /// FEATURE-HOOK: wp1/wp4 a command owned by a feature module.
+    Feature(crate::nanocodex2::tui::features::FeatureCommand),
     SetFastMode(bool),
     SetMaxSubagents(usize),
     SetTheme(ThemeMode),
@@ -3527,6 +3529,11 @@ impl RootNode {
             }
             SettingsCommand::OpenModel => self.open_model(),
             SettingsCommand::SetModel(model) => self.apply_model(model),
+            // FEATURE-HOOK: wp1/wp4
+            SettingsCommand::Feature(command) => ComponentUpdate {
+                effects: vec![RootEffect::Feature(command)],
+                render: RenderRequest::Immediate,
+            },
             SettingsCommand::Invalid(message) => {
                 self.notification = Some(Notification::plain(message, Color::Red));
                 ComponentUpdate::render(RenderRequest::Immediate)

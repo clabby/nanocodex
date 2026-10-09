@@ -569,6 +569,11 @@ struct DriverRuntime {
     /// The local backend for ncl; None for managed sessions.
     local: Option<local::LocalState>,
     feature_overlay: Option<Box<dyn features::FeatureOverlay>>,
+    // FEATURE-HOOK: wp1/wp4 feature-submitted turns and their receipts.
+    feature_instructions: HashMap<TurnId, String>,
+    feature_completions: HashMap<TurnId, Vec<tokio::sync::oneshot::Sender<bool>>>,
+    feature_turns: HashSet<TurnId>,
+    local_voice_status: Option<crate::nanocodex2::voice_state::Status>,
     agent: Option<Nanocodex>,
     startup_attach: bool,
     pending_resume: Option<(tokio::task::AbortHandle, PaneId)>,
@@ -942,6 +947,8 @@ impl DriverRuntime {
                         ..Default::default()
                     })
             })
+            // FEATURE-HOOK: wp4 local Realtime voice status.
+            .or_else(|| self.local_voice_status.clone())
     }
 
     fn take_ready_voice(&mut self) -> Option<PendingVoice> {
@@ -1548,6 +1555,7 @@ impl DriverRuntime {
     }
 
     fn local_record(&mut self, event: LocalEvent) -> Result<Arc<TranscriptRecord>, ManagedError> {
+        self.feature_turn_event(&event);
         let record =
             TranscriptRecord::from_local(self.sequence, unix_ms(), event).map_err(|error| {
                 ManagedError::Configuration(format!("TUI transcript error: {error}"))
@@ -1556,6 +1564,33 @@ impl DriverRuntime {
         let record = Arc::new(record);
         self.live_records.push(Arc::clone(&record));
         Ok(record)
+    }
+
+    /// FEATURE-HOOK: wp1/wp4 resolves feature receipts and busy state from turn records.
+    fn feature_turn_event(&mut self, event: &LocalEvent) {
+        let Some(local) = self.local.as_mut() else {
+            return;
+        };
+        match event {
+            LocalEvent::WorkerTurnAccepted { .. } => local.set_busy(true),
+            LocalEvent::WorkerTurnFinished { id, error } => {
+                for completion in self.feature_completions.remove(id).into_iter().flatten() {
+                    drop(completion.send(error.is_none()));
+                }
+                self.feature_instructions.remove(id);
+                self.feature_turns.remove(id);
+                local.set_busy(false);
+            }
+            LocalEvent::WorkerTurnsInterrupted { .. } => {
+                for (_, completions) in self.feature_completions.drain() {
+                    for completion in completions {
+                        drop(completion.send(false));
+                    }
+                }
+                local.set_busy(false);
+            }
+            _ => {}
+        }
     }
 
     fn start_submission(&mut self, pane: PaneId, id: TurnId, prompt: Submission) {
@@ -1577,6 +1612,23 @@ impl DriverRuntime {
             }
             return;
         };
+        // FEATURE-HOOK: wp1/wp4 private instructions and typed-prompt hooks.
+        let mut agent_prompt = prompt.agent_prompt();
+        let mut rejection = None;
+        if let Some(local) = &mut self.local {
+            if let Some(instruction) = self.feature_instructions.remove(&id) {
+                agent_prompt = Submission::text(instruction).agent_prompt();
+            } else if !self.feature_turns.contains(&id) {
+                let text = prompt.display_text().to_owned();
+                match local.with_features(|features, cx| features.user_prompt(&text, cx)) {
+                    Ok(completions) if !completions.is_empty() => {
+                        self.feature_completions.entry(id).or_default().extend(completions);
+                    }
+                    Ok(_) => {}
+                    Err(error) => rejection = Some(error),
+                }
+            }
+        }
         let managed_request_id = uuid::Uuid::now_v7().to_string();
         if let Some(local) = &mut self.local {
             // The event bridge tags the next local run with this request id.
@@ -1590,9 +1642,17 @@ impl DriverRuntime {
             .insert(id, managed_request_id.clone());
         self.admitting.insert(id);
         self.admissions.spawn(async move {
-            let turn = agent
-                .prompt(PromptRequest::new(prompt.agent_prompt()).request_id(managed_request_id))
-                .await;
+            let turn = match rejection {
+                Some(error) => Err(nanocodex::NanocodexError::backend(
+                    "loop",
+                    std::io::Error::other(error),
+                )),
+                None => {
+                    agent
+                        .prompt(PromptRequest::new(agent_prompt).request_id(managed_request_id))
+                        .await
+                }
+            };
             (pane, id, turn)
         });
     }
@@ -2373,6 +2433,9 @@ async fn run_inner(
     clone_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut tmux = tmux::Publisher::new();
     let mut tmux_tick = tokio::time::interval(Duration::from_secs(2));
+    // FEATURE-HOOK: wp1 idle tick (Claude scheduler) while local main is idle.
+    let mut feature_tick = tokio::time::interval(Duration::from_secs(1));
+    feature_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tmux_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut stopping = false;
     #[cfg(unix)]
@@ -2612,6 +2675,19 @@ async fn run_inner(
                 }
             } => {
                 stopping |= apply_feature_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+            }
+            _ = feature_tick.tick(), if runtime.local.is_some() => {
+                let idle = runtime.controls.is_empty()
+                    && runtime.admitting.is_empty()
+                    && runtime.pending_submission.is_none()
+                    && runtime.active_shells == 0
+                    && runtime.feature_overlay.is_none()
+                    && app
+                        .root(PaneId::Main)
+                        .is_some_and(|root| root.composer().draft().trim().is_empty());
+                if idle && let Some(local) = &mut runtime.local {
+                    local.with_features(|features, cx| features.idle_tick(cx));
+                }
             }
             _ = tmux_tick.tick(), if tmux.is_some() => {
                 if let Some(publisher) = &mut tmux && !(runtime.startup_attach && runtime.agent_id.is_empty()) {
@@ -4212,10 +4288,44 @@ async fn apply_feature_update(
         FeatureUpdate::ReplaceAgent(_)
         | FeatureUpdate::OpenPane(_)
         | FeatureUpdate::ClosePane(_)
-        | FeatureUpdate::Capabilities(_)
-        | FeatureUpdate::SubmitPrompt(_)
-        | FeatureUpdate::Relaunch(_)
-        | FeatureUpdate::VoiceStatus(_) => app.update(AppEvent::NotifyError {
+        FeatureUpdate::SubmitPrompt(prompt) => {
+            let pane = main(prompt.pane);
+            let submission = Submission::text(prompt.display);
+            let id = TurnId::new(runtime.next_turn);
+            runtime.next_turn = runtime.next_turn.saturating_add(1);
+            runtime.feature_turns.insert(id);
+            if let Some(instruction) = prompt.instruction {
+                runtime.feature_instructions.insert(id, instruction);
+            }
+            if let Some(completion) = prompt.completion {
+                runtime.feature_completions.entry(id).or_default().push(completion);
+            }
+            let record = runtime.record_submission(id, &submission)?;
+            let update = app.update(AppEvent::Transcript { pane, record });
+            if runtime.active_shells == 0 {
+                runtime.start_submission(pane, id, submission);
+            } else {
+                runtime.pending_submission = Some((pane, id, submission));
+            }
+            update
+        }
+        FeatureUpdate::Relaunch(launch) => {
+            let Some(local) = &mut runtime.local else {
+                return Ok(false);
+            };
+            local.launch = *launch;
+            runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Default);
+            scheduler.request_immediate(Instant::now());
+            return Ok(false);
+        }
+        FeatureUpdate::VoiceStatus(status) => {
+            runtime.local_voice_status = status;
+            app.update(AppEvent::VoiceStatus(runtime.voice_status()))
+        }
+        FeatureUpdate::ReplaceAgent(_)
+        | FeatureUpdate::OpenPane(_)
+        | FeatureUpdate::ClosePane(_)
+        | FeatureUpdate::Capabilities(_) => app.update(AppEvent::NotifyError {
             pane: PaneId::Main,
             error: "This feature action is not wired into the unified TUI yet".to_owned(),
         }),
@@ -4403,6 +4513,36 @@ async fn apply_update(
                     }
                     RootEffect::Screen | RootEffect::Zoom | RootEffect::Btw(_) | RootEffect::CloseBtw => {
                         unreachable!("workspace commands are handled by AppNode")
+                    }
+                    RootEffect::Feature(command) => {
+                        // FEATURE-HOOK: wp1/wp4 feature command dispatch.
+                        let handled = runtime.local.as_mut().is_some_and(|local| {
+                            local.with_features(|features, cx| features.command(pane, &command, cx))
+                        });
+                        if !handled {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "This command needs a local agent (run ncl)".into() }), &mut effects, scheduler);
+                        }
+                    }
+                    RootEffect::Voice(command) if runtime.local.is_some() => {
+                        // FEATURE-HOOK: wp4 local Realtime voice.
+                        use crate::nanocodex2::voice::{Command, Provider};
+                        let argument = match command {
+                            Command::Toggle => Some(String::new()),
+                            Command::Start(None) => Some("on".to_owned()),
+                            Command::Start(Some(name)) => Some(name.to_owned()),
+                            Command::Stop => Some("off".to_owned()),
+                            Command::ToggleMute => Some("mute".to_owned()),
+                            Command::List | Command::ListProvider(Provider::Chatgpt) => Some("list".to_owned()),
+                            _ => None,
+                        };
+                        let handled = argument.is_some_and(|argument| {
+                            runtime.local.as_mut().is_some_and(|local| local.with_features(|features, cx| {
+                                features.command(pane, &features::FeatureCommand::RealtimeVoice(argument), cx)
+                            }))
+                        });
+                        if !handled {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "This /voice command needs a Nanocodex account session (run nanocodex)".into() }), &mut effects, scheduler);
+                        }
                     }
                     RootEffect::Voice(command) => {
                         if matches!(runtime.retry_target, Some(RetryTarget::Default)) {
@@ -5289,6 +5429,16 @@ async fn apply_update(
                     );
                     }
                     RootEffect::AutoRoute => runtime.enable_autoroute(pane),
+                    RootEffect::SetModel(model) if runtime.local.is_some() => {
+                        // FEATURE-HOOK: wp1 local model/harness switch before the first prompt.
+                        let command = features::FeatureCommand::SwitchModel(model.to_string());
+                        let handled = runtime.local.as_mut().is_some_and(|local| {
+                            local.with_features(|features, cx| features.command(pane, &command, cx))
+                        });
+                        if !handled {
+                            absorb(app.update(AppEvent::NotifyError { pane, error: "Model switching is unavailable for this local session".into() }), &mut effects, scheduler);
+                        }
+                    }
                     RootEffect::SetModel(model) => {
                         let root = app.root(pane).expect("model-selection pane must exist");
                         // Recheck availability at the public account boundary. Normalize
@@ -6077,6 +6227,10 @@ mod tests {
             client: ManagedClient::new("http://127.0.0.1:9", api_key).unwrap(),
             local: None,
             feature_overlay: None,
+            feature_instructions: HashMap::new(),
+            feature_completions: HashMap::new(),
+            feature_turns: HashSet::new(),
+            local_voice_status: None,
             agent: None,
             startup_attach: false,
             pending_resume: None,
