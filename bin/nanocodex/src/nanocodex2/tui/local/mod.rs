@@ -178,10 +178,8 @@ fn local_settings(backend: &LocalBackend) -> AgentSettings {
     let defaults = AgentSettings::default();
     let model = match backend.model {
         HarnessModel::Codex(model) => ManagedModel::Oai(model),
-        HarnessModel::Claude(model) => serde_json::to_value(model)
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or(defaults.model),
+        // The picker shows the hosted default until WP1 maps Claude models.
+        HarnessModel::Claude(_) => defaults.model,
     };
     AgentSettings {
         model,

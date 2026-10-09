@@ -2188,6 +2188,7 @@ async fn run_inner(
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
     let (btw_events, mut btw_updates) = mpsc::unbounded_channel();
+    let is_local = local_launch.is_some();
     let mut runtime = DriverRuntime {
         control_bridge: None,
         btw: None,
@@ -2308,7 +2309,7 @@ async fn run_inner(
     scheduler.presented(Instant::now());
     drop(first_frame);
     let mut catalog_setup = JoinSet::new();
-    if local_launch.is_none() {
+    if !is_local {
         let catalog_client = client.clone();
         catalog_setup.spawn(async move { catalog_client.models().await });
     }
