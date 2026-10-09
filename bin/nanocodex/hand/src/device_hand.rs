@@ -448,7 +448,7 @@ async fn connect(directory: &Path, cancel: &CancellationToken) -> Result<(), Man
     let socket = socket_path(directory)?;
     #[cfg(target_os = "macos")]
     if transport::connect(&socket).await.is_err() {
-        ensure_service().await?;
+        nanocodex_bin_shared::hand_client::ensure_service().await?;
     }
     // A successful service-manager start can precede account lookup and IPC bind.
     let mut stream = tokio::time::timeout(Duration::from_secs(15), async {
