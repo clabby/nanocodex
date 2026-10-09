@@ -801,7 +801,9 @@ mod tests {
                     ))
                     .await
                     .unwrap();
-            } else {
+            } else if frame["type"] != "diagnostic" {
+                // The catalog enables per-call phase diagnostics; they precede
+                // each result and are not protocol responses.
                 return frame;
             }
         }
