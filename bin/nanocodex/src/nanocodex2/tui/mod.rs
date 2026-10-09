@@ -2514,15 +2514,24 @@ async fn run_inner(
         .local
         .as_mut()
         .and_then(|local| local.features.take_updates());
-    let initial_prompt = runtime
-        .local
-        .as_mut()
-        .and_then(|local| local.launch.initial_prompt.take());
-    if let Some(text) = initial_prompt {
+    let initial_prompt = runtime.local.as_mut().and_then(|local| {
+        let instruction = local.launch.initial_instruction.take();
+        local
+            .launch
+            .initial_prompt
+            .take()
+            .map(|text| (text, instruction))
+    });
+    if let Some((text, instruction)) = initial_prompt {
         // Shown immediately; held as the pending submission until the agent connects.
         let prompt = Submission::text(text);
         let id = TurnId::new(runtime.next_turn);
         runtime.next_turn = runtime.next_turn.saturating_add(1);
+        if let Some(instruction) = instruction {
+            // A labelled launch prompt is sent like a feature prompt.
+            runtime.feature_turns.insert(id);
+            runtime.feature_instructions.insert(id, instruction);
+        }
         let record = runtime.record_submission(id, &prompt)?;
         request_render(
             app.update(AppEvent::Transcript {
