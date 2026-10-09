@@ -307,10 +307,16 @@ function summarize(values){const a=values.toSorted((a,b)=>a-b);return a.length?{
 let server;
 try{
  for(let i=0;i<processCount;i++){server=await boot();try{await sample(server,'new_process_first_session',i);}finally{await server.mf.dispose();server=undefined;}}
- server=await boot();await sample(server,'shared_process_warmup',0);
+ server=await boot();
+ if(opts['receipt-sdk']) {
+  const { verifyLargeRunReceipt } = await import('../test/support/large-run-receipt.mjs');
+  await verifyLargeRunReceipt({server,output,settings,providerCalls,sdk:opts['receipt-sdk']});
+ } else {
+ await sample(server,'shared_process_warmup',0);
  for(let i=0;i<count;i++){const fresh=await sample(server,'fresh_session',i);await sample(server,'warm_session',i,fresh);}
  if(mode==='stream')await verifyStreamContract(server);
  const summary={...config,completed_at:new Date().toISOString(),groups:Object.fromEntries(['new_process_first_session','fresh_session','warm_session'].map(regime=>[regime,summarize(rows.filter(r=>r.regime===regime).map(r=>r.ttft_ms))]))};await writeFile(join(output,'summary.json'),JSON.stringify(summary,null,2));console.log(JSON.stringify(summary.groups,null,2));
+ }
 }catch(error){await writeFile(join(output,'failure.txt'),error.stack??String(error));throw error;}finally{if(server)await server.mf.dispose();await writeFile(join(output,'runtime.json'),JSON.stringify(runtime,null,2));await writeFile(join(output,'provider-calls.json'),JSON.stringify(providerCalls,null,2));}
 
 // Opt-in creation policy exercised through the real public Worker/DO/SSE path.
