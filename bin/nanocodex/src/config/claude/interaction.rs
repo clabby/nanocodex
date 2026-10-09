@@ -21,7 +21,6 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) type InteractionReceiver = mpsc::Receiver<PendingInteraction>;
 
 /// A pending Claude host request shown to the terminal owner.
-
 pub(crate) struct PendingInteraction {
     pub(crate) id: String,
     pub(crate) question: Option<UserQuestion>,

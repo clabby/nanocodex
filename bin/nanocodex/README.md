@@ -5,7 +5,7 @@ invoked as. `nanocodex` and `nc` are the managed client documented here. The
 Hand daemon is the separate `nanocodex-hand` binary (installed as `nanocodex2`);
 `nanocodex hand` and the daemon entrypoints run it, and it forwards any other
 command to the CLI. `ncl` (or `nanocodex --local ...`) is the local, non-durable
-agent: `ncl` opens its TUI, `ncl run` is the headless JSONL run (exit code 75
+agent: `ncl` opens the same terminal UI on a local agent, `ncl run` is the headless JSONL run (exit code 75
 means the run is retryable), and `ncl auth` manages harness provider
 subscriptions. Commands that exist in only one tree, such as `update`,
 `install`, `setup`, `computer`, `cookies`, and `eval`, work under every name.
