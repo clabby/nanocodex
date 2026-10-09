@@ -43,6 +43,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   const traceTool = extras.traceTool;
   const activeExecutions = new Set();
   const codeObservations = new Map();
+  // Relays of cells a completed turn left running, keyed like observations.
+  const codeRelays = new Map();
   const cells = new Map();
   const turns = new Map();
   const cellGeneration = globalThis.crypto.randomUUID();
@@ -711,7 +713,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       const cell = {
         id: `${cellGeneration}:${nextCellId++}`, sessionId, parentCallId, controller: new AbortController(),
         startedAt: performance.now(), content: [], updates: [], completedCalls: [], notifications: [], turn: turns.get(sessionId) ?? 0,
-        budget: options.max_output_tokens, result: undefined, observing: false,
+        budget: options.max_output_tokens, result: undefined, observing: false, relay: undefined,
       };
       cells.set(cell.id, cell);
       if (extras.effectJournal?.observations) {
@@ -735,6 +737,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         // until the nested call finishes. Original call IDs survive every wait.
         const encoded = JSON.stringify(update);
         if (cell.observation) cell.observation.push(encoded);
+        else if (cell.relay) cell.relay.observation.push(encoded);
         else cell.updates.push(encoded);
         if (update.type === "nested_call_completed") cell.completedCalls.push(update.call);
       }, cell, turnId, localDefinitions, executeLocalTool).then(async (result) => {
@@ -757,11 +760,13 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           }), false);
         }
         cell.result = { success: completed.success };
+        closeRelay(cell);
         cell.wake?.();
       }).catch((error) => {
         if (error?.code === "host_interrupted") cell.interruption = error;
         cell.content.push({ type: "input_text", text: errorMessage(error) });
         cell.result = { success: false };
+        closeRelay(cell);
         cell.wake?.();
       });
       return observeCell(cell, observation, options.yield_time_ms ?? 10_000, cell.budget);
@@ -844,6 +849,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
   async function observeCell(cell, observation, yieldTime, budget) {
     const startedAt = performance.now();
+    // A relay drains what it already took; this observer receives the rest.
+    closeRelay(cell);
     cell.observing = true;
     cell.observation = observation;
     for (const update of cell.updates.splice(0)) observation.push(update);
@@ -900,13 +907,49 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
   async function nextCodeUpdate(sessionId, parentCallId) {
     const key = codeObservationKey(sessionId, parentCallId);
-    const observation = codeObservations.get(key);
+    const observations = codeObservations.has(key) ? codeObservations : codeRelays;
+    const observation = observations.get(key);
     if (!observation) throw new Error(`unknown Code Mode observation: ${parentCallId}`);
     const update = await observation.next();
-    if (update === null && codeObservations.get(key) === observation) {
-      codeObservations.delete(key);
+    if (update === null && observations.get(key) === observation) {
+      observations.delete(key);
     }
     return update;
+  }
+
+  // At normal turn completion, give every unobserved cell of the session a
+  // relay so nested work the model never waited for still reports its start
+  // and terminal result. Buffered updates move to the relay in order. The
+  // relay ends after the cell settles (including aborted nested calls) or
+  // when a later wait attaches, so each update is delivered exactly once.
+  function detachTurn(sessionId) {
+    const relays = [];
+    for (const cell of cells.values()) {
+      if (cell.sessionId !== sessionId || cell.observing || cell.relay) continue;
+      if (cell.result && cell.updates.length === 0) continue;
+      const id = `relay:${cell.id}`;
+      const observation = createCodeObservation(sessionId, cell.turn);
+      cell.relay = { id, observation };
+      codeRelays.set(codeObservationKey(sessionId, id), observation);
+      for (const update of cell.updates.splice(0)) observation.push(update);
+      if (cell.result) closeRelay(cell);
+      relays.push({ relay_id: id, origin_call_id: cell.parentCallId });
+    }
+    return JSON.stringify(relays);
+  }
+
+  function closeRelay(cell) {
+    if (!cell.relay) return;
+    cell.relay.observation.close();
+    cell.relay = undefined;
+  }
+
+  function closeCodeRelays(sessionId) {
+    for (const [key, observation] of codeRelays) {
+      if (sessionId !== undefined && observation.sessionId !== sessionId) continue;
+      codeRelays.delete(key);
+      observation.close();
+    }
   }
 
   // Preempt only a foreground observation, never the evaluator or nested
@@ -971,6 +1014,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     subagentBindingsBySession.delete(sessionId);
     router.releaseSession(sessionId);
     closeCodeObservations(sessionId);
+    closeCodeRelays(sessionId);
   }
 
   function reset() {
@@ -984,6 +1028,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     stores.clear();
     subagentBindingsBySession.clear();
     closeCodeObservations();
+    closeCodeRelays();
     return ownsRouter ? router.reset() : undefined;
   }
 
@@ -1043,6 +1088,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       }));
     },
     nextCodeUpdate,
+    detachTurn,
     preempt,
     preemptTurn,
     beginTurn(sessionId) { turns.set(sessionId, (turns.get(sessionId) ?? 0) + 1); },

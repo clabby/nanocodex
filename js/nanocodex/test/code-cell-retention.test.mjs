@@ -123,3 +123,60 @@ test("consumed final receipt is not misreported as runtime replacement or replay
     assert.equal(cell.calls(), 1);
   } finally { cell.release(); await cell.runtime.reset(); }
 });
+
+const drain = async (runtime, callId) => {
+  const updates = [];
+  for (let update; (update = await runtime.nextCodeUpdate("owner", callId)) !== null;) updates.push(JSON.parse(update));
+  return updates;
+};
+
+// A model can answer without waiting on a yielded cell. The host relay keeps
+// that cell's nested work reporting after the turn, so its call terminates.
+test("turn completion relays an unawaited cell's nested completion exactly once", async () => {
+  const cell = await yielded();
+  try {
+    const relays = JSON.parse(cell.runtime.detachTurn("owner"));
+    assert.deepEqual(relays, [{ relay_id: `relay:${id(cell.first)}`, origin_call_id: "origin" }]);
+    assert.equal(cell.runtime.detachTurn("owner"), "[]", "a relayed cell is never detached twice");
+    const relayed = drain(cell.runtime, relays[0].relay_id);
+    cell.release();
+    const updates = await relayed;
+    assert.deepEqual(updates.map(update => update.type), ["nested_call_completed"]);
+    assert.equal(updates[0].call.call_id, "origin/code-1");
+    // A later wait still returns the final output but never re-delivers the update.
+    const waited = cell.runtime.waitCodeObserved(JSON.stringify({ cell_id: id(cell.first) }), "owner", "wait");
+    const later = drain(cell.runtime, "wait");
+    const final = await parse(waited);
+    assert.equal(final.success, true);
+    assert.match(text(final), /finished/);
+    assert.deepEqual(await later, []);
+    assert.equal(cell.calls(), 1);
+  } finally { cell.release(); await cell.runtime.reset(); }
+});
+
+test("a wait that attaches to a relayed cell ends the relay and takes later updates", async () => {
+  const cell = await yielded();
+  try {
+    const [relay] = JSON.parse(cell.runtime.detachTurn("owner"));
+    const relayed = drain(cell.runtime, relay.relay_id);
+    const waited = cell.runtime.waitCodeObserved(JSON.stringify({ cell_id: id(cell.first), yield_time_ms: 60_000 }), "owner", "wait");
+    const later = drain(cell.runtime, "wait");
+    assert.deepEqual(await relayed, [], "the relay ends when the wait attaches");
+    cell.release();
+    const final = await parse(waited);
+    assert.equal(final.success, true);
+    assert.deepEqual((await later).map(update => update.type), ["nested_call_completed"]);
+  } finally { cell.release(); await cell.runtime.reset(); }
+});
+
+test("an aborted relayed cell still reports its nested call's terminal result", async () => {
+  const cell = await yielded();
+  try {
+    const [relay] = JSON.parse(cell.runtime.detachTurn("owner"));
+    const relayed = drain(cell.runtime, relay.relay_id);
+    cell.runtime.cancel("owner");
+    const updates = await relayed;
+    assert.deepEqual(updates.map(update => update.type), ["nested_call_completed"]);
+    assert.equal(updates[0].call.call_id, "origin/code-1");
+  } finally { cell.release(); await cell.runtime.reset(); }
+});
