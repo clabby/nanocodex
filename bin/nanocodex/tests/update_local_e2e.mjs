@@ -158,20 +158,20 @@ try {
     assert.equal(readFileSync(journal, 'utf8'), 'interrupted development fixture');
     rmSync(journal);
   }
-  const revision = oneRevision(run(cli, ['--version']).stdout, 'CLI');
-  assert.ok(revision, 'CLI must expose full source revision');
-  // A Hand reports the Hand Identity of its sources (no commit); the CLI
-  // reports the identity of the Hand built with it. Older Hands report a commit.
+  const cliVersion = run(cli, ['--version']).stdout;
   const handVersion = run(hand, ['--version']).stdout;
-  const identityOf = stdout => stdout.match(/^Hand Identity: ([0-9a-f]{64})$/m)?.[1];
-  if (identityOf(handVersion)) {
-    assert.equal(identityOf(run(cli, ['--version']).stdout), identityOf(handVersion),
-      'supply a real CLI + Hand built from the same checkout');
-  } else {
-    assert.equal(oneRevision(handVersion, 'Hand'), revision,
-      'supply a real CLI + Hand built from the same checkout');
-  }
-  trace.push(`real candidate pair revision: ${revision}; platform: ${process.platform}; fixture: ${fixture}`);
+  const revision = oneRevision(cliVersion, 'CLI');
+  assert.ok(revision, 'CLI must expose full source revision');
+  const identity = version => {
+    const matches = [...version.matchAll(/^Hand Identity: ([0-9a-f]{64})$/gm)];
+    assert.equal(matches.length, 1, 'candidate must expose exactly one Hand content identity');
+    return matches[0][1];
+  };
+  assert.equal(identity(handVersion), identity(cliVersion),
+    'supply a real CLI + Hand with matching Hand source inputs');
+  assert.doesNotMatch(handVersion, /^Commit SHA:|^Build Timestamp:/m,
+    'Hand version must remain independent of CLI-only revisions');
+  trace.push(`real candidate pair revision: ${revision}; Hand identity: ${identity(handVersion)}; platform: ${process.platform}; fixture: ${fixture}`);
 
   if (process.platform === 'darwin') {
     const escape = x => x.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');

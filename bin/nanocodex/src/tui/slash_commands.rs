@@ -65,13 +65,6 @@ const COMMANDS: &[SlashCommand] = &[
         requires_btw: false,
     },
     SlashCommand {
-        name: "/trace",
-        usage: "/trace",
-        description: "Open this session's traces",
-        accepts_arguments: false,
-        requires_btw: false,
-    },
-    SlashCommand {
         name: "/benchmark",
         usage: "/benchmark [profile]",
         description: "Run the benchmark workflow",
