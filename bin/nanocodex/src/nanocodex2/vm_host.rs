@@ -2704,8 +2704,7 @@ mod supported {
     }
 
     fn reported_allocations(host: &VmHost) -> Result<Vec<VmHostAllocationState>, ManagedError> {
-        Ok(host
-            .reconcile()
+        host.reconcile()
             .into_iter()
             .map(|allocation| {
                 VmHostAllocationState::ready(
@@ -2714,7 +2713,7 @@ mod supported {
                     allocation.machine_id,
                 )
             })
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     async fn serve_connection(
