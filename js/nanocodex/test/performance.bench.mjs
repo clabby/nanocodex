@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
@@ -84,7 +85,7 @@ test("a precompiled browser module instantiates once across isolated agents", as
   };
   try {
     const coldStarted = performance.now();
-    const cold = await HostAgent.create({
+    const cold = await HostAgent.create({ codeEvaluator,
       transport: browserTransport,
       module,
     });
@@ -93,7 +94,7 @@ test("a precompiled browser module instantiates once across isolated agents", as
     const coldLinearMemoryBytes = engine.memory.buffer.byteLength;
     cold.dispose();
     for (let index = 0; index < 16; index += 1) {
-      const agent = await HostAgent.create({
+      const agent = await HostAgent.create({ codeEvaluator,
         transport: browserTransport,
         module,
       });
@@ -103,7 +104,7 @@ test("a precompiled browser module instantiates once across isolated agents", as
     const samples = [];
     for (let index = 0; index < 64; index += 1) {
       const started = performance.now();
-      const agent = await HostAgent.create({
+      const agent = await HostAgent.create({ codeEvaluator,
         transport: browserTransport,
         module,
       });
@@ -152,7 +153,7 @@ test("long durable histories preserve cold replay and cancellation results", {
     durability: store, durabilityId: "long-memory-budget", terminalReceiptRetention: 16,
     thinking: "low",
   };
-  const agent = await HostAgent.create(options);
+  const agent = await HostAgent.create({ ...options, codeEvaluator });
   context.after(() => agent.session.shutdown());
   const scenario = (async () => {
     const socket = await server.nextConnection();
@@ -176,7 +177,7 @@ test("long durable histories preserve cold replay and cancellation results", {
   await scenario;
   const liveWasmBytes = engine.memory.buffer.byteLength;
   await agent.session.shutdown();
-  const reopened = await HostAgent.create(options);
+  const reopened = await HostAgent.create({ ...options, codeEvaluator });
   const reopenedWasmBytes = engine.memory.buffer.byteLength;
   context.after(() => reopened.session.shutdown());
   const replay = reopened.turn.prompt({ id: "turn-95", input });
@@ -194,7 +195,7 @@ test("long durable histories preserve cold replay and cancellation results", {
   assert.ok(payloadBytes < 32 * 1024, `long thread persisted ${payloadBytes} bytes`);
   await reopened.session.shutdown();
 
-  const cancellationAgent = await HostAgent.create(options);
+  const cancellationAgent = await HostAgent.create({ ...options, codeEvaluator });
   context.after(() => cancellationAgent.session.shutdown());
   for (let index = 0; index < 432; index += 1) {
     const cancelled = cancellationAgent.turn.prompt({

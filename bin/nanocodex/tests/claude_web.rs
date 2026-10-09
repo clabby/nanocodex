@@ -82,6 +82,8 @@ async fn real_https_pages_redirect_policy_and_auxiliary_messages() {
             "subjectAltName=DNS:pages.fixture.test",
             "-addext",
             "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "extendedKeyUsage=serverAuth",
             "-keyout",
         ])
         .arg(&key)
@@ -149,6 +151,7 @@ async fn real_https_pages_redirect_policy_and_auxiliary_messages() {
         "synthetic",
     );
     let (agent, _) = Nanocodex::builder(Claude::new(client, "fixture"))
+        .max_tokens(1024)
         .web_fetch_with_source(source, false)
         .build()
         .unwrap();
@@ -295,9 +298,13 @@ async fn shipped_cli_native_search_fetch_opt_in_and_default_denial() {
                 match n {
                     0=>json!({"type":"tool_use","id":"search","name":"WebSearch","input":{"query":"synthetic public source","allowed_domains":["example.org"]}}),
                     1=>json!({"type":"tool_use","id":"fetch","name":"WebFetch","input":{"url":"https://localhost.localdomain/private","prompt":"read"}}),
+                    3=>json!({"type":"tool_use","id":"disabled-catalog","name":"exec","input":{"code":"if (ALL_TOOLS.some(tool => tool.name === 'WebSearch' || tool.name === 'WebFetch')) throw Error('disabled web capability available'); text('disabled-catalog-verified');"}}),
                     _=>json!({"type":"text","text":"native-web-cli-complete"}),
                 }
             };
+            let block = if block["type"] == "tool_use" && block["name"] != "exec" {
+                json!({"type":"tool_use", "id":block["id"], "name":"exec", "input":{"code":format!("try {{ text(await tools.{}({})); }} catch (error) {{ text({{error: error.message || String(error)}}); }}", block["name"].as_str().unwrap(), block["input"])}})
+            } else { block };
             ([("content-type","text/event-stream")],sse(block))
         }
     }));
@@ -372,19 +379,21 @@ async fn shipped_cli_native_search_fetch_opt_in_and_default_denial() {
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    assert!(names.contains(&"WebSearch") && names.contains(&"WebFetch"));
-    assert!(!names.contains(&"web_search"));
+    assert_eq!(names, vec!["exec", "wait"]);
     assert_eq!(
         captured[1]["tools"][0]["allowed_domains"],
         json!(["example.org"])
     );
     assert!(
         last_result(&captured[2])["content"]
-            .as_str()
-            .unwrap()
+            .to_string()
             .contains("Source: https://example.org/source")
     );
-    assert_eq!(last_result(&captured[3])["is_error"], true);
+    let denial = last_result(&captured[3])["content"].to_string();
+    assert!(
+        denial.contains("error") && denial.contains("approved WebFetch source failed"),
+        "{denial}"
+    );
     let output = tokio::time::timeout(Duration::from_secs(40), base("false").output())
         .await
         .unwrap()
@@ -398,10 +407,13 @@ async fn shipped_cli_native_search_fetch_opt_in_and_default_denial() {
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
+    assert_eq!(names, vec!["exec", "wait"]);
+    let result = last_result(disabled);
+    assert_ne!(result["is_error"], true);
     assert!(
-        !names.contains(&"WebSearch")
-            && !names.contains(&"WebFetch")
-            && !names.contains(&"web_search")
+        result["content"]
+            .to_string()
+            .contains("disabled-catalog-verified")
     );
     std::fs::write(
         artifact.join("disabled-request.json"),

@@ -3,6 +3,7 @@
 Only the remote Messages provider is synthetic. All tools and persistence run.
 """
 import argparse, fcntl, hashlib, importlib.util, json, os, pty, re, select, signal, struct, subprocess, termios, threading, time
+from claude_code_fixture import wrap_tool, normalize_request
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
@@ -18,7 +19,7 @@ def main():
     args = parser.parse_args(); binary=args.binary.resolve(); artifact=args.output.resolve(); artifact.mkdir(parents=True)
     workspace=artifact/'workspace'; workspace.mkdir(); (workspace/'read.txt').write_text('permission-read-marker')
     home=artifact/'home'; home.mkdir(); codex_home=home/'codex'; codex_home.mkdir()
-    rules=artifact/'permissions.json'; rules.write_text(json.dumps({'permissions':{'allow':['Write','Agent','SubmitResult','Bash(echo *)','Edit(./denied.txt)'],'ask':['Edit(./ask*.txt)'],'deny':['Edit(./denied.txt)','Bash(printf blocked *)'],'defaultMode':'default'}}))
+    rules=artifact/'permissions.json'; rules.write_text(json.dumps({'permissions':{'allow':['Write','spawn_agent','submit_result','Bash(echo *)','Edit(./denied.txt)'],'ask':['Edit(./ask*.txt)'],'deny':['Edit(./denied.txt)','Bash(printf blocked *)'],'defaultMode':'default'}}))
     # Trusted hook sees the real input and deliberately attempts to change an
     # otherwise allowed Write to the explicitly denied path.
     hook=artifact/'rewrite.py'; hook.write_text('''import json,sys
@@ -37,7 +38,7 @@ else: print('{}')
     class Provider(BaseHTTPRequestHandler):
         def log_message(self,*_): pass
         def do_POST(self):
-            request=json.loads(self.rfile.read(int(self.headers['content-length']))); requests.append(request)
+            request=normalize_request(json.loads(self.rfile.read(int(self.headers['content-length']))), artifact); requests.append(request)
             route=next((marker for marker in phase['children'] if marker in json.dumps(request['messages'][0])), 'root')
             stage=phase['counts'].get(route,0); phase['counts'][route]=stage+1
             (artifact/'provider.json').write_text(json.dumps(requests,indent=2))
@@ -52,7 +53,7 @@ else: print('{}')
                 block={'type':'text','text':phase['name']+'-permissions-complete'} if stage==len(current) else {'type':'tool_use','id':f"{phase['name']}_{route}_{stage}",'name':current[stage][0],'input':current[stage][1]}
             except Exception as e:
                 errors.append(str(e)); block={'type':'text','text':'fixture-failed'}
-            response=sse(block,request['model']); self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Content-Length',str(len(response))); self.end_headers(); self.wfile.write(response)
+            response=sse(wrap_tool(block),request['model']); self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Content-Length',str(len(response))); self.end_headers(); self.wfile.write(response)
     server=ThreadingHTTPServer(('127.0.0.1',0),Provider); threading.Thread(target=server.serve_forever,daemon=True).start()
     common=['--claude','--model','claude-sonnet-5-5','--claude-api-key','synthetic-key','--claude-messages-url',f'http://127.0.0.1:{server.server_port}/v1/messages','--cwd',str(workspace),'--browser=none','--mcp-defaults','false','--mcp-codex-config','false','--web-search','false','--image-generation','false','--subagents','false','--memory','false','--claude-hooks',str(hooks)]
     def set_phase(name, steps, children=None): phase.update(name=name,start=len(requests),steps=steps,children=children or {},counts={})
@@ -99,7 +100,8 @@ else: print('{}')
         require(visible('tui','Exact input'),'exact input missing'); os.write(fd,b'\r'); pending(3,drain)
         os.write(fd,b'deny\r'); wait(lambda:len(requests)==4 and visible('tui','ask-approve.txt'),drain,'next approval absent'); pending(4,drain)
         os.write(fd,b'approve\r'); wait(lambda:len(requests)==5 and visible('tui','ask-cancel.txt'),drain,'cancel approval absent'); pending(5,drain)
-        os.write(fd,b'/cancel\r'); wait(lambda:visible('tui','tui-permissions-complete'),drain,'TUI final missing'); os.write(fd,b'\x03'); p.wait(timeout=10); drain(); os.close(fd)
+        os.write(fd,b'/cancel\r'); wait(lambda:visible('tui','tui-permissions-complete'),drain,'TUI final missing'); os.write(fd,b'\x03')
+        wait(lambda:p.poll() is not None,drain,'TUI exit stuck',timeout=10); drain(); os.close(fd)
         require((workspace/'ask-approve.txt').read_text()=='approved-ask-approve.txt','approved call not dispatched')
         require((workspace/'allowed.txt').exists(),'allow rule failed')
         for name in ['denied.txt','ask-deny.txt','ask-cancel.txt','rewrite.txt']: require(not(workspace/name).exists(),f'denied effect exists {name}')
@@ -159,24 +161,33 @@ else: print('{}')
         require(r.returncode!=0 or b'save-failure-permissions-complete' in r.stdout,'save failure neither rejected startup nor returned denied receipts')
         for name in ['save-failed-first.txt','save-failed-second.txt']: require(not(workspace/name).exists(),'failed policy persistence permitted mutation '+name)
         checks.append('failed policy persistence remains fail closed on startup or repeated dispatch')
-        childrules=artifact/'child-rules.json'; childrules.write_text(json.dumps({'permissions':{'allow':['Agent','SubmitResult'],'deny':['Edit(./child-denied.txt)']}}))
+        childrules=artifact/'child-rules.json'; childrules.write_text(json.dumps({'permissions':{'allow':['spawn_agent','submit_result'],'deny':['Edit(./child-denied.txt)']}}))
         def child_agent(prompt, harness=None):
-            args={'prompt':prompt,'description':'Test inherited policy','run_in_background':False}
+            args={'task':prompt,'role':'Test inherited policy','output_contract':{'kind':'string'}}
             if harness is not None: args['harness']=harness
-            return ('Agent',args,harness == 'codex','restricted Claude permission policy' if harness == 'codex' else None)
-        def child_steps(): return [('Write',{'file_path':'child-denied.txt','content':'must never run'},True,'permission denied by rule'),('SubmitResult',{'output':'child permission preserved'},False,None)]
-        run('children',['--claude-permissions',str(childrules)],[child_agent('PERMISSION_CHILD_INITIAL'),child_agent('blocked codex','codex')],children={'PERMISSION_CHILD_INITIAL':child_steps()})
+            return ('spawn_agent',args,harness == 'codex','restricted Claude permission policy' if harness == 'codex' else None)
+        def child_steps(): return [('Write',{'file_path':'child-denied.txt','content':'must never run'},True,'permission denied by rule'),('submit_result',{'output':'child permission preserved'},False,None)]
+        run('children',['--claude-permissions',str(childrules)],[child_agent('PERMISSION_CHILD_INITIAL'),('wait_agent',{'agent_ids':[1],'timeout_ms':20000},False,'child permission preserved'),child_agent('blocked codex','codex')],children={'PERMISSION_CHILD_INITIAL':child_steps()})
         # Reopen the original restricted session with no flags, then delegate.
         # Its deny rule must remain the child's deny rule too.
-        run('saved-children',[],[child_agent('PERMISSION_CHILD_SAVED'),child_agent('blocked codex after reopen','codex')],session,{'PERMISSION_CHILD_SAVED':[('Write',{'file_path':'denied.txt','content':'saved-policy-bypass'},True,'permission denied by rule'),('SubmitResult',{'output':'saved child policy preserved'},False,None)]})
+        run('saved-children',[],[child_agent('PERMISSION_CHILD_SAVED'),('wait_agent',{'agent_ids':[1],'timeout_ms':20000},False,'saved child policy preserved'),child_agent('blocked codex after reopen','codex')],session,{'PERMISSION_CHILD_SAVED':[('Write',{'file_path':'denied.txt','content':'saved-policy-bypass'},True,'permission denied by rule'),('submit_result',{'output':'saved child policy preserved'},False,None)]})
         require(not(workspace/'child-denied.txt').exists() and not(workspace/'denied.txt').exists(),'child escaped inherited policy')
         checks.append('Claude child inherits explicit and reopened saved policy; restricted Codex delegation denied')
-        for index,document in enumerate([{'permissions':{'deny':['Bash(']}},{'permissions':{'allow':['Write(src/**)']}},{'permissions':{'defaultMode':'auto'}},{'permissions':{'deny':['Read(!secret)']}}]):
+        for index,document in enumerate([{'permissions':{'deny':['Bash(']}},{'permissions':{'allow':['Write(src/**)']}},{'permissions':{'defaultMode':'auto'}},{'permissions':{'deny':['Read(!secret)']}},{'permissions':{'defaultMode':'bypassPermissions','deny':['Agent']}},{'permissions':{'defaultMode':'bypassPermissions','deny':['Agent(reviewer)']}},{'permissions':{'defaultMode':'bypassPermissions','deny':['Agent*']}}]):
             invalid=artifact/f'invalid-{index}.json'; invalid.write_text(json.dumps(document)); count=len(requests)
             command=[str(binary),'run']+common+['--claude-permissions',str(invalid),'Invalid policy must fail.']; commands.append(command)
             r=subprocess.run(command,cwd=workspace,env=env,capture_output=True,timeout=20); (artifact/f'invalid-{index}.stderr').write_bytes(r.stderr)
             require(r.returncode!=0,'invalid policy accepted'); require(len(requests)==count,'invalid policy reached model')
-        checks.append('invalid syntax and unsupported auto fail before provider')
+        # A policy saved by an older executable must also fail closed on reopen.
+        for index,rule in enumerate(['Agent','Agent(reviewer)']):
+            saved_session=str(uuid4())
+            state_dir=codex_home/'claude/plan-mode';state_dir.mkdir(parents=True,exist_ok=True)
+            (state_dir/(saved_session.encode().hex()+'.json')).write_text(json.dumps({'planning':False,'policy':{'defaultMode':'bypassPermissions','deny':[rule]}}))
+            count=len(requests)
+            command=[str(binary),'run']+common+['--rollouts','false','--local-durability',str(codex_home/'claude/sessions.sqlite'),'--local-durability-state-id',saved_session,'Saved removed rules must fail.'];commands.append(command)
+            r=subprocess.run(command,cwd=workspace,env=env,capture_output=True,timeout=20);(artifact/f'legacy-saved-{index}.stderr').write_bytes(r.stderr)
+            require(r.returncode!=0,'saved legacy policy accepted');require(b'removed Claude agent permission rule' in r.stderr,'saved policy failed for unrelated reason');require(len(requests)==count,'saved legacy policy reached model')
+        checks.append('invalid syntax, removed agent rules and saved removed rules fail before provider')
         outcome={'success':True,'checks':checks,'provider_requests':len(requests),'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest()}
     finally:
         for p in processes:

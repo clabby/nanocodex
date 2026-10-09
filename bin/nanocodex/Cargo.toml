@@ -56,7 +56,7 @@ nanocodex-cli-auth.workspace = true
 nanocodex-durability = { workspace = true, features = ["sqlite"] }
 nanocodex-browser.workspace = true
 nanocodex-observability = { workspace = true, features = ["cli"] }
-nanocodex-subagents.workspace = true
+nanocodex-subagents = { workspace = true, features = ["claude"] }
 nanocodex-voice.workspace = true
 nix = { workspace = true, features = ["fs"] }
 nanousd = { workspace = true, optional = true }
@@ -203,8 +203,12 @@ name = "claude_permissions"
 path = "tests/claude_permissions.rs"
 
 [[test]]
-name = "claude_fork"
-path = "tests/claude_fork.rs"
+name = "claude_code_mode"
+path = "tests/claude_code_mode.rs"
+
+[[test]]
+name = "computer_harness"
+path = "tests/computer_harness.rs"
 
 [[test]]
 name = "claude_scheduler_monitor"

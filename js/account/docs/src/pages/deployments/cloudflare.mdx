@@ -47,6 +47,7 @@ import { Agent, Subagents } from "nanocodex/host";
 const agent = await Agent.create({
   transport,
   module: nanocodexWasm,
+  codeEvaluator,
   sessionId,
   durability: this.#durabilityStore(),
   durabilityId: sessionId,
@@ -57,10 +58,10 @@ const agent = await Agent.create({
 That SQLite store is why the restart claim is durable. An in-memory store would
 not survive object eviction.
 
-`Subagents.create()` keeps the root journal durable while clean child agents use
-the existing in-memory Rust task tree. Graceful root shutdown closes the live
-tree. Durable Object eviction does not reconstruct child sessions, topology, or
-in-flight child work; a recovered root can spawn a fresh tree.
+`Subagents.create()` uses the shared Rust task tree. Graceful root shutdown closes
+the live tree. Durable Object reconstruction restores journaled child identities
+and committed snapshots after host capabilities and authority are reattached.
+Unconfirmed work remains interrupted rather than being silently rerun.
 
 ## Hibernation boundary
 
@@ -76,10 +77,11 @@ not recreate a stopped container process.
 
 ## Worker constraints
 
-Cloudflare Workers reject dynamic `eval`. This example selects the CSP-safe
-direct-tool mode; it does not pretend QuickJS or browser OPFS exists in every
-Worker. The separate fetch + MCP example shows QuickJS Code Mode as another
-explicit composition.
+Cloudflare Workers reject dynamic `eval`. Supply a CSP-safe QuickJS
+`codeEvaluator`, as the managed reference does. Both harnesses expose only
+`exec` and `wait`, with application tools inside Code Mode. The
+[fetch + MCP example](https://github.com/gakonst/nanocodex/tree/master/examples/cloudflare-fetch-mcp)
+shows how to initialize the evaluator with an explicit WASM module.
 
 Credentials, router authorization, session capabilities, R2 prefixes, Sandbox
 policy, and hosted web tools remain application code. This example does not

@@ -40,27 +40,12 @@ let tools = Tools::builder()
 
 `Tools` defaults to `ToolExposure::CodeModeOnly`, where ordinary tools are
 available through `exec` and only Code Mode entrypoints are directly visible.
-Select `ToolExposure::DirectAndCodeMode` when a consumer needs the same
-ordinary tools directly as well as through `exec`:
-
-```rust
-use nanocodex_oai_tools::{ToolExposure, Tools};
-
-# fn build() -> Result<(), nanocodex_oai_tools::ToolsBuildError> {
-let tools = Tools::builder()
-    .exposure(ToolExposure::DirectAndCodeMode)
-    .build()?;
-# Ok(())
-# }
-```
-
-Matching Codex, direct-plus-Code-Mode exposure keeps `exec` terse and
-adds each typed `exec` declaration to the corresponding direct tool; Code
-Mode-only instead carries the complete nested catalog in `exec`. Selection
-changes model-visible exposure, not registration or dispatch behavior.
-`tool_with_exposure` can override one registered tool with `DirectOnly`,
-`CodeModeOnly`, `DirectAndCodeMode`, or `Hidden` while preserving the global
-default for the rest. Host-owned `exec`, `wait`, and `tool_search` names cannot
+Shipped agent runtimes require this exposure: only `exec` and `wait` are
+model-visible, and discovery runs through `tools.tool_search` inside `exec`.
+The standalone tool runtime retains direct exposure for host adapter dispatch;
+it is not a selectable agent mode. Code Mode carries the nested catalog in
+`exec` and rejects direct model action calls before invoking a handler.
+Host-owned `exec`, `wait`, and `tool_search` names cannot
 be replaced, and colliding normalized JavaScript names are rejected when the
 recipe is built.
 
@@ -69,7 +54,7 @@ recipe is built.
 local workspace tools rooted at its directory; adding a second workspace source
 is rejected.
 Namespaced Code Mode names such as `image_gen__imagegen` remain available to
-`exec`; normal Code Mode exposes the Codex-compatible `image_gen.imagegen`
+`exec`; the standalone direct adapter exposes the Codex-compatible `image_gen.imagegen`
 Responses namespace and routes its namespaced call to the same handler.
 
 Tools execute concurrently. The `parallel` declaration remains provider
@@ -153,12 +138,12 @@ let tools = Tools::builder().add(mcp).build()?;
 # }
 ```
 
-Handshakes and discovery start with the owning runtime. Both exposure policies
-keep the provider-native `tool_search` visible while omitting deferred MCP
-schemas from the initial request. Code Mode lists those deferred tools as
+Handshakes and discovery start with the owning runtime. Code Mode keeps
+`tools.tool_search` callable inside `exec` while omitting deferred MCP
+schemas from the initial request. It lists those deferred tools as
 compact name/description entries in `ALL_TOOLS`. Search results contain loadable
-MCP namespaces for direct model calls and also activate matching Code Mode
-definitions, keeping large catalogs out of the initial tool list.
+MCP definitions for the next Code Mode cell, keeping large catalogs out of
+the initial tool list.
 `McpServer::tool_exposure` independently selects `DeferredOnly`,
 `CodeModeOnly`, `DeferredAndCodeMode`, or `Hidden` for each server. Automatic
 catalog pagination is bounded by page, item, cursor, and wall-clock limits.

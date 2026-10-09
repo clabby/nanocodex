@@ -69,7 +69,7 @@ export class ObservationFixture extends DurableObject {
       const requests = [], events = [];
       const agent = await createAgent({
         module: rustModule, sessionId:'018f1f9a-7b3c-7a07-8000-000000000021',
-        toolMode:'code', codeEffectJournal:this.journal, codeEvaluator:() => { throw Error('wait evaluated source'); },
+        toolMode:'code-only', codeEffectJournal:this.journal, codeEvaluator:() => { throw Error('wait evaluated source'); },
         transport:hostManaged({websocketPreconnect:false, websocketWarmup:false,
           createWebSocket() {
             const pair=new WebSocketPair(), client=pair[0],server=pair[1];

@@ -114,17 +114,23 @@ export async function runNanocodexTurn(
   const durability = postgresDurabilityStore();
 
   try {
-    const { Agent, Transport } = await import("nanocodex/host");
+    const { Agent, Transport, createQuickJsEvaluator } = await import("nanocodex/host");
+    const { newQuickJSAsyncWASMModuleFromVariant } = await import("quickjs-emscripten-core");
+    const { default: quickJsVariant } = await import("@jitl/quickjs-wasmfile-release-asyncify");
+    const codeEvaluator = createQuickJsEvaluator(
+      await newQuickJSAsyncWASMModuleFromVariant(quickJsVariant),
+    );
     const mode = modelAuthMode();
     const websocketUrl = process.env.OPENAI_WEBSOCKET_URL
       ?? (mode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined);
     const common = {
-      instructions: "You are Nanocodex running as a durable Vercel Workflow actor. Use the sandbox_* tools for code, files, and previews; their /workspace is an isolated persistent Vercel Sandbox for this session.",
+      instructions: "You are Nanocodex running as a durable Vercel Workflow actor. Call the sandbox_* tools through tools inside Code Mode exec cells for code, files, and previews; their /workspace is an isolated persistent Vercel Sandbox for this session.",
       module: await wasmBytes,
       durability,
       durabilityId,
       sessionId,
-      toolMode: "direct" as const,
+      toolMode: "code-only" as const,
+      codeEvaluator,
       tools: {
         ...vercelSandboxTools(sessionId),
         runtimeInfo: {

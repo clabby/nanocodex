@@ -42,6 +42,8 @@ def main():
             request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             family = 'claude' if self.path == '/v1/messages' else 'codex'
             try:
+                if self.path == "/v1/messages" and {t["name"] for t in request.get("tools", [])} != {"exec", "wait"}:
+                    raise AssertionError("Claude catalog must expose exactly exec/wait")
                 h.require(self.path in ('/v1/messages', '/v1/responses'), 'unexpected route ' + self.path)
                 if family == 'claude':
                     h.require(self.headers.get('x-api-key') == 'synthetic-claude-key', 'wrong Claude auth')

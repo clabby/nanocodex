@@ -4,28 +4,22 @@ This Worker is Nanocodex's account-owned hosted-agent surface on Cloudflare. It
 authenticates public requests, projects the caller's authority, and routes work
 to durable, account-scoped services.
 
-Managed Responses (GPT/Codex and gateway) sessions always use
-`toolMode: "code-only"`. The model sees `exec` and `wait`; shell, planning,
-discovery, account tools and subagent actions run through `tools.*` inside Code
-Mode. Tool allowlists and sessions without attached providers retain this policy.
-Recreated sessions select the same policy from backend code.
+Managed sessions always use `toolMode: "code-only"` for every harness, including
+Claude, GPT/Codex, and gateway models. Models see `exec` and `wait`; shell,
+planning, discovery, account tools, CUA, and canonical subagent actions run
+through `tools.*` inside Code Mode. Tool allowlists and sessions without attached
+providers retain this policy. Recreated sessions select the same policy from
+backend code. Evaluation uses the lazy Workers-compatible QuickJS evaluator.
 
-Managed Claude sessions use `toolMode: "direct"`: Claude receives its native
-tool definitions (`Bash`, `Read`, `Write`, `Edit`, discovery, account and subagent
-tools) and calls them as ordinary Messages `tool_use` blocks, never through Code
-Mode. Codex children of a Claude root still use Code Mode. Each fresh turn
-builds its catalog from the current policy, so existing Claude threads return to
-native tools on their next turn.
-Memories, session recall, subagents, connectors, Hands, Vault, and other Nanocodex
-platform capabilities are shared. They retain the same authorization and owned
-handlers, exposed through Code Mode for Codex and native tool calls for Claude.
-The public SDK retains its configurable tool modes for other embedders.
-
-| Tool ownership | Examples | Model invocation |
-| --- | --- | --- |
-| Codex | `exec`, `wait`, `exec_command`, `write_stdin`, `apply_patch`, `web__run` | Code Mode |
-| Claude | `Bash`, `BashOutput`, `Read`, `Write`, `Edit`, native task tools | Direct Messages tool calls |
-| Shared platform | Memories, session recall, canonical subagents, `environment`, CUA, connectors, Vault | Each backend's own tool interface |
+Claude retains its native `Bash`, `BashOutput`, `Read`, `Write`, and `Edit`
+handlers behind Code Mode. Memories, session recall, canonical subagents,
+connectors, Hands, CUA, and Vault retain their owned handlers and authorization.
+All harnesses use the canonical `spawn_agent`, `list_agents`, `send_agent_message`,
+`wait_agent`, `interrupt_agent`, `close_agent`, and `submit_result` lifecycle.
+Legacy Claude agent `Task`, `TaskOutput`, and `TaskStop` are unavailable. A
+configuration requesting them fails before inference with an explicit removed
+capability error; legacy IDs are never aliased to canonical children.
+`BashOutput` continues to poll retained native shell sessions.
 
 Claude steering accepts identified corrections with the same durable receipt,
 deduplication, and pending-withdrawal contract as Codex. Consumption emits

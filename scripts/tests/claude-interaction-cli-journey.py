@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Native TUI/terminal interaction journey; only Messages HTTP is synthetic."""
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse, fcntl, importlib.util, json, os, pty, re, select, signal, struct, subprocess, termios, threading, time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,7 +46,7 @@ def main():
     class Provider(BaseHTTPRequestHandler):
         def log_message(self,*_): pass
         def do_POST(self):
-            request=json.loads(self.rfile.read(int(self.headers['content-length']))); stage=len(requests)-phase['start']; requests.append(request)
+            request=json.loads(self.rfile.read(int(self.headers['content-length']))); request = normalize_request(request, artifact); stage=len(requests)-phase['start']; requests.append(request)
             (artifact/'provider.json').write_text(json.dumps(requests,indent=2))
             try:
                 current=phase['steps']
@@ -60,7 +61,7 @@ def main():
                 block={'type':'text','text':'interaction-journey-complete'} if stage==len(current) else {'type':'tool_use','id':f"{phase['name']}_{stage}",'name':current[stage][0],'input':current[stage][1]}
             except Exception as e:
                 errors.append(str(e)); block={'type':'text','text':'fixture-failed'}
-            response=sse(block,request['model']); self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Content-Length',str(len(response))); self.end_headers(); self.wfile.write(response)
+            response=sse(wrap_tool(block),request['model']); self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Content-Length',str(len(response))); self.end_headers(); self.wfile.write(response)
     server=ThreadingHTTPServer(('127.0.0.1',0),Provider); threading.Thread(target=server.serve_forever,daemon=True).start()
     common=[str(args.binary.resolve()),'--claude','--model','claude-sonnet-5-5','--claude-api-key','synthetic-key','--claude-messages-url',f'http://127.0.0.1:{server.server_port}/v1/messages','--cwd',str(workspace),'--browser=none','--mcp-defaults','false','--mcp-codex-config','false','--web-search','false','--image-generation','false','--subagents','false','--memory','false','--claude-hooks',str(hooks)]
     commands=[]; processes=[]; transcripts={}; screens={}
@@ -94,7 +95,7 @@ def main():
     try:
         p,fd,drain=start(common+['--prompt','Exercise interactive plan and question journey.'],'tui')
         wait(lambda:len(requests)==7,drain,'TUI question absent'); pending(7,drain)
-        require(visible('tui', b'Choose one number'),'TUI did not render question')
+        wait(lambda:visible('tui', b'Choose one number'),drain,'TUI did not render question')
         os.write(fd,b'1\r'); wait(at_gate.is_set,drain,'question answer did not arrive')
         os.write(fd,b'approve'); time.sleep(.2); drain(); gate.set()
         wait(lambda:visible('tui', b'Plan approval required'),drain,'plan approval absent'); time.sleep(.2); drain()
@@ -126,7 +127,7 @@ def main():
         phase.update(name='interrupt',start=len(requests),steps=[('AskUserQuestion',question,False,'unused')])
         command=[common[0],'run']+common[1:]+['--rollouts','false','--local-durability',str(codex_home/'claude/sessions.sqlite'),'--local-durability-state-id',session,'Wait for a terminal answer.']
         p,fd,drain=start(command,'interrupt'); wait(lambda:visible('interrupt', b'Choose one number'),drain,'terminal question absent'); pending(phase['start']+1,drain)
-        p.send_signal(signal.SIGINT); p.wait(timeout=10); drain(); os.close(fd)
+        p.send_signal(signal.SIGINT); wait(lambda:p.poll() is not None,drain,'pending terminal request did not cancel',timeout=10); drain(); os.close(fd)
         require(p.returncode!=0,'interrupt reported success'); require(len(requests)==phase['start']+1,'cancelled question fabricated answer')
         phase.update(name='after-interrupt',start=len(requests),steps=[('Write',{'file_path':'after-interrupt.txt','content':'unsafe'},True,'plan mode')])
         command[-1]='Verify planning survives pending cancellation.'; commands.append(command)

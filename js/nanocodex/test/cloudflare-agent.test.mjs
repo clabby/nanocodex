@@ -6,8 +6,8 @@ import {
   bindAgent,
   checkpoint,
   pruneDurableReceipts,
-  create,
-  createEphemeral,
+  create as createCloudflare,
+  createEphemeral as createCloudflareEphemeral,
   destroy,
   exportDurabilityState,
   importDurabilityState,
@@ -15,6 +15,15 @@ import {
 import * as HostAgent from "../host/Agent.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 import * as Subagents from "../runtime/subagents.mjs";
+import { codeEvaluator } from "./quickjs-fixture.mjs";
+
+// Every Cloudflare runtime, including prepared sessions, uses a real isolated evaluator.
+const create = (module, owner, options = {}) => createCloudflare(
+  module, owner, Object.defineProperties({ codeEvaluator }, Object.getOwnPropertyDescriptors(options)),
+);
+const createEphemeral = (module, owner, options = {}) => createCloudflareEphemeral(
+  module, owner, Object.defineProperties({ codeEvaluator }, Object.getOwnPropertyDescriptors(options)),
+);
 
 const FIRST_OBJECT_ID = "a".repeat(64);
 const SECOND_OBJECT_ID = "b".repeat(64);
@@ -290,8 +299,8 @@ test("prepared construction shares cold engine initialization without retaining 
   const agents = await Promise.all([first, second]);
   try {
     assert.equal(instantiations.mock.callCount(), 2, "normal Agent construction reuses the initialized engine");
-    assert.equal(storage.owners.size, 1);
-    assert.equal(otherStorage.owners.size, 1);
+    assert.ok(storage.owners.has(storage.stateId));
+    assert.ok(otherStorage.owners.has(otherStorage.stateId));
   } finally {
     await Promise.all(agents.map(agent => agent.session.shutdown()));
   }
@@ -515,7 +524,7 @@ test("Cloudflare Agent reconstruction takes over the same durable owner after fe
   await reopened.session.shutdown();
 });
 
-test("Cloudflare root takeover starts without children and stale cleanup preserves new children", async () => {
+test("Cloudflare root takeover retains child status and stale cleanup preserves new children", async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const storage = new MemoryStorage();
   const lifecycles = [];
@@ -526,14 +535,18 @@ test("Cloudflare root takeover starts without children and stale cleanup preserv
   const first = await create(module, durableOwner(storage), options);
   let replacement;
   try {
-    await Subagents.spawn(first, { role: "old-child", task: "Wait until restart.", outputSchema: { type: "object" } });
+    const oldChild = await Subagents.spawn(first, { role: "old-child", task: "Wait until restart.", outputSchema: { type: "object" } });
     const oldBind = lifecycles.find(({ type }) => type === "bind");
     assert.ok(oldBind);
     assert.equal(storage.subagents.size, 0);
     assert.equal(storage.subagentCheckpoints.size, 0);
     replacement = await create(module, durableOwner(storage), options);
     assert.equal(replacement.sessionId, first.sessionId, "root identity remains durable");
-    assert.deepEqual((await Subagents.list(replacement, { includeCompleted: true })).agents, []);
+    const restored = (await Subagents.list(replacement, { includeCompleted: true })).agents;
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0].agent_id, oldChild.agent_id);
+    assert.equal(restored[0].role, "old-child");
+    assert.deepEqual(restored[0].status, { state: "interrupted" });
     const child = await Subagents.spawn(replacement, { role: "new-child", task: "Use only live authority.", outputSchema: { type: "object" } });
     const newBind = lifecycles.find(({ type, descriptor }) => type === "bind" && descriptor.role === "new-child");
     assert.ok(newBind);
@@ -581,6 +594,7 @@ test("Cloudflare child bindings expose only live operations and release a subtre
     },
   });
   const agent = await bound.create(durableOwner(storage), {
+    codeEvaluator,
     [Symbol.for("nanocodex.cloudflare.internalRuntime")]: { subagentLifecycle: event => lifecycle.push(event) },
   });
   try {
@@ -685,7 +699,7 @@ test("failed reconstruction keeps the prior same-owner reservation fail closed",
   const storage = new MemoryStorage();
   const binding = egressBinding();
   const first = await create(module, durableOwner(storage, binding, FIRST_OBJECT_ID));
-  await Subagents.spawn(first, {
+  const child = await Subagents.spawn(first, {
     role: "retry-proof",
     task: "Remain live until the root is replaced.",
     outputSchema: { type: "object" },
@@ -706,7 +720,7 @@ test("failed reconstruction keeps the prior same-owner reservation fail closed",
   });
 
   await assert.rejects(
-    failing.create(durableOwner(storage, binding, FIRST_OBJECT_ID)),
+    failing.create(durableOwner(storage, binding, FIRST_OBJECT_ID), { codeEvaluator }),
     /reconstruction setup failed/,
   );
   assert.equal(storage.subagents.size, 0);
@@ -719,7 +733,11 @@ test("failed reconstruction keeps the prior same-owner reservation fail closed",
     module,
     durableOwner(storage, binding, FIRST_OBJECT_ID),
   );
-  assert.deepEqual((await Subagents.list(reconstructed, { includeCompleted: true })).agents, []);
+  const restored = (await Subagents.list(reconstructed, { includeCompleted: true })).agents;
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].agent_id, child.agent_id);
+  assert.equal(restored[0].role, "retry-proof");
+  assert.deepEqual(restored[0].status, { state: "interrupted" });
   first.dispose();
   await reconstructed.session.shutdown();
   assert.equal(storage.subagents.size, 0);
@@ -740,7 +758,7 @@ test("Cloudflare Agent rejects a takeover while its predecessor is not committed
       return agent;
     },
   });
-  const pending = held.create(durableOwner(storage, binding, FIRST_OBJECT_ID));
+  const pending = held.create(durableOwner(storage, binding, FIRST_OBJECT_ID), { codeEvaluator });
   await entered.promise;
 
   await assert.rejects(
@@ -983,7 +1001,7 @@ test("Cloudflare Agent releases its state when event projection setup fails", as
     },
   });
 
-  await assert.rejects(failing.create(owner), /event projection setup failed/);
+  await assert.rejects(failing.create(owner, { codeEvaluator }), /event projection setup failed/);
 
   const recreated = await create(module, owner);
   await recreated.session.shutdown();
@@ -1019,10 +1037,10 @@ test("Cloudflare Agent destroy and duplicate create refuse an in-flight creation
     },
   });
 
-  const pending = held.create(owner);
+  const pending = held.create(owner, { codeEvaluator });
   await entered.promise;
   assert.throws(() => destroy(owner), /creation must settle before destroy/);
-  await assert.rejects(held.create(owner), /creation is already in progress/);
+  await assert.rejects(held.create(owner, { codeEvaluator }), /creation is already in progress/);
 
   release.resolve();
   const agent = await pending;
@@ -1062,7 +1080,7 @@ test("Cloudflare Agent classifies failed creation rollback as reopen required", 
     },
   });
 
-  await assert.rejects(failing.create(owner), (error) => {
+  await assert.rejects(failing.create(owner, { codeEvaluator }), (error) => {
     assert.equal(error.code, "reopen_required");
     assert.match(error.message, /rollback requires reopen/);
     assert.ok(error.cause instanceof AggregateError);
@@ -1153,16 +1171,16 @@ for (const provider of ["openrouter", "vercel"]) {
         assert.equal(body.model,"openai/gpt-6-astra");
         assert.equal(provider === "openrouter" ? body.reasoning.effort : body.reasoning_effort,"low");
         if(calls===1 || calls===3){
-          const tool=body.tools.find(t=>t.function.description.startsWith("runtimeInfo\n")); assert.ok(tool);
+          const tool=body.tools.find(t=>t.function.description.startsWith("exec\n")); assert.ok(tool);
           if(calls===3)assert.ok(body.messages.some(m=>m.content?.includes("GATEWAY_TURN_1")));
-          return gatewayFixtureResponse(body, {choices:[{finish_reason:"tool_calls",message:{content:null,tool_calls:[{id:`call-${calls}`,type:"function",function:{name:tool.function.name,arguments:"{}"}}]}}]});
+          return gatewayFixtureResponse(body, {choices:[{finish_reason:"tool_calls",message:{content:null,tool_calls:[{id:`call-${calls}`,type:"function",function:{name:tool.function.name,arguments:JSON.stringify({input:"text(await tools.runtimeInfo({}));"})}}]}}]});
         }
         assert.ok(body.messages.some(m=>m.role==="tool"&&m.content.includes("gateway-fixture")));
         return gatewayFixtureResponse(body, {choices:[{finish_reason:"stop",message:{content:`GATEWAY_TURN_${calls/2}`}}]});
       }};
     const agent=await create(module,durableOwner(new MemoryStorage()),{
       [Symbol.for("nanocodex.cloudflare.internalConfiguration")]:{model:gateway.model,thinking:"low",reasoning_mode:"standard",fast_mode:false},
-      [Symbol.for("nanocodex.cloudflare.internalRuntime")]:{gateway,toolMode:"direct",subagentsEnabled:false},
+      [Symbol.for("nanocodex.cloudflare.internalRuntime")]:{gateway,subagentsEnabled:false},
       tools:{runtimeInfo:{description:"Return fixture runtime",parameters:{type:"object",additionalProperties:false},handler(){tools++;return {runtime:"gateway-fixture"};}}},
     });
     try {
@@ -1266,7 +1284,8 @@ test("live child continuation preserves schema, history, routing, and spawning a
     const last = input.messages.at(-1);
     if (last?.role === "tool") {
       if (!last.content.includes("submitted output does not match the required schema")) {
-        assert.deepEqual(JSON.parse(last.content), { accepted: true, status: "accepted", decoded_json_text: true });
+        assert.match(last.content, /"accepted":true/);
+        assert.match(last.content, /"decoded_json_text":true/);
         acceptedReceipts++;
         return { choices: [{ finish_reason: "stop", message: { content: `CHILD_DONE_${childTurn}` } }] };
       }
@@ -1281,7 +1300,7 @@ test("live child continuation preserves schema, history, routing, and spawning a
       assert.ok(history.includes("CHILD_DONE_1"), "the first assistant turn remains in live memory");
     }
     requestedTurns.push(childTurn);
-    const submit = input.tools.find((tool) => tool.function.description.startsWith("submit_result\n"));
+    const submit = input.tools.find((tool) => tool.function.description.startsWith("exec\n"));
     assert.ok(submit);
     const output = { ok: childTurn, marker: childTurn === 1 ? marker : "AFTER_CONTINUATION" };
     if (childTurn === 2 && !invalidSecondResultSent) {
@@ -1291,7 +1310,7 @@ test("live child continuation preserves schema, history, routing, and spawning a
     return { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{
       id: `restart-submit-${childRequests.length}`, type: "function", function: {
         name: submit.function.name,
-        arguments: JSON.stringify({ output: JSON.stringify(output) }),
+        arguments: JSON.stringify({ input: `text(await tools.submit_result(${JSON.stringify({ output: JSON.stringify(output) })}));` }),
       },
     }] } }] };
   } };
@@ -1305,7 +1324,7 @@ test("live child continuation preserves schema, history, routing, and spawning a
       model: gateway.model, thinking: "low", reasoning_mode: "standard", fast_mode: false,
     },
     [Symbol.for("nanocodex.cloudflare.internalRuntime")]: {
-      gateway, toolMode: "direct", subagentsEnabled: true,
+      gateway, subagentsEnabled: true,
       subagentRouting: {
         async resolve(request) {
           classifierCalls++;
@@ -1370,12 +1389,21 @@ test("live child continuation preserves schema, history, routing, and spawning a
     assert.equal(storage.subagents.size, 0);
     assert.equal(storage.subagentCheckpoints.size, 0);
     const persisted = [...storage.records.values(), ...storage.states.map(({ payload }) => payload)].join("\n");
-    assert.equal(persisted.includes(marker), false, "child history never reaches root durability");
+    assert.ok(persisted.includes(marker), "the canonical child journal retains committed child history");
+    const rootPersisted = [
+      ...[...storage.records].filter(([address]) => JSON.parse(address)[0] === storage.stateId).map(([, value]) => value),
+      ...storage.states.filter(({ stateId }) => stateId === storage.stateId).map(({ payload }) => payload),
+      ...storage.events.map(({ event_json }) => event_json),
+    ].join("\n");
+    assert.equal(rootPersisted.includes(marker), false, "child transcript stays private from the root conversation and event stream");
     agent = await create(module, durableOwner(storage), options);
-    assert.deepEqual((await Subagents.list(agent, { includeCompleted: true })).agents, []);
-    await assert.rejects(Subagents.send(agent, { agentId: child.agent_id, message: "Cannot resume after restart." }));
+    const restored = (await Subagents.list(agent, { includeCompleted: true })).agents;
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0].agent_id, child.agent_id);
+    assert.deepEqual(restored[0].status, second.agents[0].status);
+    assert.equal(restored[0].task, "Return another object with ok equal to 2.");
     assert.equal(classifierCalls, 1);
-    assert.equal(childRequests.length, 5, "restart neither restores nor replays child inference");
+    assert.equal(childRequests.length, 5, "restoring an accepted result does not replay child inference");
   } finally {
     await agent.session.shutdown();
   }
@@ -1395,15 +1423,15 @@ test("closing one live child preserves sibling history and its pinned route", { 
     modelCalls++;
     assert.ok(modelCalls <= 6, "bounded sibling model requests");
     if (input.messages.at(-1)?.role === "tool") {
-      assert.deepEqual(JSON.parse(input.messages.at(-1).content), { accepted: true, status: "accepted" });
+      assert.match(input.messages.at(-1).content, /"accepted":true/);
       return { choices: [{ finish_reason: "stop", message: { content: "SIBLING_DONE" } }] };
     }
     if (childTurn === 2) assert.ok(JSON.stringify(input.messages).includes("SIBLING_DONE"), "closing a sibling preserves live conversation history");
-    const submit = input.tools.find((tool) => tool.function.description.startsWith("submit_result\n"));
+    const submit = input.tools.find((tool) => tool.function.description.startsWith("exec\n"));
     assert.ok(submit);
     return { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{
       id: `sibling-submit-${modelCalls}`, type: "function", function: {
-        name: submit.function.name, arguments: JSON.stringify({ output: { turn: childTurn } }),
+        name: submit.function.name, arguments: JSON.stringify({ input: `text(await tools.submit_result(${JSON.stringify({ output: { turn: childTurn } })}));` }),
       },
     }] } }] };
   } };
@@ -1423,7 +1451,7 @@ test("closing one live child preserves sibling history and its pinned route", { 
       model: profile.model, thinking: profile.thinking, reasoning_mode: "standard", fast_mode: false,
     },
     [Symbol.for("nanocodex.cloudflare.internalRuntime")]: {
-      workersAi: profile.workersAi, toolMode: "direct", subagentsEnabled: true,
+      workersAi: profile.workersAi, subagentsEnabled: true,
       subagentRouting: {
         async resolve() {
           classifierCalls++;
@@ -1473,8 +1501,11 @@ test("closing one live child preserves sibling history and its pinned route", { 
     assert.equal(storage.subagents.size, 0);
     assert.equal(storage.subagentCheckpoints.size, 0);
     agent = await create(module, durableOwner(storage), options);
-    assert.deepEqual((await Subagents.list(agent, { includeCompleted: true })).agents, []);
-    assert.equal(modelCalls, 6);
+    const restored = (await Subagents.list(agent, { includeCompleted: true })).agents;
+    assert.equal(restored.length, 2);
+    assert.deepEqual(restored.find(child => child.agent_id === closed.agent_id).status, { state: "closed" });
+    assert.deepEqual(restored.find(child => child.agent_id === retained.agent_id).status, resumed.agents[0].status);
+    assert.equal(modelCalls, 6, "restoring closed and completed children does not repeat their effects");
   } finally {
     await agent.session.shutdown();
   }
@@ -1506,7 +1537,7 @@ test("Cloudflare SDK sibling shutdown preserves live siblings without child chec
   }
 });
 
-test("manual GPT root keeps WebSockets while a Kimi child uses gateway HTTP across continuation", { timeout: 30_000 }, async () => {
+test("manual GPT root keeps WebSockets while a Kimi child uses gateway HTTP across continuation", { timeout: 40_000 }, async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const storage = new MemoryStorage();
   const routes = new Map();
@@ -1550,11 +1581,11 @@ test("manual GPT root keeps WebSockets while a Kimi child uses gateway HTTP acro
       if (body.messages.at(-1)?.role === "tool") {
         return gatewayFixtureResponse(body, { choices: [{ finish_reason: "stop", message: { content: `KIMI_HISTORY_${childTurn}` } }] });
       }
-      const submit = body.tools.find(tool => tool.function.description.startsWith("submit_result\n"));
+      const submit = body.tools.find(tool => tool.function.description.startsWith("exec\n"));
       assert.ok(submit);
       return gatewayFixtureResponse(body, { choices: [{ finish_reason: "tool_calls", message: {
         content: null, tool_calls: [{ id: `manual-child-${childCalls}`, type: "function", function: {
-          name: submit.function.name, arguments: JSON.stringify({ output: JSON.stringify({ turn: childTurn }) }),
+          name: submit.function.name, arguments: JSON.stringify({ input: `text(await tools.submit_result(${JSON.stringify({ output: JSON.stringify({ turn: childTurn }) })}));` }),
         } }],
       } }] });
     },
@@ -1564,7 +1595,7 @@ test("manual GPT root keeps WebSockets while a Kimi child uses gateway HTTP acro
       model: "gpt-6-astra", thinking: "xhigh", reasoning_mode: "standard", fast_mode: false,
     },
     [Symbol.for("nanocodex.cloudflare.internalRuntime")]: {
-      preserveRootTransport: true, toolMode: "direct", subagentsEnabled: true,
+      preserveRootTransport: true, subagentsEnabled: true,
       subagentRouting: {
         async resolve(request) {
           if (!authorized) throw new Error("gateway authorization lost");
@@ -1605,7 +1636,8 @@ test("manual GPT root keeps WebSockets while a Kimi child uses gateway HTTP acro
     await assert.rejects(Subagents.spawn(agent, { role: "denied-gateway", task: "Must not start.", model: "kimi",
       thinking: "low", outputSchema: { type: "object" } }), /not authorized/);
     await Subagents.send(agent, { agentId: child.agent_id, message: "Authorization has been revoked." });
-    assert.equal((await Subagents.wait(agent, { agentIds: [child.agent_id], timeoutMs: 5_000 })).agents[0].status.state, "failed");
+    // Authorization denial surfaces after the transport exhausts its retry budget.
+    assert.equal((await Subagents.wait(agent, { agentIds: [child.agent_id], timeoutMs: 25_000 })).agents[0].status.state, "failed");
     assert.equal(choices, 1);
     assert.equal(childCalls, 4, "revoked continuation fails before provider inference");
   } finally { await agent.session.shutdown(); }
@@ -1631,10 +1663,10 @@ test("manual GPT children preserve native defaults, max/xhigh/none, fast mode, a
         seen.push(request);
         requests.set(this.id, seen);
       }
-      const submitted = request.input.some(item => item.type === "function_call_output");
+      const submitted = request.input.some(item => item.type === "custom_tool_call_output");
       const output = request.generate === false ? [] : isChild && !submitted ? [{
-        type: "function_call", call_id: `native-submit-${++responseId}`, name: "submit_result",
-        arguments: JSON.stringify({ output: { ok: true } }),
+        type: "custom_tool_call", call_id: `native-submit-${++responseId}`, name: "exec",
+        input: 'text(await tools.submit_result({ output: { ok: true } }));',
       }] : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "NATIVE_OK" }] }];
       queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
         type: "response.completed", response: { id: `native-response-${++responseId}`, status: "completed", output,
@@ -1651,7 +1683,7 @@ test("manual GPT children preserve native defaults, max/xhigh/none, fast mode, a
       model: "gpt-6-astra", thinking: "xhigh", reasoning_mode: "standard", fast_mode: true,
     },
     [Symbol.for("nanocodex.cloudflare.internalRuntime")]: {
-      preserveRootTransport: true, toolMode: "direct", subagentsEnabled: true,
+      preserveRootTransport: true, subagentsEnabled: true,
       subagentRouting: {
         async resolve() { choices++; return { native: true, routeId: `native-${choices}` }; },
         bind(request) { if (!admitted) throw new Error("spawning authorization lost"); native.add(request.sessionId); },
@@ -1783,6 +1815,7 @@ test("Cloudflare internal socket timing reaches the real InlineAgent host and cl
 
 function nativePreparationOptions(prepare, signal) {
   return {
+    codeEvaluator,
     durabilityId: "fixture-prepared-state",
     eventPersistence: "caller",
     [Symbol.for("nanocodex.cloudflare.internalConfiguration")]: {

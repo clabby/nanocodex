@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -32,10 +33,10 @@ test("GLM real WASM preserves screenshot history, accepts steering and completes
   let calls = 0, screenshots = 0, textReads = 0;
   let fixtureError;
   const toolCall = (input, name, id) => {
-    const tool = input.tools.find(tool => tool.function.description.startsWith(`${name}\n`));
+    const tool = input.tools.find(tool => tool.function.description.startsWith("exec\n"));
     assert.ok(tool, `${name} declaration reaches GLM`);
     return { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{
-      id, type: "function", function: { name: tool.function.name, arguments: "{}" },
+      id, type: "function", function: { name: tool.function.name, arguments: JSON.stringify({ input: name === "captureScreen" ? "const result = await tools.captureScreen({}); text(result[0].text); image(result[1]);" : "text(await tools.inspectText({}));" }) },
     }] } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
   };
   const transport = createWorkersAiResponses({
@@ -72,7 +73,7 @@ test("GLM real WASM preserves screenshot history, accepts steering and completes
     },
   });
   const agent = await Agent.create({
-    module, model: "@cf/zai-org/glm-5.3", thinking: "low", toolMode: "direct",
+    module, model: "@cf/zai-org/glm-5.3", thinking: "low", codeEvaluator,
     transport: Transport.hostManaged({ ...transport, websocketPreconnect: false,
       createWebSocket() { assert.fail("GLM must never probe WebSocket"); },
     }),
@@ -110,14 +111,14 @@ test("GLM real WASM preserves screenshot history, accepts steering and completes
     assert.equal(calls, 3);
     assert.equal(screenshots, 1);
     assert.equal(textReads, 1);
-    const receipt = toolResults.find(output => output.call_id === "glm-screen");
+    const receipt = toolResults.find(output => output.tool === "captureScreen");
     assert.ok(receipt, "public tool receipt is retained");
     assert.deepEqual(receipt.structured_result.content, [
       { type: "text", text: "Screen capture completed" },
       { type: "image", mimeType: "image/png", data: screenshot },
     ]);
     const { history } = await agent.session.context();
-    const retained = history.find(item => item.type === "function_call_output" && item.call_id === "glm-screen");
+    const retained = history.find(item => item.type === "custom_tool_call_output" && item.call_id === "glm-screen");
     assert.ok(Array.isArray(retained?.output), "public session history retains multimodal tool output");
     assert.ok(retained.output.some(part => part.type === "input_image" && part.image_url === `data:image/png;base64,${screenshot}`),
       "original screenshot remains available for a vision-capable continuation");
@@ -149,7 +150,7 @@ for (const provider of ["workers-ai", "openrouter", "vercel"]) {
     const transport = provider === "workers-ai" ? createWorkersAiResponses({ run: infer })
       : createGatewayResponses({ provider, model: "@cf/zai-org/glm-5.3", reasoningEffort: "low",
         apiKey: "synthetic-key", fetch: infer });
-    const agent = await Agent.create({ module, model: "@cf/zai-org/glm-5.3", thinking: "low", tools: [],
+    const agent = await Agent.create({ codeEvaluator, module, model: "@cf/zai-org/glm-5.3", thinking: "low", tools: [],
       transport: Transport.hostManaged({ ...transport, websocketPreconnect: false,
         createWebSocket() { assert.fail("GLM must never probe WebSocket"); },
         async createResponse(...args) {
@@ -195,7 +196,7 @@ for (const model of ["@cf/zai-org/glm-5.3", "kimi-k3", "mimo-v2.6-pro"]) {
     const transport = model.startsWith("@cf/") ? createWorkersAiResponses({ async run(_model, input) { return open(input); } })
       : createGatewayResponses({ provider: "openrouter", model, reasoningEffort: "low", apiKey: "synthetic-key",
         fetch: async (_url, init) => new Response(open(JSON.parse(init.body)), { headers: { "content-type": "text/event-stream" } }) });
-    const agent = await Agent.create({ module, model, thinking: "low", tools: [],
+    const agent = await Agent.create({ codeEvaluator, module, model, thinking: "low", tools: [],
       transport: Transport.hostManaged({ ...transport, websocketPreconnect: false,
         createWebSocket() { assert.fail("gateway must use streaming HTTP"); } }) });
     const watch = agent.events.watch();

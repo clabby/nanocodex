@@ -304,6 +304,7 @@ async function check() {
   const ephemeralCloudflareAgent: DefaultAgent = await CloudflareAgent.createEphemeral(
     cloudflareOwner,
     {
+      codeEvaluator: async () => {},
       instructions: "Search the caller's account history.",
       additionalInstructions: "Cite the matching thread.",
       model: "gpt-6.1-sol",
@@ -764,3 +765,14 @@ const privateMcpServer = {
   },
 } satisfies McpServer;
 void privateMcpServer;
+
+// The public model-facing mode is mandatory across both harness families.
+const strictMode: NonNullable<Parameters<typeof Agent.create>[0]['toolMode']> = 'code-only';
+// @ts-expect-error Direct model-facing tools are no longer supported.
+const directMode: NonNullable<Parameters<typeof Agent.create>[0]['toolMode']> = 'direct';
+// @ts-expect-error Mixed direct and Code Mode tools are no longer supported.
+const mixedMode: NonNullable<Parameters<typeof Agent.create>[0]['toolMode']> = 'code';
+const claudeStrictMode: NonNullable<import('../host/Claude.mjs').Options['toolMode']> = 'code-only';
+// @ts-expect-error Claude follows the same mandatory Code Mode contract.
+const claudeDirectMode: NonNullable<import('../host/Claude.mjs').Options['toolMode']> = 'direct';
+void [strictMode, directMode, mixedMode, claudeStrictMode, claudeDirectMode];

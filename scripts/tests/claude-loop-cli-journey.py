@@ -3,6 +3,7 @@
 Long fallback durations and seven-day age use clearly labeled persisted-journal
 fixtures under the scheduler's file lock. This is not a real 20-minute wait.
 """
+from claude_code_fixture import normalize_request, wrap_tool
 import shutil
 import argparse, fcntl, hashlib, importlib.util, json, os, pty, select, struct, subprocess, termios, threading, time
 from pathlib import Path
@@ -22,7 +23,7 @@ def main():
  class Provider(BaseHTTPRequestHandler):
   def log_message(self,*_):pass
   def do_POST(self):
-   req=json.loads(self.rfile.read(int(self.headers['content-length'])));requests.append({'phase':state['phase'],'request':req});(artifact/'provider.json').write_text(json.dumps(requests,indent=2))
+   req=json.loads(self.rfile.read(int(self.headers['content-length']))); req = normalize_request(req, artifact);requests.append({'phase':state['phase'],'request':req});(artifact/'provider.json').write_text(json.dumps(requests,indent=2))
    try:
     if state['phase']=='fixed' and state['index']==0:require('*/6 * * * *' in json.dumps(req['messages'][-1]),'frontend did not select 7m clean cadence')
     if state['pending']:
@@ -33,7 +34,7 @@ def main():
      step=state['steps'][state['index']];call=state['phase']+str(state['index']);state['index']+=1;state['pending']=(call,step);block={'type':'tool_use','id':call,'name':step[0],'input':step[1]}
     else:block={'type':'text','text':state['phase']+'-complete'}
    except Exception as e:errors.append(str(e));block={'type':'text','text':'fixture-failed'}
-   body=sse(block,req['model']);self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+   body=sse(wrap_tool(block),req['model']);self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  server=ThreadingHTTPServer(('127.0.0.1',0),Provider);threading.Thread(target=server.serve_forever,daemon=True).start()
  common=['--claude-permissions',str(rules),'--claude','--model','claude-sonnet-5-5','--claude-api-key','synthetic-key','--claude-messages-url',f'http://127.0.0.1:{server.server_port}/v1/messages','--cwd',str(workspace),'--browser=none','--mcp-defaults','false','--mcp-codex-config','false','--web-search','false','--image-generation','false','--subagents','false','--memory','false']
  master,slave=pty.openpty();fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',45,170,0,0));command=[str(binary)]+common+['--prompt','Start loop acceptance.'];proc=subprocess.Popen(command,stdin=slave,stdout=slave,stderr=slave,cwd=workspace,env=env,start_new_session=True);os.close(slave)

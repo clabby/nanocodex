@@ -473,9 +473,8 @@ impl Bridge {
                     .ok_or("workflow workspace lease has ended")?
                     .clone(),
             );
-            let admission = agents::profiles::Admission::default();
             let report = agents::profiles::scope(
-                admission.clone(),
+                agents::profiles::Admission::default(),
                 CHILD_WORKSPACE.scope(
                     pinned,
                     start_agent(
@@ -485,7 +484,7 @@ impl Bridge {
                         AgentTask {
                             role: opts.label.unwrap_or_else(|| format!("workflow-{ordinal}")),
                             task: format!(
-                                "{prompt}\n\nUse SubmitResult to submit the requested result."
+                                "{prompt}\n\nUse submit_result to submit the requested result."
                             ),
                             output_schema: opts.schema.unwrap_or_else(|| json!({"type":"string"})),
                         },
@@ -500,12 +499,6 @@ impl Bridge {
                 .unwrap()
                 .children
                 .push(report.agent_id);
-            let id = report
-                .agent_id
-                .to_string()
-                .parse::<u64>()
-                .map_err(|e| e.to_string())?;
-            agents::profiles::attach(&admission, id)?;
             report.agent_id
         };
         loop {

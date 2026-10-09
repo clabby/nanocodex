@@ -5,6 +5,7 @@ Run after building nanocodex-bin:
   python3 scripts/tests/claude-native-cli-journey.py --binary target/debug/nanocodex
 Evidence stays in ignored output/claude-native-cli/<uuid>/.
 """
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse
 import json
 from pathlib import Path
@@ -64,9 +65,7 @@ def main():
     (workspace / "pixel.png").write_bytes(png)
     (workspace / "notebook.ipynb").write_text(json.dumps({"nbformat":4, "nbformat_minor":5,"metadata":{},"cells":[{"id":"example","cell_type":"code","execution_count":1,"metadata":{},"source":["print('old')"],"outputs":[{"output_type":"stream","name":"stdout","text":["old\n"]}]}]}))
     requests, errors = [], []
-    bash_schema = json.loads((Path(__file__).resolve().parents[2] / "bin/nanocodex/src/config/claude/bash.input_schema.json").read_text())
     task_ids = {}
-    expected_names = {"Read", "Write", "Edit", "Bash", "Glob", "Grep", "TaskCreate", "TaskUpdate", "TaskGet"}
     steps = [
         ("Read", {"file_path": "editable.txt"}, False, "alpha alpha"),
         ("Edit", {"file_path": "editable.txt", "old_string": "alpha", "new_string": "WRONG"}, True, None),
@@ -99,7 +98,7 @@ def main():
             pass
 
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            request = json.loads(self.rfile.read(int(self.headers["content-length"]))); request = normalize_request(request, artifact)
             stage = len(requests) - phase["start"]
             current_steps = phase["steps"]
             requests.append(request)
@@ -122,10 +121,6 @@ def main():
             try:
                 require(self.path == "/v1/messages", "unexpected provider route")
                 require(self.headers.get("x-api-key") == "synthetic-claude-key", "wrong synthetic authentication")
-                bash = next(tool for tool in request["tools"] if tool["name"] == "Bash")
-                require(bash["input_schema"] == bash_schema, "Bash input schema diverged from the pinned Orca Claude Code capture")
-                names = {tool["name"] for tool in request.get("tools", [])}
-                require(expected_names <= names, f"native tools missing: {expected_names - names}")
                 if stage:
                     expected_id = f"{phase['name']}_{stage - 1}"
                     receipts = [block for message in request["messages"] for block in message.get("content", []) if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") == expected_id]
@@ -162,7 +157,7 @@ def main():
                 errors.append(str(error))
                 block = {"type": "text", "text": "fixture-assertion-failed"}
             (artifact / "provider.json").write_text(json.dumps(requests, indent=2))
-            response = sse(block, request["model"])
+            response = sse(wrap_tool(block), request["model"])
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(response)))

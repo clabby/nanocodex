@@ -1,3 +1,4 @@
+import { createNodeEvaluator } from '../node/code-evaluator.mjs';
 // Opt-in real-model check against the locally built Rust/WASM subagent tools.
 // Run: NANOCODEX_LIVE_ENV_FILE=/path/to/local/.env node js/nanocodex/scripts/live-spawn-harness.mjs
 // Credentials stay in this process; the report contains tool names and shapes only.
@@ -31,18 +32,11 @@ const transport = createGatewayResponses({
     const requestIndex = ++requests;
     if (requestIndex > 12) throw new Error("local harness model-request budget exceeded");
     const request = JSON.parse(init.body);
-    const declaration = request.tools?.find(tool => tool.description?.startsWith("spawn_agent\n")
-      || tool.function?.description?.startsWith("spawn_agent\n"));
-    if (declaration) {
-      const tool = declaration.function ?? declaration;
-      assert.equal(tool.strict, true, "provider must receive a strict spawn declaration");
-      assert.equal(tool.parameters.additionalProperties, false);
-      assert.ok(tool.parameters.properties.output_contract);
-      assert.equal(tool.parameters.properties.output_schema, undefined);
-      strictRequests += 1;
-    }
+    const names = request.tools?.map(tool => (tool.function ?? tool).description?.split('\n')[0]);
+    assert.deepEqual(names?.sort(), ['exec', 'wait'], 'provider receives only Code Mode entrypoints');
+    codeRequests += 1;
     console.info(JSON.stringify({ stage: "provider_request", request: requestIndex,
-      model: request.model, strict_spawn_declaration: Boolean(declaration) }));
+      model: request.model, code_only: true }));
     const response = await fetch(url, init);
     let diagnostic;
     if (!response.ok) {
@@ -61,10 +55,10 @@ const transport = createGatewayResponses({
     return response;
   },
 });
-let requests = 0, strictRequests = 0;
+let requests = 0, codeRequests = 0;
 const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
 const agent = await Agent.create({
-  module, model, thinking, toolMode: "direct",
+  module, model, thinking, codeEvaluator: createNodeEvaluator(),
   transport: Transport.hostManaged({ ...transport, websocketPreconnect: false,
     createWebSocket() { throw new Error("live harness must use streaming HTTPS"); } }),
   tools: [...Subagents.create({ maxConcurrency: 2 })],
@@ -107,11 +101,11 @@ try {
   const spawns = events.filter(event => event.type === "tool.call" && event.tool === "spawn_agent");
   const submits = events.filter(event => event.type === "tool.call" && event.tool === "submit_result");
   const waits = events.filter(event => event.type === "tool.call" && event.tool === "wait_agent");
-  const summary = { provider, model, thinking, requests, strictRequests,
+  const summary = { provider, model, thinking, requests, codeRequests,
     spawnCalls: spawns.length, childSubmissions: submits.length, waitCalls: waits.length,
     toolResults: events.filter(event => event.type === "tool.result"), finalMessage: result.finalMessage };
   console.log(JSON.stringify({ stage: "result", ...summary }, null, 2));
-  assert.ok(strictRequests > 0, "real provider never saw the strict spawn declaration");
+  assert.ok(codeRequests > 0, "real provider never saw Code Mode entrypoints");
   assert.equal(spawns.length, 1, "real model did not spawn exactly one child");
   assert.equal(submits.length, 1, "real child did not submit exactly one result");
   assert.ok(waits.length > 0, "real root did not wait for its child");

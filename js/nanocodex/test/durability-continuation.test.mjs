@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { Agent, Transport } from "../host/index.mjs";
+import { codeEvaluator } from "./quickjs-fixture.mjs";
 import { initializeBrowserEngine } from "../browser/engine.mjs";
 import { createMemoryDurabilityStore, exportDurabilityStatePage, importDurabilityStatePages } from "../runtime/durability-store.mjs";
 
@@ -50,7 +51,7 @@ test("a long WASM turn resumes its current batch after a lost checkpoint acknowl
     }
     return result;
   } };
-  const options = { module, harness: false, tools: [], durability, durabilityId,
+  const options = { module, codeEvaluator, tools: [], durability, durabilityId,
     transport: Transport.openAi({ apiKey: "fixture", WebSocketImpl: ModelSocket, websocketWarmup: false }) };
   let agent = await Agent.create(options);
   const terminals = [];
@@ -103,8 +104,8 @@ test("a long WASM turn resumes its current batch after a lost checkpoint acknowl
   }
 });
 
-for (const nested of [false, true]) {
-  test(nested ? "a nested host interruption retains the unsettled effect"
+for (const catchesHostError of [false, true]) {
+  test(catchesHostError ? "a caught nested host interruption retains the unsettled effect"
     : "a cold WASM developer append identifies unfinished work and permits recovery", { timeout: 60_000 }, async (t) => {
     const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
     let generations = 0;
@@ -117,11 +118,12 @@ for (const nested of [false, true]) {
       close() { this.readyState = 3; }
       send() {
         const index = ++generations;
-        assert.ok(index <= (nested ? 2 : 3), "settled model calls cannot be repeated");
-        const call = nested
+        assert.ok(index <= (catchesHostError ? 2 : 3), "settled model calls cannot be repeated");
+        const call = catchesHostError
           ? { type: "custom_tool_call", call_id: "effect", name: "exec",
               input: "try { text(await tools.fixture({})); } catch (error) { text('guest caught it'); }" }
-          : { type: "function_call", call_id: "effect", name: "exec_command", arguments: "{}" };
+          : { type: "custom_tool_call", call_id: "effect", name: "exec",
+              input: "text(await tools.exec_command({}));" };
         queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
           type: "response.completed", response: { id: `response-${index}`, status: "completed",
             output: index === 1 ? [call] : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "finished" }] }],
@@ -130,14 +132,10 @@ for (const nested of [false, true]) {
         }) })));
       }
     }
-    const durabilityId = `interrupted-${nested}`;
+    const durabilityId = `interrupted-${catchesHostError}`;
     const durability = createMemoryDurabilityStore(durabilityId);
-    const options = { module, harness: false, durability, durabilityId,
-      codeEvaluator: (source, { tools, text }) => {
-        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-        return new AsyncFunction("tools", "text", source)(tools, text);
-      },
-      tools: { [nested ? "fixture" : "exec_command"]: {
+    const options = { module, codeEvaluator, durability, durabilityId,
+      tools: { [catchesHostError ? "fixture" : "exec_command"]: {
         description: "A durable fixture effect", parameters: { type: "object", properties: {} },
         handler(_input, context) {
           observedIds.push(context.callId);
@@ -159,7 +157,7 @@ for (const nested of [false, true]) {
       await agent.session.shutdown().catch(() => {});
       agent = await Agent.create(options);
       const developerContext = "Synthetic startup context after recovery";
-      if (!nested) {
+      if (!catchesHostError) {
         const beforeAppend = await agent.session.context();
         await assert.rejects(agent.session.appendDeveloperMessage(developerContext), error => {
           t.diagnostic(JSON.stringify({ stage: "blocked-developer-append", operation: "older",
@@ -172,7 +170,7 @@ for (const nested of [false, true]) {
         assert.deepEqual(await agent.session.context(), beforeAppend,
           "a blocked append must leave the committed conversation unchanged");
       }
-      if (nested) {
+      if (catchesHostError) {
         // Exercise the real WASM admission failure, not a mocked Worker error.
         // The failed host attempt left "older" pending in the durable ledger.
         await assert.rejects(agent.turn.prompt({ id: "later", input: "follow on" }).result(), error => {
@@ -190,7 +188,7 @@ for (const nested of [false, true]) {
       assert.equal(dispatched, 1);
       assert.equal(observedIds.length, 2);
       assert.equal(observedIds[0], observedIds[1]);
-      if (!nested) {
+      if (!catchesHostError) {
         await agent.session.appendDeveloperMessage(developerContext);
         await agent.session.shutdown();
         agent = await Agent.create(options);

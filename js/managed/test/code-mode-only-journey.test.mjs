@@ -46,6 +46,7 @@ export class FixtureSession extends DurableAgentSession {
   async fetch(request) {
     if(new URL(request.url).pathname==='/__seed') {
       const {restricted}=await request.json();
+      await (await super.fetch(new Request("https://fixture.internal/__initialize"))).body?.cancel();
       this.ctx.storage.sql.exec("INSERT OR IGNORE INTO session_state(singleton,session_id,owner_id,organization_id,team_id,authorization_epoch,public_origin,runtime_profile,last_active) VALUES(1,?,?,?,?,1,'https://fixture.internal/','managed',?)",'${thread}','${owner}','${organization}','${team}',Date.now());
       this.ctx.storage.sql.exec("INSERT OR IGNORE INTO managed_configuration VALUES(1,?)",JSON.stringify({...(restricted?{tools:['exec_command','update_plan']}:{}),environment:{files:[],skills:[],setup_commands:[],network:{access:'enabled'}}}));
       this.ctx.storage.sql.exec("UPDATE managed_agent_settings SET model='gpt-6.1-sol',thinking='low'");

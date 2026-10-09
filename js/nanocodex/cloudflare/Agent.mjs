@@ -41,6 +41,7 @@ const INTERNAL_RUNTIME = Symbol.for("nanocodex.cloudflare.internalRuntime");
 const INTERNAL_CONFIGURATION = Symbol.for("nanocodex.cloudflare.internalConfiguration");
 const INTERNAL_FORK_RESUME = Symbol.for("nanocodex.cloudflare.internalForkResume");
 const EPHEMERAL_APPLICATION_OPTIONS = new Set([
+  "codeEvaluator",
   "instantToolSteering",
   "beforeCompaction",
   "additionalInstructions",
@@ -55,6 +56,7 @@ const EPHEMERAL_APPLICATION_OPTIONS = new Set([
   "workspace",
 ]);
 const APPLICATION_OPTIONS = new Set([
+  "codeEvaluator",
   "instantToolSteering",
   "beforeCompaction",
   "additionalInstructions",
@@ -410,6 +412,10 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
     && (!internalRuntime || typeof internalRuntime !== "object" || Array.isArray(internalRuntime))) {
     throw new TypeError("Cloudflare Agent internal runtime options must be an object");
   }
+  const codeEvaluator = internalRuntime?.codeEvaluator ?? configured.codeEvaluator;
+  if (typeof codeEvaluator !== "function") {
+    throw new TypeError("Cloudflare Code Mode requires an explicit codeEvaluator");
+  }
   if (internalRuntime?.onSocketTiming !== undefined
     && typeof internalRuntime.onSocketTiming !== "function") {
     throw new TypeError("Cloudflare Agent socket timing hook must be a function");
@@ -536,6 +542,8 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
           traceTool: internalRuntime?.traceTool,
         },
         harnesses,
+        toolMode: "code-only",
+        codeEvaluator,
         model: internalConfiguration.model, thinking: internalConfiguration.thinking,
         instructions: agentOptions.instructions ?? agentOptions.additionalInstructions,
         tools: agentOptions.tools, module, durability, durabilityId: stateId,
@@ -701,8 +709,8 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle, prep
       }),
       module,
       rawApiEvents: internalRuntime?.rawApiEvents,
-      toolMode: internalRuntime?.toolMode ?? "direct",
-      codeEvaluator: internalRuntime?.codeEvaluator,
+      toolMode: "code-only",
+      codeEvaluator,
       [Symbol.for("nanocodex.browser.internalRuntime")]: {
         traceTool: internalRuntime?.traceTool,
         codeEffectJournal: internalRuntime?.codeEffectJournal,
@@ -806,6 +814,9 @@ function errorMessage(error) {
 export async function createEphemeral(module, owner, options = {}) {
   const { egress, subject } = resolveOwner(owner);
   const agentOptions = ephemeralApplicationOptions(options);
+  if (typeof agentOptions.codeEvaluator !== "function") {
+    throw new TypeError("Cloudflare Code Mode requires an explicit codeEvaluator");
+  }
   const endpoint = cloudflareEgress({
     binding: scopeCloudflareEgress(egress, subject),
   });
@@ -830,7 +841,7 @@ export async function createEphemeral(module, owner, options = {}) {
     agent = await HostAgent.create({
       ...agentOptions,
       module,
-      toolMode: "direct",
+      toolMode: "code-only",
       transport,
     });
     await withTimeout(
@@ -878,7 +889,7 @@ function applicationOptions(options) {
   for (const name of Object.keys(options)) {
     if (!APPLICATION_OPTIONS.has(name)) {
       throw new TypeError(
-        `Cloudflare Agent.create does not accept ${name}; only durabilityId, eventPersistence, instructions, additionalInstructions, terminalReceiptRetention, and tools are configurable`,
+        `Cloudflare Agent.create does not accept ${name}; only durabilityId, eventPersistence, instructions, additionalInstructions, terminalReceiptRetention, codeEvaluator, and tools are configurable`,
       );
     }
   }

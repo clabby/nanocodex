@@ -1,3 +1,4 @@
+import { createNodeEvaluator } from './code-evaluator.mjs';
 import { retryAfterAdvice } from "../runtime/retry-after.mjs";
 
 import { createCodeEffectIdentity } from "../runtime/code-effect-identity.mjs";
@@ -28,9 +29,12 @@ const MPP_CLIENT_PROTOCOL_ERROR_CLOSE_CODE = 3008;
 
 export function createNodeHost(options = {}) {
   const preservation = createBeforeCompaction(options.beforeCompaction);
-  const toolMode = options.toolMode ?? "code";
-  if (toolMode !== "code" && toolMode !== "code-only" && toolMode !== "direct") {
-    throw new TypeError("toolMode must be code, code-only or direct");
+  const toolMode = options.toolMode ?? "code-only";
+  if (toolMode !== "code-only") {
+    throw new TypeError("toolMode must be code-only");
+  }
+  if (options.codeEvaluator !== undefined && typeof options.codeEvaluator !== "function") {
+    throw new TypeError("codeEvaluator must be a function");
   }
   const toolsRouter = options.tools?.[toolRouterBrand]
     ? options.tools[toolRouterRuntime]
@@ -41,9 +45,6 @@ export function createNodeHost(options = {}) {
   }
   if (toolsMcp && options.mcpServers) {
     throw new TypeError("MCP is already configured in Tools");
-  }
-  if ((toolsMcp || options.mcpServers) && toolMode === "direct") {
-    throw new TypeError("remote MCP requires Code Mode");
   }
   const toolsLifecycle = options.tools?.[toolRuntimeLifecycle];
   toolsLifecycle?.available();
@@ -58,7 +59,7 @@ export function createNodeHost(options = {}) {
   const code = createCodeRuntime(options.tools, {
     require: createRequire(resolve(options.workspace ?? process.cwd(), ".nanocodex-code-mode.cjs")),
     console: new Console({ stdout: process.stderr, stderr: process.stderr }),
-    evaluate: options.codeEvaluator,
+    evaluate: options.codeEvaluator ?? createNodeEvaluator(),
     effectJournal: options.codeEffectJournal,
     effectIdentity: options.codeEffectJournal ? effectIdentity.resolve : undefined,
   });

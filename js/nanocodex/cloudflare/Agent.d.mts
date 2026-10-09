@@ -96,6 +96,8 @@ export function create(owner: create.Owner, options?: create.Options): Promise<c
 export declare namespace create {
   type Owner = DurableObjectOwner;
   type Options = Readonly<{
+    /** Worker-compatible isolated evaluator; required unless the owning runtime supplies one. */
+    codeEvaluator?: import("../types.mjs").CodeEvaluator;
     /** Observer-only instant steering; disabled unless explicitly enabled. */
     instantToolSteering?: boolean | undefined;
     /** Awaited host preservation barrier; scoped to this root, never inherited by children. */
@@ -115,7 +117,7 @@ export declare namespace create {
      * The caller must preserve older exact-ID results before selecting this.
      */
     terminalReceiptRetention?: number | undefined;
-    /** Children exist only in memory and are discarded when the root runtime shuts down. */
+    /** Child topology and history use the root's separate durable subagent journal. */
     tools?: ToolConfiguration<SubagentTool> | undefined;
   }>;
   type ReturnType = Agent;
@@ -124,12 +126,14 @@ export declare namespace create {
 /** Creates one non-durable Rust/WASM Agent in the current Cloudflare isolate. */
 export function createEphemeral(
   owner: createEphemeral.Owner,
-  options?: createEphemeral.Options,
+  options: createEphemeral.Options,
 ): Promise<createEphemeral.ReturnType>;
 export declare namespace createEphemeral {
   type Owner = DurableObjectOwner;
   type Options = Readonly<AgentOptions & {
-    /** Caller-owned tools exposed directly to the model. */
+    /** Worker-compatible isolated Code Mode evaluator. */
+    codeEvaluator: import("../types.mjs").CodeEvaluator;
+    /** Caller-owned tools available inside exec. */
     tools?: ToolConfiguration<SubagentTool> | undefined;
   }>;
   type ReturnType = DefaultAgent;

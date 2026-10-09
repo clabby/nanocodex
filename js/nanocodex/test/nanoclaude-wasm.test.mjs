@@ -9,6 +9,8 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { createSqliteDurabilityStore, sqliteDurabilitySchema } from "../runtime/durability-store.mjs";
 
+import { codeEvaluator } from "./quickjs-fixture.mjs";
+
 const signed = [
   { type: "thinking", thinking: "synthetic authorized effect", signature: "opaque-signature/+==", binding: { raw: "retain exact payload" } },
   { type: "redacted_thinking", data: "opaque-redacted/+==", binding: "unchanged" },
@@ -16,7 +18,7 @@ const signed = [
   { type: "web_search_tool_result", tool_use_id: "server-search", content: [{ type: "web_search_result", url: "https://example.invalid/fixture", title: "fixture", encrypted_content: "opaque-encrypted" }], opaque: "native-result" },
   { type: "mcp_tool_use", id: "mcp-read", name: "read", server_name: "fixture", input: {}, native_extension: "mcp-call" },
   { type: "mcp_tool_result", tool_use_id: "mcp-read", content: [{ type: "text", text: "native MCP receipt", custom: { retained: true } }], native_extension: "mcp-result" },
-  { type: "tool_use", id: "effect-once", name: "effect", input: { key: "a" }, caller: { type: "direct" } },
+  { type: "tool_use", id: "effect-once", name: "exec", input: { code: 'text(await tools.effect({key:"a"}))' }, caller: { type: "direct" } },
 ];
 const receipt = [
   { type: "text", text: "effect committed", opaque: "receipt-extension" },
@@ -108,7 +110,7 @@ for (const [target, subscription] of [["node",false], ["browser",false], ["node"
     let authCalls = 0;
     const invocations = [];
     const options = {
-      endpoint, model: "fixture-model", cache: "1h",
+      endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, cache: "1h",
       ...(subscription ? {compatibilityProfile: "subscription", subscriptionIdentity: {installId: "synthetic-wasm-install", platform: "linux", arch: "x64"}} : {}),
       contextWindowTokens: 100_000, autoCompactWindowTokens: 100_000,
       ...(target === "browser" ? { module: await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url)) } : {}),
@@ -116,7 +118,7 @@ for (const [target, subscription] of [["node",false], ["browser",false], ["node"
       tools: [{ name: "effect", description: "Synthetic effect", inputSchema: { type: "object", properties: { key: { type: "string" } }, required: ["key"] }, handler: (value, invocation) => {
         effects++; invocations.push(invocation);
         assert.deepEqual(value, { key: "a" });
-        return { content: receipt, isError: false, structuredResult: { committed: true } };
+        return { content: receipt, isError: false };
       } }],
       durabilityId: `native-${target}-${subscription}`,
     };
@@ -131,12 +133,15 @@ for (const [target, subscription] of [["node",false], ["browser",false], ["node"
       assert.deepEqual(requests[2].body.messages[1].content,
         subscription ? retained.map(block => block.type === "tool_use" ? {...block,name: "_" + block.name} : block) : retained,
         "summary replacement removes prefix-bound thinking and preserves every other block exactly");
-      assert.deepEqual(requests[2].body.messages[2].content[0].content, receipt);
+      const effectReceipt = requests[2].body.messages[2].content[0].content;
+      assert.match(JSON.stringify(effectReceipt), /effect committed/);
+      assert.match(JSON.stringify(effectReceipt), /receipt-extension/);
+      assert.match(JSON.stringify(effectReceipt), /cG5n/);
       assert.equal(requests[2].body.messages[2].content[0].tool_use_id, "effect-once");
-      assert.deepEqual(requests[0].body.cache_control, { type: "ephemeral", ttl: "1h" });
-      assert.deepEqual(requests[0].body.tools.map(tool => tool.name), [subscription ? "_effect" : "effect"]);
+      assert.deepEqual(subscription ? requests[0].body.system[1].cache_control : requests[0].body.cache_control, { type: "ephemeral", ttl: "1h" });
+      assert.deepEqual(requests[0].body.tools.map(tool => tool.name), subscription ? ["_exec", "_wait"] : ["exec", "wait"]);
       assert.equal(requests[0].headers["x-api-key"], "synthetic-only");
-      assert.equal(invocations[0].callId, "effect-once");
+      assert.ok(invocations[0].callId, "nested effect receives a runtime call identity");
       assert.ok(invocations[0].sessionId && invocations[0].turnId);
       await shutdown(agent); agent = undefined;
       database.close(); database = sqlite(path);
@@ -147,7 +152,12 @@ for (const [target, subscription] of [["node",false], ["browser",false], ["node"
       assert.ok(usage);
       assert.equal(effects, 1, "completed tool receipt retained across actual disk reopen");
       assert.equal(requests[3].body.container, "stable-container");
-      assert.deepEqual(requests[3].body.messages.slice(0, 3), requests[2].body.messages);
+      // Subscription cache markers move to the newest message on each request.
+      const withoutCacheMarkers = messages => messages.map(message => ({ ...message,
+        content: message.content.map(({ cache_control, ...block }) => block),
+      }));
+      assert.deepEqual(withoutCacheMarkers(requests[3].body.messages.slice(0, 3)),
+        withoutCacheMarkers(requests[2].body.messages));
       assert.deepEqual(requests[3].body.tools, requests[0].body.tools);
       if (subscription) {
         const identities=requests.map(({body})=>JSON.parse(body.metadata.user_id));
@@ -191,11 +201,11 @@ for (const [cache, expected] of [
   test(`actual WASM explicit cache policy ${cache}`, { timeout: 10_000 }, async t => {
     const Claude = await sdk();
     const { endpoint, requests } = await fixture(t, () => sse(text("CACHE_OK")));
-    const agent = await Claude.create({ endpoint, model: "fixture-model", auth: { apiKey: "synthetic-only" }, cache });
+    const agent = await Claude.create({ endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, auth: { apiKey: "synthetic-only" }, cache });
     try {
       assert.equal((await run(agent, "cache fixture")).finalMessage, "CACHE_OK");
       assert.deepEqual(requests[0].body.cache_control, expected);
-      assert.equal(requests[0].body.tools?.length ?? 0, 0, "no ambient tools, exec or tool_search are installed");
+      assert.deepEqual(requests[0].body.tools.map(tool => tool.name), ["exec", "wait"]);
       assert.equal(requests[0].body.model, "fixture-model");
     } finally { await shutdown(agent); }
   });
@@ -206,7 +216,7 @@ test("actual WASM host-auth failure is redacted and recoverable without ambient 
   const { endpoint, requests } = await fixture(t, () => sse(text("AUTH_RECOVERED")));
   let unavailable = true;
   let calls = 0;
-  const agent = await Claude.create({ endpoint, model: "fixture-model", auth: { headers: () => {
+  const agent = await Claude.create({ endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, auth: { headers: () => {
     calls++;
     if (unavailable) throw new Error("SYNTHETIC_SECRET_MUST_NOT_LEAK");
     return { "x-api-key": "synthetic-recovered" };
@@ -223,14 +233,14 @@ test("actual WASM host-auth failure is redacted and recoverable without ambient 
   } finally { await shutdown(agent); }
 });
 
-test("actual WASM host-tool throw becomes one redacted native error result", { timeout: 10_000 }, async t => {
+test("actual WASM nested host-tool throw becomes one failed exec result", { timeout: 10_000 }, async t => {
   const Claude = await sdk();
   const { endpoint, requests } = await fixture(t, index => index === 1
-    ? sse([{ type: "tool_use", id: "failed-effect", name: "effect", input: {} }], "tool_use")
+    ? sse([{ type: "tool_use", id: "failed-effect", name: "exec", input: { code: "text(await tools.effect({}))" } }], "tool_use")
     : sse(text("TOOL_FAILURE_HANDLED")));
   let calls = 0;
-  const agent = await Claude.create({ endpoint, model: "fixture-model", auth: { apiKey: "synthetic-only" },
-    tools: [{ name: "effect", description: "Synthetic throwing tool", handler: () => { calls++; throw new Error("SYNTHETIC_SECRET_MUST_NOT_LEAK"); } }],
+  const agent = await Claude.create({ endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, auth: { apiKey: "synthetic-only" },
+    tools: [{ name: "effect", description: "Synthetic throwing tool", handler: () => { calls++; throw new Error("SYNTHETIC_TOOL_FAILURE"); } }],
   });
   try {
     assert.equal((await run(agent, "execute throwing fixture")).finalMessage, "TOOL_FAILURE_HANDLED");
@@ -239,7 +249,7 @@ test("actual WASM host-tool throw becomes one redacted native error result", { t
     assert.equal(block.type, "tool_result");
     assert.equal(block.tool_use_id, "failed-effect");
     assert.equal(block.is_error, true);
-    assert.doesNotMatch(JSON.stringify(requests[1].body), /SYNTHETIC_SECRET_MUST_NOT_LEAK/);
+    assert.match(block.content, /SYNTHETIC_TOOL_FAILURE/);
   } finally { await shutdown(agent); }
 });
 
@@ -256,7 +266,7 @@ test("actual WASM cancellation aborts a live Messages fetch and allows the next 
     }
     return sse(text("CANCEL_RECOVERED"));
   });
-  const agent = await Claude.create({ endpoint, model: "fixture-model", auth: { apiKey: "synthetic-only" } });
+  const agent = await Claude.create({ endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, auth: { apiKey: "synthetic-only" } });
   try {
     const turn = agent.turn.prompt(input("wait for response"));
     const result = turn.result(); void result.catch(() => {});
@@ -278,7 +288,7 @@ test("actual WASM live effect cancellation persists unknown outcome through SQLi
   const { endpoint, requests } = await fixture(t, index => index === 1 ? sse(signed, "tool_use") : sse(text("UNKNOWN_RECONCILED")));
   let calls = 0;
   let invocation;
-  const options = { endpoint, model: "fixture-model", auth: { apiKey: "synthetic-only" }, durabilityId: "effect-cancellation",
+  const options = { endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, auth: { apiKey: "synthetic-only" }, durabilityId: "effect-cancellation",
     tools: [{ name: "effect", description: "Synthetic interrupted effect", handler: (_value, context) => {
       calls++; invocation = context; started.resolve(); return new Promise(() => {});
     } }],
@@ -318,7 +328,7 @@ test("actual WASM cancelOnAdmission never issues a queued successor Messages req
     if (index === 1) { response.write(': synthetic blocked response\n\n'); started.resolve(); return undefined; }
     return sse(text("ADMISSION_CANCEL_RECOVERED"));
   });
-  const agent = await Claude.create({ endpoint, model: "fixture-model", auth: { apiKey: "synthetic-only" } });
+  const agent = await Claude.create({ endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, auth: { apiKey: "synthetic-only" } });
   try {
     const active = agent.turn.prompt({ input: "hold active request" });
     const activeResult = active.result(); void activeResult.catch(() => {});
@@ -339,9 +349,9 @@ test("actual WASM Claude live route starts idle turns, steers active turns, and 
   const started = Promise.withResolvers();
   const release = Promise.withResolvers();
   const { endpoint, requests } = await fixture(t, index => index === 1
-    ? sse([{ type: "tool_use", id: "held", name: "hold", input: {} }], "tool_use")
+    ? sse([{ type: "tool_use", id: "held", name: "exec", input: { code: "text(await tools.hold({}))" } }], "tool_use")
     : sse(text(index === 2 ? "ROUTED_DONE" : "CONTENT_DONE")));
-  const agent = await Claude.create({ endpoint, model: "fixture-model", auth: { apiKey: "synthetic-only" },
+  const agent = await Claude.create({ endpoint, model: "fixture-model", maxTokens: 1024, codeEvaluator, auth: { apiKey: "synthetic-only" },
     tools: [{ name: "hold", description: "Held synthetic tool", handler: async () => { started.resolve(); await release.promise; return "held"; } }],
   });
   try {

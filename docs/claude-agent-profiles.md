@@ -1,17 +1,20 @@
 # Claude project agents and forked skills
 
-The native CLI discovers project agent definitions in `.claude/agents/**/*.md`.
-Call `ListAgentProfiles` for a bounded catalog and diagnostics, then invoke
-`Agent` with `subagent_type` set to a catalog name. `general-purpose` creates a
-fresh child without a named profile; `fork` copies the native conversation at
-its safe pre-tool-batch boundary.
+Project skills with `context: fork` may select a profile from
+`.claude/agents/**/*.md` using their `agent` frontmatter. Direct delegation uses
+the shared `spawn_agent` contract, with no native profile catalog or selection
+arguments. Every child starts with a fresh conversation.
+
+Permission policies must use canonical tool names. Policies containing removed
+agent aliases (including saved policies and scoped `Agent(...)` rules) fail
+closed with a migration error before model execution.
 
 ```yaml
 ---
 name: reviewer
 description: Review changes without modifying files
 model: haiku
-tools: Read, Glob, Grep, Agent, TaskOutput
+tools: Read, Glob, Grep, spawn_agent, wait_agent
 permissionMode: plan
 ---
 Review the requested changes and return specific findings.
@@ -30,42 +33,41 @@ most 32 KiB per definition.
 The host selects the model before the first child request and appends the
 profile instructions to native child instructions. Tool allow/deny lists and
 permission mode intersect inherited host restrictions. Descendants inherit the
-restriction chain, including an explicitly selected model. `SubmitResult`
+restriction chain, including an explicitly selected model. `submit_result`
 remains available for the registry's result protocol. Profile definitions grant
 no permissions. Cross-family delegation and Workflow execution are unavailable
 inside a profiled child. Read restrictions also disable aggregate project,
 profile and skill discovery and automatic project-context attachments.
 
-The admitted profile is saved with the child workspace. `Agent` resume retains
-its profile, model and workspace even if the project definition changes;
-profile, isolation and model overrides on resume are rejected. Task-tree agent
-IDs and retained runtimes remain process-local. A saved workspace binding alone
-does not restore a child runtime after process restart.
+The admitted profile is saved with the child workspace. `send_agent_message`
+can delegate another task to an owned child while preserving its profile and
+model. Live child runtimes remain process-local; durable roots restore the
+registry's child identities, statuses, and committed conversation boundaries.
 
 ## Isolated child worktrees
 
-Set `isolation: worktree` in a profile or pass `isolation: "worktree"` to `Agent`.
+Set `isolation: worktree` in a skill-selected profile.
 The host creates a separate Git worktree and branch from the parent's current
 HEAD. Uncommitted parent edits are not copied. The parent's workspace and branch
 do not change. The parent's EnterWorktree permission and inherited profile
 restrictions must permit creation. A Git repository with an existing HEAD is
 required; existing destinations or branches are never adopted.
 
-Agent and TaskOutput receipts include the isolated path and branch. A completed
-child retains the worktree for resume. `CloseAgent` first closes the actual
-registry subtree, then releases its workspace pins and removes only owned,
-unchanged worktrees. Dirty, untracked or ignored files, new commits, changed
-repository identities, and other active pins cause preservation with a reason
-in the cleanup receipt. This is workspace isolation, not an OS sandbox: Bash
-retains the CLI's configured host permissions.
+Use `tools.wait_agent(...)` to wait for a skill child and
+`tools.close_agent(...)` to close it.
+Closing releases subtree workspace pins and removes owned unchanged worktrees;
+dirty or committed worktrees remain. This is workspace isolation, not an OS
+sandbox: Bash retains the CLI's configured host permissions.
 
 ## Forked skills
 
 A skill may request `context: fork`, an optional named `agent`, a Claude `model`,
-and `background: true`. The native Skill tool expands arguments and starts a
-real clean registry child, with the existing profile/permission checks. Skill
-forks do not copy the caller's conversation. Inline skills continue to return
-expanded project guidance. `allowed-tools` remains metadata and grants no
+and `background: true` metadata. `tools.Skill(...)` inside Code Mode expands
+arguments and starts a real clean registry child, with the existing
+profile/permission checks. Skill forks return immediately with the canonical
+spawn receipt, regardless of the background flag; use `tools.wait_agent` to
+wait. They do not copy the caller's conversation. Inline skills continue to
+return expanded project guidance. `allowed-tools` remains metadata and grants no
 permissions. Dynamic shell interpolation and skill-defined hooks remain
 unsupported.
 
@@ -89,5 +91,5 @@ Run `cargo +1.97.0 test --locked -p nanocodex-bin --test claude_skills -- --noca
 for the shipped CLI journeys. Only model inference is simulated. Artifacts under
 `output/claude-profiles-cli/` retain exact commands, provider requests, tool
 receipts, terminal output and outcomes for profile restrictions, inherited model
-selection, fresh skill context, real resume after definition edits, and Git
+selection, fresh skill context, canonical spawn denial, and Git
 worktree cleanup/preservation.

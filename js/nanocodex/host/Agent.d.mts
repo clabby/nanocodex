@@ -15,9 +15,10 @@ import type { Workspace } from "../runtime/workspace.mjs";
 import type { Tools } from "../tools/Tools.mjs";
 
 export type Agent = DefaultAgent;
-type ToolExposureOptions =
-  | { mcp?: false | undefined; toolMode?: "code" | "code-only" | "direct" | undefined }
-  | { mcp: McpServers; toolMode?: "code" | "code-only" | undefined };
+type ToolExposureOptions = {
+  mcp?: McpServers | false | undefined;
+  toolMode?: "code-only" | undefined;
+};
 
 /** Creates Rust/WASM in the current Web API host isolate. */
 export function create(options: import('../runtime/claude.mjs').Options & { harness: 'claude' }): Promise<import('../runtime/claude.mjs').Agent>;
@@ -38,7 +39,7 @@ export declare namespace create {
     executionEnvironment?: ExecutionEnvironment | undefined;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
-    /** Opt-in durable direct-tool and nested Code Mode receipts for safe cold recovery. */
+    /** Opt-in durable application-tool and Code Mode receipts for safe cold recovery. */
     codeEffectJournal?: CodeEffectJournal | undefined;
     /** Defaults to the same-origin Nanocodex `/api/responses` proxy. */
     transport?: ResponsesTransport | undefined;

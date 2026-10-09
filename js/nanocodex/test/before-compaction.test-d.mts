@@ -31,7 +31,7 @@ const transport = Transport.openAi({ apiKey: "fixture" });
 const nodeOptions: NodeAgent.create.Options = { transport, beforeCompaction };
 const hostOptions: HostAgent.create.Options = { beforeCompaction };
 const durableOptions: CloudflareAgent.create.Options = { beforeCompaction };
-const ephemeralOptions: CloudflareAgent.createEphemeral.Options = { beforeCompaction };
+const ephemeralOptions: CloudflareAgent.createEphemeral.Options = { beforeCompaction, codeEvaluator: async () => {} };
 const omitted: NodeAgent.create.Options = { transport };
 const disabled: HostAgent.create.Options = { beforeCompaction: undefined };
 void nodeOptions; void hostOptions; void durableOptions; void ephemeralOptions; void omitted; void disabled;

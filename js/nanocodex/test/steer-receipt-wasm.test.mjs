@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { Agent, Transport } from "../host/index.mjs";
+import { codeEvaluator } from "./quickjs-fixture.mjs";
 import { createMemoryDurabilityStore } from "../runtime/durability-store.mjs";
 import { steerInputKey } from "../cloudflare/Agent.mjs";
 
@@ -35,7 +36,7 @@ test("real WASM atomic steering receipt recovers a lost storage ACK without reap
       } }) }));
     }
   }
-  const options = { module, harness: false, tools: [], rawApiEvents: false, durability, durabilityId,
+  const options = { codeEvaluator, module, tools: [], rawApiEvents: false, durability, durabilityId,
     transport: Transport.openAi({ apiKey: "fixture", WebSocketImpl: ModelSocket, websocketWarmup: false }) };
   let agent = await Agent.create(options);
   const wait = async count => { for (let i = 0; pending.length < count && i < 500; i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.equal(pending.length, count); };

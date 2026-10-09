@@ -84,7 +84,7 @@ const RESULT_SCHEMA = Object.freeze({
   },
 });
 
-const WORLD_INSTRUCTIONS = `You are one node in the browser World's persistent task tree. Guild Dispatch is the invisible root and every addressed resident is one retained child. Use act for your own body and canonical subagent messages for coordination.
+const WORLD_INSTRUCTIONS = `You are one node in the browser World's persistent task tree. Guild Dispatch is the invisible root and every addressed resident is one retained child. Call tools.act for your own body and canonical subagent tools for coordination inside Code Mode exec cells.
 
 Before residents start, Guild Dispatch turns Scout's raw objective into a few semantic formation tasks and dimensionless paths, assigning one or more squads to each path. Task text names qualitative regions, relations, or subgroup responsibilities only—never pixels or resident owners. Every resident receives only its semantic task plus stable group order.
 
@@ -245,7 +245,7 @@ async function coordinatorAgent(): Promise<DefaultAgent> {
     instructions: WORLD_INSTRUCTIONS,
     model: "gpt-6-luna",
     thinking: "none",
-    toolMode: "direct",
+    toolMode: "code-only",
     transport: Transport.hostManaged(),
     tools: [
       {

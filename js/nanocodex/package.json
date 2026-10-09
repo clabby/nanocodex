@@ -216,6 +216,7 @@
   "dependencies": {
     "@cfworker/json-schema": "4.1.1",
     "@eduoj/wasm-clang": "1.0.0",
+    "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "@microsoft/dev-tunnels-ssh": "3.12.40",
     "@microsoft/dev-tunnels-ssh-keys": "3.12.40",
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -225,6 +226,7 @@
     "minisearch": "7.2.0",
     "nanocodex-tools": "workspace:*",
     "pako": "2.1.0",
+    "quickjs-emscripten-core": "0.32.0",
     "sprintf-js": "1.1.3",
     "wata": "0.4.0",
     "ws": "^8.18.3"
@@ -246,14 +248,12 @@
     }
   },
   "devDependencies": {
-    "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "binaryen": "132.0.0",
     "esbuild": "0.28.1",
     "hyparquet-writer": "0.16.6",
     "mppx": "0.9.1",
     "ox": "1.6.2",
     "pkg-pr-new": "0.0.79",
-    "quickjs-emscripten-core": "0.32.0",
     "typescript": "5.9.3",
     "viem": "2.55.13",
     "miniflare": "4.20260730.0"

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Shipped CLI over a PTY and real RFC6455 TCP; only Messages inference is synthetic."""
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse, base64, fcntl, hashlib, importlib.util, json, os, pty, select, socket, struct, subprocess, termios, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -54,7 +55,7 @@ def main():
  class Provider(BaseHTTPRequestHandler):
   def log_message(self,*_): pass
   def do_POST(self):
-   body=json.loads(self.rfile.read(int(self.headers['content-length']))); requests.append({'phase':state['phase'],'body':body})
+   body=json.loads(self.rfile.read(int(self.headers['content-length']))); body = normalize_request(body, artifact); requests.append({'phase':state['phase'],'body':body})
    try:
     if state['pending']:
      call,step=state['pending']; results=[b for m in body['messages'] for b in m.get('content',[]) if isinstance(b,dict) and b.get('type')=='tool_result' and b.get('tool_use_id')==call]; require(len(results)==1,f'missing receipt {call}'); result=results[0]; receipts.append({'phase':state['phase'],'result':result}); require(bool(result.get('is_error'))==step[2],f'wrong error {call}: {result}')
@@ -66,7 +67,7 @@ def main():
     else:
      events.append({'phase':state['phase'],'at':time.time(),'message':body['messages'][-1]}); block={'type':'text','text':state['phase']+'-complete'}
    except Exception as e: errors.append(str(e)); block={'type':'text','text':'fixture-failed'}
-   data=sse(block,body['model']); self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+   data=sse(wrap_tool(block),body['model']); self.send_response(200); self.send_header('Content-Type','text/event-stream'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
  server=ThreadingHTTPServer(('127.0.0.1',0),Provider); threading.Thread(target=server.serve_forever,daemon=True).start()
  common=['--claude','--model','claude-sonnet-5-5','--claude-api-key','synthetic-key','--claude-messages-url',f'http://127.0.0.1:{server.server_port}/v1/messages','--cwd',str(workspace),'--browser=none','--mcp-defaults','false','--mcp-codex-config','false','--image-generation','false','--subagents','false','--memory','false']
  def phase(name,steps): state.update(phase=name,steps=steps,index=0,pending=None)

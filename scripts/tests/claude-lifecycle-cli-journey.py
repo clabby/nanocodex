@@ -6,6 +6,7 @@ commands, HTTP bodies, hook inputs and CLI output for every scenario.
 import argparse
 import json
 import os
+from claude_code_fixture import wrap_tool, normalize_request
 from pathlib import Path
 import shlex
 import signal
@@ -70,7 +71,7 @@ else: print('{}')
     class Provider(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
         def do_POST(self):
-            body = json.loads(self.rfile.read(int(self.headers['content-length'])))
+            body = normalize_request(json.loads(self.rfile.read(int(self.headers['content-length']))), artifact)
             phase['calls'] += 1
             requests.append({'phase': phase['name'], 'body': body})
             (artifact / 'provider.json').write_text(json.dumps(requests, indent=2))
@@ -97,16 +98,18 @@ else: print('{}')
                             if any(b.get('type') == 'tool_result' for m in body['messages'] for b in m.get('content', [])):
                                 block = {'type': 'text', 'text': 'child-lifecycle-answer'}
                             else:
-                                block = {'type': 'tool_use', 'id': 'child-submit', 'name': 'SubmitResult', 'input': {'output': 'child-lifecycle-answer'}}
+                                block = {'type': 'tool_use', 'id': 'child-submit', 'name': 'submit_result', 'input': {'output': 'child-lifecycle-answer'}}
                         elif phase['calls'] == 1:
-                            block = {'type': 'tool_use', 'id': 'child-once', 'name': 'Agent', 'input': {'description': 'lifecycle child', 'prompt': 'CHILD-LIFECYCLE-FIXTURE', 'subagent_type': 'general-purpose'}}
+                            block = {'type': 'tool_use', 'id': 'child-once', 'name': 'spawn_agent', 'input': {'role': 'lifecycle child', 'task': 'CHILD-LIFECYCLE-FIXTURE', 'output_contract': {'kind':'string'}}}
+                        elif 'child-wait' not in content:
+                            block = {'type':'tool_use','id':'child-wait','name':'wait_agent','input':{'agent_ids':[1],'timeout_ms':20000}}
                         else:
                             require('child-lifecycle-answer' in content, 'child result missing')
                             block = {'type': 'text', 'text': 'parent-lifecycle-answer'}
                     else: raise AssertionError('gated prompt reached provider')
                 except Exception as error:
                     errors.append(str(error)); block = {'type': 'text', 'text': 'fixture-error'}
-                response = sse(block, body['model'])
+                response = sse(wrap_tool(block), body['model'])
                 self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(response)))
@@ -150,7 +153,7 @@ else: print('{}')
             require(len(requests) == before_requests + 1, 'default host changed provider count')
             default_wire.append(requests[-1]['body'])
             with sqlite3.connect(database) as db:
-                rows = db.execute('SELECT revision, payload FROM nanocodex_durable_states').fetchall()
+                rows = db.execute('SELECT revision, payload FROM nanocodex_durable_states WHERE state_id = ?', (name,)).fetchall()
             require(len(rows) == 1, 'unexpected default journal count')
             revision, payload = rows[0]
             journal = json.loads(payload)['nanocodex_durable_state']

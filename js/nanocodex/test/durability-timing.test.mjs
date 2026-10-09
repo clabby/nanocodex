@@ -30,7 +30,7 @@ for (const mode of ["control", "recovered", ...(process.env.NANOCODEX_TIMING_LEG
       await delay(index === 1 ? 120 : 420);
       const response = { id: `response-${index}`, status: "completed", end_turn: index === 2,
         output: index === 1
-          ? [{ type: "function_call", call_id: "native-marker", name: "marker", arguments: "{}" }]
+          ? [{ type: "custom_tool_call", call_id: "native-marker", name: "exec", input: "text(await tools.marker({}));" }]
           : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "finished" }] }],
         usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 },
       };
@@ -69,7 +69,7 @@ for (const mode of ["control", "recovered", ...(process.env.NANOCODEX_TIMING_LEG
       const firstStart = firstEvents.find(({ event }) => event.type === "run.started").observedAt;
       const observedElapsedMs = terminal.observedAt - firstStart;
       assert.equal(payload.model_calls, 2);
-      assert.equal(payload.tool_calls, 1);
+      assert.equal(payload.tool_calls, 2, "exec and its nested marker are retained");
       assert.ok(payload.model_duration_ns >= 500_000_000, "both original model durations survive recovery");
       assert.ok(payload.tool_wall_duration_ns >= 130_000_000, "the original native tool timing survives recovery");
       assert.equal(payload.duration_ms, Math.floor(payload.duration_ns / 1e6));

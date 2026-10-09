@@ -2,6 +2,7 @@
 """Real CLI PTY, real clock, session reopen and command process cancellation.
 Only the remote Messages endpoint is synthetic; there is no fake clock.
 """
+from claude_code_fixture import normalize_request, wrap_tool
 import shutil
 import argparse, codecs, fcntl, hashlib, importlib.util, json, os, pty, re, select, struct, subprocess, termios, threading, time, unicodedata
 from pathlib import Path
@@ -106,7 +107,7 @@ def main():
  class Provider(BaseHTTPRequestHandler):
   def log_message(self,*_):pass
   def do_POST(self):
-   request=json.loads(self.rfile.read(int(self.headers['content-length'])));requests.append(request);(artifact/'provider.json').write_text(json.dumps(requests,indent=2))
+   request=json.loads(self.rfile.read(int(self.headers['content-length']))); request = normalize_request(request, artifact);requests.append(request);(artifact/'provider.json').write_text(json.dumps(requests,indent=2))
    try:
     pending=state['pending']
     if pending:
@@ -121,7 +122,7 @@ def main():
      latest=request['messages'][-1];events.append({'phase':state['phase'],'at':time.time(),'message':latest})
      block={'type':'text','text':state['phase']+'-complete'}
    except Exception as e:errors.append(str(e));block={'type':'text','text':'fixture-failed'}
-   body=sse(block,request['model']);self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+   body=sse(wrap_tool(block),request['model']);self.send_response(200);self.send_header('Content-Type','text/event-stream');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  server=ThreadingHTTPServer(('127.0.0.1',0),Provider);threading.Thread(target=server.serve_forever,daemon=True).start()
  common=['--claude','--model','claude-sonnet-5-5','--claude-api-key','synthetic-key','--claude-messages-url',f'http://127.0.0.1:{server.server_port}/v1/messages','--cwd',str(workspace),'--browser=none','--mcp-defaults','false','--mcp-codex-config','false','--web-search','false','--image-generation','false','--subagents','false','--memory','false']
  def start(label,cmd):
@@ -142,7 +143,7 @@ def main():
    time.sleep(.03)
   raise AssertionError(label)
  def visible(label,text):return text in screens[label].text()
- def finish(proc,fd,drain):os.write(fd,b'\x03');proc.wait(timeout=10);drain();os.close(fd)
+ def finish(proc,fd,drain):os.write(fd,b'\x03');wait(lambda:proc.poll() is not None,drain,'CLI did not exit after Ctrl-C',10);drain();os.close(fd)
  outcome={'success':False}
  try:
   phase('initial',steps_initial());started=time.time();proc,fd,drain=start('initial',[str(binary)]+common+['--prompt','Schedule real clock test.'])
@@ -187,7 +188,7 @@ def main():
   wait(lambda:fired('new-owner-only-marker'),drain,'new owner did not dispatch due fixture');old_drain();require(sum('new-owner-only-marker' in json.dumps(e['message']) and 'tool_result' not in json.dumps(e['message']) for e in events)==1,'ownership produced duplicate fire')
   require(ids['owner-job'] not in json.loads(jp.read_text())['tasks'],'new owner one-shot not consumed');finish(old_proc,old_fd,old_drain);finish(proc,fd,drain);checks.append('two live CLI processes: resume fences older scheduler before due fixture claim; newer owner fires exactly once')
   # Headless catalogs omit the timer and Monitor tools entirely.
-  phase('headless',[]);r=subprocess.run([str(binary),'run']+common+['Inspect headless catalog.'],cwd=workspace,env=env,capture_output=True,timeout=30);require(r.returncode==0,'headless failed');names={t['name'] for t in requests[-1]['tools']};require(not names.intersection({'Monitor','CronCreate','CronList','CronDelete','ScheduleWakeup'}),'headless advertised idle tools');checks.append('headless omits idle-only tools')
+  phase('headless',[('exec',{'code':'''if (ALL_TOOLS.some(tool => ['Monitor','CronCreate','CronList','CronDelete','ScheduleWakeup'].includes(tool.name))) throw Error('headless advertised idle tools'); text('headless-catalog-verified');'''},False,None)]);r=subprocess.run([str(binary),'run']+common+['Inspect headless catalog.'],cwd=workspace,env=env,capture_output=True,timeout=30);require(r.returncode==0 and state['done'] and not errors and 'headless-catalog-verified' in json.dumps(requests[-1]),'headless catalog inspection failed');checks.append('headless omits idle-only tools')
   rules=artifact/'monitor-deny.json';rules.write_text(json.dumps({'permissions':{'defaultMode':'full-access','allow':['Monitor'],'deny':['Bash(touch *)']}}))
   for label,flags in [('monitor-plan',['--permission-mode','plan']),('monitor-deny',['--claude-permissions',str(rules)])]:
    phase(label,[('Monitor',{'command':'touch monitor-must-not-exist','description':'Denied effect'},True,None)])

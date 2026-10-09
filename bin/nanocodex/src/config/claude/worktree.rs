@@ -254,7 +254,7 @@ impl Workspace {
         let state = self.state.read().expect("workspace state poisoned");
         match (&state.active, state.isolated_child) {
             (Some(owned), true) => {
-                json!({"workspace":owned.path,"branch":owned.branch,"base":owned.base,"cleanup":"retained for resume; CloseAgent removes only an unchanged unpinned worktree"})
+                json!({"workspace":owned.path,"branch":owned.branch,"base":owned.base,"cleanup":"retained for resume; close_agent removes only an unchanged unpinned worktree"})
             }
             _ => Value::Null,
         }

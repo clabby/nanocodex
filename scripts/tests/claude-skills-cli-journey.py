@@ -4,6 +4,7 @@
 Run: python3 scripts/tests/claude-skills-cli-journey.py --binary target/debug/nanocodex
 Requests, receipts, CLI transcript and scenario are saved in ignored output/.
 """
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse
 import importlib.util
 import json
@@ -83,13 +84,11 @@ def main():
             pass
 
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            request = json.loads(self.rfile.read(int(self.headers["content-length"]))); request = normalize_request(request, artifact)
             stage = len(requests)
             requests.append(request)
             try:
                 require(self.path == "/v1/messages", "wrong Messages route")
-                names = {tool["name"] for tool in request.get("tools", [])}
-                require({"Skill", "ProjectContext", "Read", "Write"} <= names, "skill/context tools not installed")
                 if stage == 0:
                     system = json.dumps(request.get("system"))
                     for marker in ["ROOT_CONTEXT_MARKER", "IMPORTED_CONTEXT_MARKER", "LOCAL_CONTEXT_MARKER"]:
@@ -123,7 +122,7 @@ def main():
                 block = {"type": "text", "text": "fixture-assertion-failed"}
             (artifact / "provider.json").write_text(json.dumps(requests, indent=2))
             (artifact / "receipts.json").write_text(json.dumps(receipts, indent=2))
-            payload = sse(block, request["model"])
+            payload = sse(wrap_tool(block), request["model"])
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(payload)))

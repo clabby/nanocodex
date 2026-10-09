@@ -61,6 +61,7 @@ type ToolResultFuture =
 #[cfg(target_family = "wasm")]
 type ToolResultFuture = Pin<Box<dyn Future<Output = std::result::Result<ClaudeToolReply, String>>>>;
 type Handler = Arc<dyn Fn(Value, ClaudeToolInvocation) -> ToolResultFuture + Send + Sync>;
+type ToolCleanup = Arc<dyn Fn() -> BackendFuture<()> + Send + Sync>;
 
 /// Stable invocation identities supplied to a host-owned tool.
 #[derive(Clone, Debug)]
@@ -101,8 +102,20 @@ pub struct ClaudeTools {
     tools: Vec<(ToolDefinition, Handler)>,
     dynamic: Vec<DynamicToolsFactory>,
     custom_tool_search: bool,
+    adapter_cleanup: Vec<ToolCleanup>,
 }
 impl ClaudeTools {
+    /// Drains adapter-owned work after each admitted turn, including cancellation.
+    /// Cleanup is awaited before the turn result or cancellation is published.
+    pub fn adapter_cleanup<F, Fut>(mut self, cleanup: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: crate::ToolFuture<Output = ()> + 'static,
+    {
+        self.adapter_cleanup
+            .push(Arc::new(move || Box::pin(cleanup())));
+        self
+    }
     /// Creates an empty native function collection.
     pub fn new() -> Self {
         Self::default()
@@ -118,6 +131,33 @@ impl ClaudeTools {
             .iter()
             .map(|(definition, _)| definition.clone())
             .collect()
+    }
+    /// Resolves the current static and dynamic catalog for a nested runtime.
+    pub fn current_definitions(&self) -> Vec<ToolDefinition> {
+        self.current_tools()
+            .into_iter()
+            .map(|(definition, _)| definition)
+            .collect()
+    }
+    /// Freezes current definitions and callbacks for one nested execution admission.
+    pub fn snapshot(&self) -> Self {
+        Self {
+            tools: self.current_tools(),
+            ..Self::default()
+        }
+    }
+    fn current_tools(&self) -> Vec<(ToolDefinition, Handler)> {
+        let mut tools = self.tools.clone();
+        let mut names = tools
+            .iter()
+            .map(|(d, _)| d.name.clone())
+            .collect::<HashSet<_>>();
+        for factory in &self.dynamic {
+            tools.extend(factory().tools.into_iter().filter(|(d, _)| {
+                !d.name.is_empty() && d.input_schema.is_object() && names.insert(d.name.clone())
+            }));
+        }
+        tools
     }
     /// Dispatches a static callback without exposing it as a top-level model tool.
     /// The embedding must retain the originating invocation identity and revision.
@@ -199,6 +239,7 @@ fn hooked_handler(
             };
             let mut reply = match handler(input.clone(), invocation.clone()).await {
                 Ok(reply) => reply,
+                Err(error) if error == ClaudeTools::HOST_INTERRUPTED => return Err(error),
                 Err(error) => ClaudeToolReply {
                     content: ToolResultContent::Text(error),
                     is_error: true,
@@ -306,6 +347,7 @@ pub struct ClaudeBuilder {
     system_resolver: Option<WorkspaceResolver>,
     tools: Vec<(ToolDefinition, Handler)>,
     tools_factory: Option<ClaudeToolsFactory>,
+    tools_adapter: Option<Arc<dyn Fn(ClaudeTools) -> Result<ClaudeTools> + Send + Sync>>,
     dynamic_tools: Vec<DynamicToolsFactory>,
     tool_hooks: Vec<Arc<dyn crate::ClaudeToolHooks>>,
     spawn_factory: Option<Arc<dyn AgentFactory>>,
@@ -351,6 +393,7 @@ impl ClaudeBuilder {
             system_resolver: None,
             tools: Vec::new(),
             tools_factory: None,
+            tools_adapter: None,
             dynamic_tools: Vec::new(),
             tool_hooks: Vec::new(),
             spawn_factory: None,
@@ -367,9 +410,19 @@ impl ClaudeBuilder {
             task_board: None,
         }
     }
+    /// Transforms the complete client catalog after hooks have been attached.
+    /// Nested dispatch through the supplied collection preserves those hooks.
+    pub fn tools_adapter<F>(mut self, adapter: F) -> Self
+    where
+        F: Fn(ClaudeTools) -> Result<ClaudeTools> + Send + Sync + 'static,
+    {
+        self.tools_adapter = Some(Arc::new(adapter));
+        self
+    }
     /// Restricts outbound catalogs to the host's `exec` and `wait` tools.
     /// Recovery reconciles old receipts without dispatching legacy direct calls.
-    /// Disabled by default to preserve direct SDK admission semantics.
+    /// Low-level backend hosts install their adapter before enabling this;
+    /// shipped CLI and JavaScript hosts always enable it.
     pub const fn code_only(mut self, enabled: bool) -> Self {
         self.code_only = enabled;
         self
@@ -1077,6 +1130,56 @@ impl ClaudeBuilder {
                 *handler = hooked_handler(name.clone(), handler.clone(), hooks.clone());
             }
         }
+        let mut adapter_cleanup = Vec::new();
+        if let Some(adapter) = &self.tools_adapter {
+            if !self.server_tools.is_empty() {
+                return Err(unsupported("client tool adapters cannot wrap server tools"));
+            }
+            let dynamic = std::mem::take(&mut self.dynamic_tools)
+                .into_iter()
+                .map(|factory| {
+                    let hooks = self.tool_hooks.clone();
+                    Arc::new(move || {
+                        let mut catalog = factory();
+                        for (definition, handler) in &mut catalog.tools {
+                            for hook in hooks.iter().rev() {
+                                *handler = hooked_handler(
+                                    definition.name.clone(),
+                                    handler.clone(),
+                                    hook.clone(),
+                                );
+                            }
+                        }
+                        catalog
+                    }) as DynamicToolsFactory
+                })
+                .collect();
+            let catalog = ClaudeTools {
+                tools: definitions
+                    .drain(..)
+                    .map(|d| {
+                        let handler = handlers.remove(&d.name).expect("validated tool handler");
+                        (d, handler)
+                    })
+                    .collect(),
+                dynamic,
+                custom_tool_search: false,
+                adapter_cleanup: Vec::new(),
+            };
+            let adapted = adapter(catalog)?;
+            for (definition, handler) in adapted.tools {
+                if definition.name.is_empty()
+                    || !definition.input_schema.is_object()
+                    || handlers.insert(definition.name.clone(), handler).is_some()
+                {
+                    return Err(unsupported("invalid or duplicate adapted Claude tool"));
+                }
+                definitions.push(definition);
+            }
+            self.dynamic_tools = adapted.dynamic;
+            adapter_cleanup = adapted.adapter_cleanup;
+            self.client_tool_search = false;
+        }
         let mut names = handlers.keys().map(String::as_str).collect::<HashSet<_>>();
         for tool in &self.server_tools {
             if tool.kind.is_empty() || tool.name.is_empty() || !names.insert(&tool.name) {
@@ -1150,6 +1253,7 @@ impl ClaudeBuilder {
             system: self.system,
             system_blocks: self.system_blocks,
             tools: definitions,
+            adapter_cleanup,
             dynamic_tools: self.dynamic_tools,
             tool_hooks: self.tool_hooks,
             server_tools: self.server_tools,
@@ -2047,6 +2151,7 @@ struct TurnSteering {
 }
 
 struct State {
+    adapter_cleanup: Vec<ToolCleanup>,
     lifecycle_opened: Mutex<Option<String>>,
     subagent_type: Option<String>,
     subagent_type_resolver: Option<SubagentTypeResolver>,
@@ -2713,6 +2818,12 @@ impl State {
         let mut result = self
             .run_locked(&mut conversation, &request, speed, &cancel)
             .await;
+        // run_locked has dropped any active exec/wait observation future. Drain
+        // cells even if cancellation arrived while the model request was pending.
+        // Keep the conversation lock until cleanup completes, fencing the next turn.
+        for cleanup in &self.adapter_cleanup {
+            cleanup().await;
+        }
         self.round_boundary
             .write()
             .expect("round boundary lock")
@@ -4375,8 +4486,8 @@ impl LifecycleBackend for Driver {
                         if state.stopped.load(Ordering::SeqCst) {
                             return Err(NanocodexError::AgentStopped);
                         }
-                        let has_conversation = !conversation.messages.is_empty()
-                            || !conversation.summary.is_empty();
+                        let has_conversation =
+                            !conversation.messages.is_empty() || !conversation.summary.is_empty();
                         (state.snapshot(&conversation).await?, has_conversation)
                     }
                 }

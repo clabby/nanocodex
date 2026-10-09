@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -35,10 +36,10 @@ async function fixture(t, { automatic = false, summaryResponse, provider = "open
         }
         generation++;
         if (generation === 1) {
-          const tool = body.tools.find(tool => tool.function.description.startsWith("buildArtifact\n"));
+          const tool = body.tools.find(tool => tool.function.description.startsWith("exec\n"));
           assert.ok(tool);
           return streamed({ tool_calls: [{ index: 0, id: "build-call", type: "function",
-            function: { name: tool.function.name, arguments: "{}" } }] }, 40, "tool_calls");
+            function: { name: tool.function.name, arguments: JSON.stringify({ input: "text(await tools.buildArtifact({}));" }) } }] }, 40, "tool_calls");
         }
         return streamed({ content: generation === 2 ? "Build finished." : "42 checks passed; the build was not repeated." },
           automatic && generation === 2 ? 265639 : 50);
@@ -46,7 +47,7 @@ async function fixture(t, { automatic = false, summaryResponse, provider = "open
     return Transport.hostManaged({ ...transport, websocketPreconnect: false,
       createWebSocket() { assert.fail("gateway must not use WebSocket"); } });
   };
-  const create = resume => Agent.create({ module, model: "gpt-6-astra", thinking: "low", toolMode: "direct",
+  const create = resume => Agent.create({ codeEvaluator, module, model: "gpt-6-astra", thinking: "low",
     transport: freshTransport(), ...(resume ? { resume } : {}),
     tools: { buildArtifact: { description: "Build a synthetic artifact", parameters: { type: "object", additionalProperties: false },
       handler() { executions++; return { artifact: "build_cobalt", checks: 42, passed: true }; } } },

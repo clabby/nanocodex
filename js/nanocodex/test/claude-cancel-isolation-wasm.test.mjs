@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 // Real WASM + loopback Messages: cancelling one turn must not poison another.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -7,7 +8,7 @@ import { Claude } from '../browser/index.mjs';
 
 function sse(block, stop) {
   return [
-    { type: 'message_start', message: { id: 'synthetic-response', role: 'assistant', model: 'fixture-model', content: [], usage: { input_tokens: 10, output_tokens: 0 } } },
+    { type: 'message_start', message: { id: 'synthetic-response', role: 'assistant', model: 'fixture-model', maxTokens: 1024, content: [], usage: { input_tokens: 10, output_tokens: 0 } } },
     { type: 'content_block_start', index: 0, content_block: block },
     { type: 'content_block_stop', index: 0 },
     { type: 'message_delta', delta: { stop_reason: stop }, usage: { output_tokens: 5 } },
@@ -21,10 +22,10 @@ test('actual WASM cancelling a blocking turn preserves the queued turn host sign
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
-    assert.equal(body.tools[0].name, 'effect');
+    assert.deepEqual(body.tools.map(tool => tool.name).sort(), ['exec', 'wait']);
     requestCount++;
     const block = requestCount <= 2
-      ? { type: 'tool_use', id: `effect-${requestCount}`, name: 'effect', input: { ordinal: requestCount } }
+      ? { type: 'tool_use', id: `effect-${requestCount}`, name: 'exec', input: { code: `text(await tools.effect({ordinal:${requestCount}}));` } }
       : { type: 'text', text: 'QUEUED_TURN_OK' };
     response.writeHead(200, { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' });
     response.end(sse(block, requestCount <= 2 ? 'tool_use' : 'end_turn'));
@@ -37,9 +38,9 @@ test('actual WASM cancelling a blocking turn preserves the queued turn host sign
   const started = new Promise(resolve => { firstStarted = resolve; });
   const observed = [];
   let firstSignal;
-  const agent = await Claude.create({
+  const agent = await Claude.create({ codeEvaluator,
     endpoint: `http://127.0.0.1:${server.address().port}/v1/messages`,
-    model: 'fixture-model', auth: { apiKey: 'synthetic-only' },
+    model: 'fixture-model', maxTokens: 1024, auth: { apiKey: 'synthetic-only' },
     module: await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url)),
     tools: [{ name: 'effect', description: 'synthetic effect', handler(input, context) {
       observed.push({ ordinal: input.ordinal, aborted: context.signal.aborted });
@@ -107,7 +108,7 @@ for (const target of ['node', 'browser']) {
         response.writeHead(200, { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' });
         if (held === 'model' && requests.length === 1) { started.resolve(); await release.promise; }
         const useTool = held === 'tool' && requests.length === 1;
-        response.end(sse(useTool ? { type: 'tool_use', id: 'effect-once', name: 'effect', input: {} }
+        response.end(sse(useTool ? { type: 'tool_use', id: 'effect-once', name: 'exec', input: { code: 'text(await tools.effect({}));' } }
           : { type: 'text', text: 'DETACHED_RECEIPT' }, useTool ? 'tool_use' : 'end_turn'));
       });
       const sockets = new Set();
@@ -124,7 +125,7 @@ for (const target of ['node', 'browser']) {
           return 'persisted effect receipt';
         } };
       const options = {
-        endpoint: `http://127.0.0.1:${server.address().port}/v1/messages`, model: 'fixture-model',
+        endpoint: `http://127.0.0.1:${server.address().port}/v1/messages`, model: 'fixture-model', maxTokens: 1024,
         ...(target === 'browser' ? { module: await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url)) } : {}),
         auth: { headers: () => { authCalls++; return { 'x-api-key': 'synthetic-only' }; } },
         tools: [tool], durabilityId: `detach-${target}-${held}`,
@@ -132,7 +133,7 @@ for (const target of ['node', 'browser']) {
       let disk = database(path);
       let agent;
       try {
-        agent = await SDK.create({ ...options, durability: disk.store });
+        agent = await SDK.create({ codeEvaluator, ...options, durability: disk.store });
         const turn = agent.turn.prompt({ input: 'complete accepted effect', id: 'detach-request' });
         assert.equal(await turn.accepted(), 'detach-request');
         await started.promise;
@@ -143,8 +144,7 @@ for (const target of ['node', 'browser']) {
         const result = await turn.result();
         assert.equal(result.finalMessage, 'DETACHED_RECEIPT');
         assert.equal(requests.length, held === 'tool' ? 2 : 1);
-        assert.equal(requests[0].tools[0].strict, true);
-        assert.equal(requests[0].tools[0].defer_loading ?? false, false, 'native serialization omits the default false flag');
+        assert.deepEqual(requests[0].tools.map(tool => tool.name).sort(), ['exec', 'wait']);
         assert.match(disk.persisted(), /DETACHED_RECEIPT/);
         if (held === 'tool') assert.match(disk.persisted(), /persisted effect receipt/);
         assert.doesNotMatch(disk.persisted(), /synthetic-only|x-api-key/);
@@ -152,7 +152,7 @@ for (const target of ['node', 'browser']) {
         const beforeAuth = authCalls;
         const beforeEffects = effects;
         const beforeRequests = requests.length;
-        agent = await SDK.create({ ...options, durability: disk.store,
+        agent = await SDK.create({ codeEvaluator, ...options, durability: disk.store,
           auth: { headers: () => { authCalls++; throw new Error('replay must not authenticate'); } },
           tools: [{ ...tool, handler: () => { effects++; throw new Error('replay must not dispatch'); } }],
         });
@@ -173,14 +173,14 @@ test('actual WASM cancelling queued anonymous turn does not abort active host in
     for await (const chunk of request) void chunk;
     requests++;
     response.writeHead(200, { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' });
-    response.end(sse({ type: 'tool_use', id: 'active-effect', name: 'effect', input: {} }, 'tool_use'));
+    response.end(sse({ type: 'tool_use', id: 'active-effect', name: 'exec', input: { code: 'text(await tools.effect({}));' } }, 'tool_use'));
   });
   const sockets = new Set();
   server.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
-  const agent = await Claude.create({
-    endpoint: `http://127.0.0.1:${server.address().port}/v1/messages`, model: 'fixture-model', auth: { apiKey: 'synthetic-only' },
+  const agent = await Claude.create({ codeEvaluator,
+    endpoint: `http://127.0.0.1:${server.address().port}/v1/messages`, model: 'fixture-model', maxTokens: 1024, auth: { apiKey: 'synthetic-only' },
     module: await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url)),
     tools: [{ name: 'effect', description: 'Held synthetic effect', handler(_input, context) {
       signal = context.signal; started.resolve(); return new Promise(() => {});

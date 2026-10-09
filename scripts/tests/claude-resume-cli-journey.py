@@ -5,6 +5,7 @@ Build separately, then run:
   python3 scripts/tests/claude-resume-cli-journey.py --binary target/debug/nanocodex
 Only the external Messages HTTP/SSE provider is synthetic. Evidence: ignored output/.
 """
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse
 import errno
 import fcntl
@@ -91,7 +92,7 @@ def main():
             pass
 
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers["content-length"])))
+            request = json.loads(self.rfile.read(int(self.headers["content-length"]))); request = normalize_request(request, artifact)
             name, stage = phase["name"], len(requests) - phase["start"]
             requests.append({"phase": name, "request": request})
             try:
@@ -138,7 +139,7 @@ def main():
                 errors.append(str(error))
                 block = {"type": "text", "text": "resume-fixture-assertion-failed"}
             (artifact / "provider.json").write_text(json.dumps(requests, indent=2))
-            response = sse(block, request["model"])
+            response = sse(wrap_tool(block), request["model"])
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(response)))
@@ -196,6 +197,8 @@ def main():
                     break
             require(selected, "picker never displayed/selectable saved session")
             require(done, f"{name} terminal never rendered final response; see PTY transcript")
+            if child.poll() is None and done:
+                child.wait(timeout=5)  # PTY EOF can precede the process exit notification.
             require(child.poll() is not None, f"{name} did not exit on Ctrl-D")
             require(child.returncode == 0, f"{name} exit {child.returncode}")
         finally:

@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 import json
+from claude_code_fixture import wrap_tool, unwrap_request
 from pathlib import Path
 import shlex
 import subprocess
@@ -66,13 +67,13 @@ def main():
     guard = threading.Lock()
 
     def spawn(family, label, background=False):
-        return ('Agent', {'description': label, 'prompt': label, 'harness': family, 'model': MODELS[family], 'thinking': 'medium', 'run_in_background': background})
+        return ('spawn_agent', {'role': label, 'task': label, 'harness': family, 'model': MODELS[family], 'thinking': 'medium', 'output_contract':{'kind':'string'}})
 
     def child_code(family, label):
         return f'''const child = await tools.spawn_agent({{harness:{json.dumps(family)},model:{json.dumps(MODELS[family])},thinking:"medium",role:{json.dumps(label)},task:{json.dumps(label)},output_contract:{{kind:"string"}}}}); const done = await tools.wait_agent({{agent_ids:[child.agent_id],timeout_ms:30000}}); text(done); if (done.timed_out || done.agents[0].status.state !== "completed") throw Error("child did not complete");'''
 
     def action(family, label, stage, request):
-        prior = last_result(request, (label == 'WORKSPACE_PARENT' and stage == 6) or (label == 'POLICY_CHILD' and stage in (1, 2))) if stage else ''
+        prior = last_result(request, (label == 'WORKSPACE_PARENT' and stage == 7) or (label == 'POLICY_CHILD' and stage in (1, 2))) if stage else ''
         if label == 'POLICY_ROOT':
             if stage == 0:
                 return ('exec', {'code': child_code('claude', 'POLICY_CHILD')})
@@ -85,7 +86,7 @@ def main():
             if stage == 1:
                 return spawn('codex', 'MUST_NOT_LAUNCH_CODEX')
             if stage == 2 and args.root_family != 'claude':
-                return ('SubmitResult', {'output': 'policy-child-complete'})
+                return ('submit_result', {'output': 'policy-child-complete'})
             return ('text', 'cross-workspace-policy-complete')
         if label == 'WORKSPACE_OUTER':
             if stage == 0:
@@ -95,7 +96,7 @@ def main():
             if stage == 0:
                 return spawn('codex', 'OLD_PIN', True)
             if stage == 1:
-                state['old_id'] = json.loads(prior)['task_id']
+                state['old_id'] = json.loads(prior)['agent_id']
                 return ('EnterWorktree', {'name': 'mixed-propagation'})
             if stage == 2:
                 state['enter_receipt'] = json.loads(prior)
@@ -107,21 +108,23 @@ def main():
                 entered.set()
                 return spawn('codex', 'NEW_CODEX')
             if stage == 4:
-                require('completed' in prior, f'new Codex did not complete: {prior}')
-                return ('TaskOutput', {'task_id': state['old_id'], 'block': True, 'timeout': 30000})
+                return ('wait_agent', {'agent_ids':[json.loads(prior)['agent_id']], 'timeout_ms':30000})
             if stage == 5:
+                require('completed' in prior, f'new Codex did not complete: {prior}')
+                return ('wait_agent', {'agent_ids': [state['old_id']], 'timeout_ms': 30000})
+            if stage == 6:
                 require('completed' in prior, f'old child did not complete: {prior}')
                 return ('ExitWorktree', {'cleanup': True})
-            if stage == 6:
+            if stage == 7:
                 require('active background or child contexts' in prior, f'child workspace lease missing: {prior}')
                 state['cleanup_lease_guarded'] = True
                 return ('ExitWorktree', {})
-            if stage == 7:
-                return ('Bash', {'command': 'pwd; cat marker.txt'})
             if stage == 8:
+                return ('Bash', {'command': 'pwd; cat marker.txt'})
+            if stage == 9:
                 require('original-marker' in prior, f'exit did not restore parent: {prior}')
                 if args.root_family != 'claude':
-                    return ('SubmitResult', {'output': 'parent-journey-complete'})
+                    return ('submit_result', {'output': 'parent-journey-complete'})
                 return ('text', 'cross-workspace-journey-complete')
             return ('text', 'parent-journey-complete')
         if stage == 0:
@@ -142,7 +145,7 @@ def main():
         submit_stage = 2 if label in ('NEW_CODEX', 'MID_CODEX') else 1
         if stage == submit_stage:
             if family == 'claude':
-                return ('SubmitResult', {'output': label + '-complete'})
+                return ('submit_result', {'output': label + '-complete'})
             return ('exec', {'code': 'text(await tools.submit_result({output:' + json.dumps(label + '-complete') + '}));'})
         return ('text', label + '-complete')
 
@@ -150,7 +153,7 @@ def main():
         def log_message(self, *_):
             pass
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers['content-length'])))
+            request = unwrap_request(json.loads(self.rfile.read(int(self.headers['content-length']))))
             family = 'claude' if self.path.endswith('/messages') else 'codex'
             label = user_label(request)
             with guard:
@@ -172,7 +175,7 @@ def main():
             ident = uuid4().hex
             if family == 'claude':
                 block = {'type': 'text', 'text': inputs} if name == 'text' else {'type': 'tool_use', 'id': ident, 'name': name, 'input': inputs}
-                response = sse(block, request['model'])
+                response = sse(wrap_tool(block), request['model'])
             else:
                 if name == 'text':
                     output = {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': inputs}]}

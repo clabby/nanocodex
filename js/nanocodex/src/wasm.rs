@@ -167,9 +167,6 @@ extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = cancelCode)]
     fn host_cancel_code(session_id: &str);
 
-    #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = toolMode)]
-    fn host_tool_mode(definition_host_id: u32, session_id: &str) -> String;
-
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = toolDefinitions)]
     fn host_tool_definitions(definition_host_id: u32, session_id: &str) -> Result<String, JsValue>;
 
@@ -754,11 +751,7 @@ impl JavaScriptCodeModeHost {
     fn new(definition_host_id: u32) -> Self {
         Self {
             definition_host_id,
-            mode: match host_tool_mode(definition_host_id, "").as_str() {
-                "direct" => EmbeddedToolMode::Direct,
-                "code-only" => EmbeddedToolMode::CodeOnly,
-                _ => EmbeddedToolMode::Code,
-            },
+            mode: EmbeddedToolMode::CodeOnly,
         }
     }
 }

@@ -1,3 +1,4 @@
+import { createNodeEvaluator } from '../node/code-evaluator.mjs';
 // Run directly with Node from the repository root. Requires generated release pkg-web.
 // Native Node timing only: precompilation is excluded, imports and JSON.stringify
 // are instrumented, and subagent toggling measures the whole feature, not its clone.
@@ -51,7 +52,7 @@ const makeTools=n=>Object.fromEntries(Array.from({length:n},(_,i)=>['fixture_'+i
 const scenarios=[{bytes:0,tools:0},{bytes:49152,tools:0},{bytes:262144,tools:0},{bytes:49152,tools:32},{bytes:49152,tools:100},{bytes:49152,tools:500}];
 const output=[];
 for(const scenario of scenarios){
- const options={module,transport,model:'gpt-6.1-sol',thinking:'low',toolMode:'direct',instructions:instructions.slice(0,scenario.bytes),tools:makeTools(scenario.tools)};
+ const options={module,transport,model:'gpt-6.1-sol',thinking:'low',codeEvaluator:createNodeEvaluator(),instructions:instructions.slice(0,scenario.bytes),tools:makeTools(scenario.tools)};
  const samples={true:[],false:[]};
  for(let i=0;i<90;i++)for(const enabled of (i%2?[true,false]:[false,true])){
   const state={imports:{},configBytes:0,configCrossings:0,rustCreateMs:0,stringifyMs:0,stringifyCalls:0,stringifyBytes:0};

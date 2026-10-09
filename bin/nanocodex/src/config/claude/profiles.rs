@@ -3,7 +3,7 @@ use super::super::*;
 use nanocodex::claude::{
     ClaudeHookFuture, ClaudeToolDecision, ClaudeToolHooks, ClaudeToolInvocation,
 };
-use nanocodex::claude_tools::{AgentProfile, ClaudeAgentProfiles};
+use nanocodex::claude_tools::AgentProfile;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -11,14 +11,12 @@ use std::sync::{Mutex, OnceLock};
 pub(in crate::config::claude) struct Admission {
     pub profile: Option<AgentProfile>,
     pub isolation: bool,
-    pub constructed: Arc<Mutex<Vec<String>>>,
 }
 tokio::task_local! { static ADMISSION: Admission; }
 struct Binding {
     profiles: Vec<AgentProfile>,
     workspace: Arc<worktree::Workspace>,
     parent: Option<String>,
-    agent: Option<u64>,
 }
 static BINDINGS: OnceLock<Mutex<BTreeMap<String, Binding>>> = OnceLock::new();
 fn bindings() -> &'static Mutex<BTreeMap<String, Binding>> {
@@ -30,16 +28,29 @@ pub(in crate::config::claude) async fn scope<F: std::future::Future>(
 ) -> F::Output {
     ADMISSION.scope(admission, future).await
 }
+fn validate_profiles(profiles: &[AgentProfile]) -> std::result::Result<(), String> {
+    for profile in profiles {
+        permissions::Policy {
+            allow: profile.tools.clone().unwrap_or_default(),
+            deny: profile.disallowed_tools.clone(),
+            ..Default::default()
+        }
+        .validate()
+        .map_err(|e| format!("invalid agent profile {}: {e}", profile.name))?;
+    }
+    Ok(())
+}
 pub(in crate::config::claude) fn restore(
     session: &str,
     workspace: Arc<worktree::Workspace>,
 ) -> std::result::Result<(), String> {
+    let profiles = workspace.profiles().unwrap_or_default();
+    validate_profiles(&profiles)?;
     let mut bindings = bindings().lock().map_err(|_| "profile bindings poisoned")?;
     bindings.entry(session.into()).or_insert_with(|| Binding {
-        profiles: workspace.profiles().unwrap_or_default(),
+        profiles,
         workspace,
         parent: None,
-        agent: None,
     });
     Ok(())
 }
@@ -55,6 +66,7 @@ pub(in crate::config::claude) fn bind(
         return Ok(());
     }
     let profiles = if let Some(saved) = workspace.profiles() {
+        validate_profiles(&saved)?;
         saved
     } else {
         let mut inherited = bindings
@@ -67,6 +79,7 @@ pub(in crate::config::claude) fn bind(
         if inherited.len() > 32 {
             return Err("profile delegation depth exceeds 32".into());
         }
+        validate_profiles(&inherited)?;
         workspace.bind_profiles(inherited.clone())?;
         if request.isolation {
             workspace.isolate_child(child)?;
@@ -79,59 +92,16 @@ pub(in crate::config::claude) fn bind(
             profiles,
             workspace,
             parent: Some(parent.into()),
-            agent: None,
         },
     );
-    request
-        .constructed
-        .lock()
-        .map_err(|_| "profile construction tracker poisoned")?
-        .push(child.into());
     Ok(())
 }
-pub(in crate::config::claude) fn attach(
-    admission: &Admission,
-    id: u64,
-) -> std::result::Result<Value, String> {
-    let sessions = admission
-        .constructed
-        .lock()
-        .map_err(|_| "profile construction tracker poisoned")?;
-    let mut bindings = bindings().lock().map_err(|_| "profile bindings poisoned")?;
-    let mut status = Value::Null;
-    for session in sessions.iter() {
-        if let Some(binding) = bindings.get_mut(session) {
-            binding.agent = Some(id);
-            status = binding.workspace.isolated_status();
-        }
-    }
-    Ok(status)
-}
-pub(super) fn status(id: u64) -> Value {
-    bindings()
-        .lock()
-        .ok()
-        .and_then(|bindings| {
-            bindings
-                .values()
-                .find(|b| b.agent == Some(id))
-                .map(|b| b.workspace.isolated_status())
-        })
-        .unwrap_or(Value::Null)
-}
 /// The registry must already have confirmed closure and management authority.
-pub(super) fn closed(id: u64) -> Value {
+fn closed(session: &str) -> Value {
     let Ok(mut bindings) = bindings().lock() else {
         return json!({"cleanup_error":"profile bindings poisoned"});
     };
-    let Some(session) = bindings
-        .iter()
-        .find(|(_, b)| b.agent == Some(id))
-        .map(|(s, _)| s.clone())
-    else {
-        return Value::Null;
-    };
-    let mut subtree = vec![session];
+    let mut subtree = vec![session.to_owned()];
     let mut cursor = 0;
     while cursor < subtree.len() {
         let children: Vec<_> = bindings
@@ -243,8 +213,62 @@ pub(super) fn check_isolation(session: &str, workspace: &Path) -> std::result::R
     }
     Ok(())
 }
+/// Shared spawn callbacks and Skill's private spawn must enforce the same chain.
+pub(super) fn check_spawn(session: &str, input: &Value) -> std::result::Result<(), String> {
+    let bindings = bindings().lock().map_err(|_| "profile bindings poisoned")?;
+    if let Some(binding) = bindings.get(session) {
+        for profile in &binding.profiles {
+            if profile
+                .tools
+                .as_ref()
+                .is_some_and(|tools| !tools.iter().any(|t| t == "spawn_agent"))
+                || profile.disallowed_tools.iter().any(|t| t == "spawn_agent")
+            {
+                return Err(format!(
+                    "spawn_agent is unavailable under inherited agent profile {}",
+                    profile.name
+                ));
+            }
+            if let Some(mode) = &profile.permission_mode {
+                let policy = permissions::Policy {
+                    mode: Some(mode.clone()),
+                    ..Default::default()
+                };
+                if !matches!(
+                    policy
+                        .evaluate("spawn_agent", input, &binding.workspace.current())
+                        .map_err(|e| e.to_string())?,
+                    permissions::Decision::Allow
+                ) {
+                    return Err("inherited profile mode refuses spawn_agent".into());
+                }
+            }
+            if input
+                .get("harness")
+                .and_then(Value::as_str)
+                .is_some_and(|h| h != "claude")
+                || input
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| !model(m).starts_with("claude-"))
+            {
+                return Err("inherited agent profiles require a Claude child; cross-family delegation is unavailable".into());
+            }
+            if let Some(required) = &profile.model
+                && input
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| model(m) != model(required))
+            {
+                return Err("model override conflicts with an inherited agent profile".into());
+            }
+        }
+    }
+    Ok(())
+}
 pub(in crate::config::claude) struct Guard {
     pub workspaces: Arc<WorkspaceRegistry>,
+    pub registry: Option<std::sync::Weak<nanocodex_subagents::Registry>>,
 }
 impl ClaudeToolHooks for Guard {
     fn before<'a>(
@@ -262,68 +286,20 @@ impl ClaudeToolHooks for Guard {
                 .unwrap_or_default();
             let workspace = self.workspaces.current(&invocation.session_id)?;
             if name == "Workflow" && !chain.is_empty() {
-                return Ok(ClaudeToolDecision::Deny("Workflow is unavailable under agent profiles; use Agent so inherited restrictions remain enforced".into()));
+                return Ok(ClaudeToolDecision::Deny("Workflow is unavailable under agent profiles; use spawn_agent so inherited restrictions remain enforced".into()));
             }
-            let custom = name == "Agent"
-                && input
-                    .get("subagent_type")
-                    .and_then(Value::as_str)
-                    .is_some_and(|s| s != "general-purpose" && s != "fork");
-            let policy = self
-                .workspaces
-                .policies
-                .lock()
-                .map_err(|_| "workspace policies poisoned")?
-                .get(&invocation.session_id)
-                .and_then(std::sync::Weak::upgrade);
-            if (name == "ListAgentProfiles"
-                || name == "Skill"
-                || name == "ProjectContext"
-                || custom)
-                && !allows_context(&invocation.session_id)
+            if matches!(name, "Skill" | "ProjectContext") && !allows_context(&invocation.session_id)
             {
                 return Ok(ClaudeToolDecision::Deny(
                     "project discovery is unavailable when an inherited profile restricts Read"
                         .into(),
                 ));
             }
-            if (name == "ListAgentProfiles" || custom)
-                && policy.as_ref().is_some_and(|p| {
-                    p.resolved_policy(&invocation.session_id)
-                        .map_or(true, |p| p.has_read_restrictions())
-                })
-            {
-                return Ok(ClaudeToolDecision::Deny(
-                    "profile discovery/invocation is unavailable under Read restrictions".into(),
-                ));
-            }
-            let selected = if custom && input.get("resume").is_none() {
-                Some(
-                    ClaudeAgentProfiles::new(&workspace)?
-                        .get(input["subagent_type"].as_str().unwrap())?,
-                )
-            } else {
-                None
-            };
-            let isolation = name == "Agent"
-                && (input.get("isolation").and_then(Value::as_str) == Some("worktree")
-                    || selected.as_ref().is_some_and(|p| p.isolation.is_some()));
-            if isolation
-                && policy.as_ref().is_some_and(|p| {
-                    p.resolved_policy(&invocation.session_id)
-                        .and_then(|p| {
-                            p.evaluate("EnterWorktree", &json!({}), &workspace)
-                                .map_err(|e| e.to_string())
-                        })
-                        .map_or(true, |d| !matches!(d, permissions::Decision::Allow))
-                })
-            {
-                return Ok(ClaudeToolDecision::Deny(
-                    "worktree isolation requires inherited EnterWorktree permission".into(),
-                ));
+            if name == "spawn_agent" {
+                check_spawn(&invocation.session_id, input)?;
             }
             for profile in &chain {
-                if name != "SubmitResult"
+                if name != "submit_result"
                     && (profile
                         .tools
                         .as_ref()
@@ -340,7 +316,7 @@ impl ClaudeToolHooks for Guard {
                         mode: Some(mode.clone()),
                         ..Default::default()
                     };
-                    if name != "SubmitResult"
+                    if name != "submit_result"
                         && !matches!(
                             policy
                                 .evaluate(name, input, &workspace)
@@ -355,20 +331,30 @@ impl ClaudeToolHooks for Guard {
                     }
                 }
             }
-            if name == "Agent"
-                && (!chain.is_empty() || selected.is_some() || isolation)
-                && (input
-                    .get("harness")
-                    .and_then(Value::as_str)
-                    .is_some_and(|h| h != "claude")
-                    || input
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .is_some_and(|m| !model(m).starts_with("claude-")))
-            {
-                return Ok(ClaudeToolDecision::Deny("profiles and worktree isolation require a Claude child; cross-family delegation is unavailable".into()));
-            }
             Ok(ClaudeToolDecision::Allow)
+        })
+    }
+    fn after<'a>(
+        &'a self,
+        name: &'a str,
+        input: &'a Value,
+        invocation: &'a ClaudeToolInvocation,
+        reply: &'a nanocodex::claude::ClaudeToolReply,
+    ) -> ClaudeHookFuture<'a, std::result::Result<(), String>> {
+        Box::pin(async move {
+            if name == "close_agent"
+                && !reply.is_error
+                && let Some(registry) = self.registry.as_ref().and_then(std::sync::Weak::upgrade)
+            {
+                let id =
+                    serde_json::from_value(input["agent_id"].clone()).map_err(|e| e.to_string())?;
+                let session = registry
+                    .child_session_id(&invocation.session_id, id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                closed(&session);
+            }
+            Ok(())
         })
     }
 }

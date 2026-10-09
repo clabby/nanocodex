@@ -1,3 +1,4 @@
+import { createNodeEvaluator } from './code-evaluator.mjs';
 import { prepareHarnesses } from '../runtime/harnesses.mjs';
 import { create as createClaude } from './Claude.mjs';
 import { createRequire } from "node:module";
@@ -55,7 +56,7 @@ export function create(options = {}) {
     tools,
     toolMode,
     mcp,
-    codeEvaluator,
+    codeEvaluator = createNodeEvaluator(),
     codeEffectJournal,
   } = options;
   const stableSessionId = sessionId ?? createSessionId();
@@ -110,7 +111,7 @@ export function create(options = {}) {
             durabilityId,
           );
         }
-        harnesses = await prepareHarnesses(options.harnesses, events.emit);
+        harnesses = await prepareHarnesses(options.harnesses, events.emit, { codeEvaluator });
         activateHost(host);
         await host.ready();
         const Nanocodex = module === undefined

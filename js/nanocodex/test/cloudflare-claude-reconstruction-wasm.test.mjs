@@ -7,6 +7,7 @@ import { createServer } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { create } from '../cloudflare/Agent.mjs';
 import { Claude } from '../host/index.mjs';
+import { codeEvaluator } from './quickjs-fixture.mjs';
 
 function sqliteStorage(database) {
   let transaction = 0;
@@ -51,6 +52,7 @@ for (const seeded of [false, true]) test(`Cloudflare Claude reconstructs ${seede
       const body = JSON.parse(Buffer.concat(chunks));
       trace.push(body);
       assert.equal(body.model, 'claude-opus-5-5');
+      assert.deepEqual(body.tools.map(tool => tool.name).sort(), ['exec', 'wait']);
       const text = seeded && trace.length === 1 ? 'SEED_CONTEXT_RETAINED' : 'CONTINUATION_COMPLETE';
       if (seeded && trace.length > 1) assert.match(JSON.stringify(body.messages), /SEED_CONTEXT_RETAINED/);
       response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -67,6 +69,7 @@ for (const seeded of [false, true]) test(`Cloudflare Claude reconstructs ${seede
   });
   const module = await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url));
   const options = {
+    codeEvaluator,
     eventPersistence: 'caller',
     [Symbol.for('nanocodex.cloudflare.internalConfiguration')]: {
       model: 'claude-opus-5-5', thinking: 'low', reasoning_mode: 'standard', fast_mode: false,

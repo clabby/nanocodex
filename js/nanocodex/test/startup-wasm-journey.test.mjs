@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
@@ -36,7 +37,7 @@ test("precompiled host startup reaches HTTP, reopens durably, and preserves auth
   const apiBaseUrl = `http://127.0.0.1:${server.address().port}/v1`;
   const transport = apiKey => Transport.openAi({ apiKey, apiBaseUrl, stateless: true });
   const options = {
-    model: "gpt-6.1-sol", thinking: "low", toolMode: "direct",
+    model: "gpt-6.1-sol", thinking: "low", codeEvaluator,
     transport: transport("synthetic-startup"),
     [Symbol.for("nanocodex.browser.internalRuntime")]: { subagentsEnabled: false },
   };
@@ -102,7 +103,8 @@ test("failed module initialization releases its session and permits a compiled r
     import assert from "node:assert/strict";
     import { readFile } from "node:fs/promises";
     import { Agent, Transport } from ${JSON.stringify(new URL("../host/index.mjs", import.meta.url).href)};
-    const options = { sessionId: "018e65f5-0000-7000-8000-000000000101",
+    import { codeEvaluator } from ${JSON.stringify(new URL("./quickjs-fixture.mjs", import.meta.url).href)};
+    const options = { codeEvaluator, sessionId: "018e65f5-0000-7000-8000-000000000101",
       transport: Transport.openAi({ apiKey: "synthetic-retry", stateless: true }) };
     await assert.rejects(Agent.create({ ...options, module: new Uint8Array([0,1,2,3]) }), WebAssembly.CompileError);
     const module = await WebAssembly.compile(await readFile(new URL(${JSON.stringify(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url).href)})));

@@ -120,12 +120,12 @@ export function createBrowserHost(options?: {
   onEvent?: (eventJson: string) => void;
   tools?: ToolMap;
   mpp?: MppSession;
-  /** Remote MCP servers exposed through native and Code Mode tool_search plus deferred tools. */
+  /** Remote MCP servers discovered through tools.tool_search inside exec. */
   mcp?: McpServers;
   codeEvaluator?: CodeEvaluator;
   /** @internal Trusted durable effect receipts, not available inside guest code. */
   codeEffectJournal?: CodeEffectJournal;
-  toolMode?: "code" | "code-only" | "direct";
+  toolMode?: "code-only";
   /** @internal Live host lifecycle for Rust-owned subagents. */
   subagentRouting?: Pick<import('../runtime/subagent-routing.mjs').SubagentRouting, 'resolve' | 'bind'>;
   subagentSessions?: {

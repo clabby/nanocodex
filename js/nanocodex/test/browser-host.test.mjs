@@ -174,7 +174,7 @@ test("browser host gives inherited tools the Rust-owned subagent descriptor", as
         sessionLifecycle.push(["release", sessionId, hostContextRef]);
       },
     },
-    toolMode: "direct",
+    toolMode: "code-only",
     tools: {
       identity: {
         parameters: { type: "object", additionalProperties: false },
@@ -263,7 +263,7 @@ test("browser subagent lifecycle failures leave bindings retryable", async () =>
         if (releaseAttempts === 1) throw new Error("release failed");
       },
     },
-    toolMode: "direct",
+    toolMode: "code-only",
     tools: {
       identity: {
         parameters: { type: "object", additionalProperties: false },
@@ -303,7 +303,7 @@ test("browser subagent lifecycle failures leave bindings retryable", async () =>
 test("browser host never flattens remote MCP tools into direct mode", () => {
   assert.throws(
     () => createBrowserHost({ mcp: { fixture: { client: {} } }, toolMode: "direct" }),
-    /remote MCP requires Code Mode/,
+    /toolMode must be code-only/,
   );
 });
 

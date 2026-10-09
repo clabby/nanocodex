@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual Claude CLI + external MCP HTTP/stdio servers; synthetic Messages endpoint.
+"""Default Claude Code Mode CLI + external MCP HTTP/stdio; synthetic Messages endpoint.
 
 python3 scripts/tests/claude-mcp-cli-journey.py --binary target/debug/nanocodex
 """
@@ -17,12 +17,31 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
 
+from claude_code_fixture import wrap_tool, nested_result
+
 spec = importlib.util.spec_from_file_location("native_cli", Path(__file__).with_name("claude-native-cli-journey.py"))
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 require, text_of, sse = helper.require, helper.text_of, helper.sse
-PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII="
+PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC'
 SCHEMA = {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"], "additionalProperties": False}
+
+
+def nested_call(block):
+    wrapped = wrap_tool(block)
+    if wrapped is not block and block["type"] == "tool_use":
+        wrapped["input"]["code"] = wrapped["input"]["code"].replace("\n", "\ntext({catalog:ALL_TOOLS.map(t=>({name:t.name}))});\n", 1)
+    return wrapped
+
+
+def nested_catalog(receipt):
+    for block in receipt.get("content", []):
+        value = block.get("text", "")
+        if block.get("type") == "text" and value.startswith("{"):
+            payload = json.loads(value)
+            if "catalog" in payload:
+                return {tool["name"] for tool in payload["catalog"]}
+    raise AssertionError("missing runtime catalog")
 
 
 def main():
@@ -41,6 +60,7 @@ def main():
     frozen_received = threading.Event()
     release_frozen = threading.Event()
     recovery_messages = []
+    code_messages = []
     hook = workspace / "hook.py"
     hook.write_text("""import json, sys
 p = json.load(sys.stdin)
@@ -77,6 +97,8 @@ else: print('{}')
             request = json.loads(self.rfile.read(int(self.headers["content-length"])))
             if self.path == "/v1/messages":
                 (artifact / "latest-request.json").write_text(json.dumps(request, indent=2))
+                if {tool["name"] for tool in request["tools"]} != {"exec", "wait"}:
+                    errors.append("default Claude must expose only exec/wait")
                 for message in request["messages"]:
                     for result in message["content"]:
                         content = result.get("content")
@@ -102,6 +124,8 @@ else: print('{}')
                 elif method == "tools/call":
                     message = request["params"]["arguments"]["message"]
                     if message == "retire": remote["removed"] = True
+                    if message == "schema-drift":
+                        remote["schema"] = {**SCHEMA, "properties": {"message": {"type": "string"}, "new_authority": {"type": "boolean"}}, "required": ["message", "new_authority"]}
                     content = [{"type": "text", "text": "native-http-error" if message == "failure" else "native-http-image"}]
                     if message == "image": content.append({"type": "image", "mimeType": "image/png", "data": PNG})
                     if message == "audio": content.append({"type": "audio", "mimeType": "audio/wav", "data": "UklGRg=="})
@@ -115,6 +139,43 @@ else: print('{}')
                 else: error = {"code": -32601, "message": "unknown method"}
                 body = json.dumps({"jsonrpc": "2.0", "id": request["id"], **({"error": error} if error else {"result": result})}).encode()
                 self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+            if phase["name"] == "code-mode":
+                index = len(code_messages)
+                code_messages.append(request)
+                try:
+                    require({tool["name"] for tool in request["tools"]} == {"exec", "wait"}, "Code Mode exposed direct MCP tools")
+                    prior = [b for m in request["messages"] for b in m["content"] if b.get("type") == "tool_result"]
+                    if index == 0:
+                        code = 'text(await tools.WaitForMcpServers({}));'
+                    elif index == 1:
+                        code = 'text(await tools.ToolSearch({query:"select:mcp__http__inspect"}));'
+                    elif index == 2:
+                        code = r'''text(await tools.mcp__http__inspect({message:"schema-drift"}));
+text(await tools.ToolSearch({query:"select:mcp__http__inspect"}));
+try {
+    await tools.mcp__http__inspect({message:"stale-schema"});
+    text("STALE_DISPATCH_UNEXPECTEDLY_SUCCEEDED");
+} catch(error) { text(error); }
+'''
+                    elif index == 3:
+                        require("changed since admission" in text_of(prior[-1]), "active cell dispatched replacement or lacked changed-schema denial: " + text_of(prior[-1]))
+                        require("STALE_DISPATCH_UNEXPECTEDLY_SUCCEEDED" not in text_of(prior[-1]), "active cell accepted replacement schema")
+                        payloads = [json.loads(b["text"]) for b in prior[-1]["content"] if b.get("type") == "text" and b.get("text", "").startswith("{")]
+                        discovered = [tool for payload in payloads for tool in payload.get("structuredContent", {}).get("tools", [])]
+                        require(discovered == [{"name":"mcp__http__inspect", "description":"Inspect synthetic content", "input_schema":remote["schema"]}], "ToolSearch did not return exact replacement schema")
+                        code = 'text(await tools.mcp__http__inspect({message:"fresh-schema",new_authority:true}));'
+                    else:
+                        require(index == 4, "unexpected Code Mode inference retry")
+                        require("native-http-image" in text_of(prior[-1]) and "fresh-schema" in text_of(prior[-1]), "fresh cell failed to admit updated MCP schema")
+                        block = {"type":"text", "text":"code-mode-mcp-drift-complete"}
+                    if index < 4:
+                        block = {"type":"tool_use", "id":"code-drift-" + str(index), "name":"exec", "input":{"code":code}}
+                except Exception as error:
+                    errors.append(str(error)); block = {"type":"text", "text":"fixture-assertion-failed"}
+                (artifact / "code-mode-messages.json").write_text(json.dumps(code_messages, indent=2))
+                body = sse(nested_call(block), request["model"])
+                self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+                return
             if phase["name"] == "recovery":
                 index = len(recovery_messages)
                 recovery_messages.append(request)
@@ -139,17 +200,21 @@ else: print('{}')
                             else: raise AssertionError("reopened HTTP MCP catalog did not finish startup")
                             require(request["tools"] == recovery_messages[2]["tools"], "restore replaced admitted tool definitions")
                         block = {"type": "tool_use", "id": "frozen-call", "name": "mcp__http__inspect", "input": {"message": "image"}}
-                    else:
+                    elif index == 4:
                         receipt = [b for m in request["messages"] for b in m["content"] if b.get("type") == "tool_result" and b.get("tool_use_id") == "frozen-call"][-1]
-                        require(receipt.get("is_error") is True, "same-name changed schema was executed")
-                        require("changed since admission" in text_of(receipt), "missing changed-schema denial")
-                        current = next(t for t in request["tools"] if t["name"] == "mcp__http__inspect")
-                        require(current["input_schema"] == remote["schema"], "next request failed to admit current schema")
-                        block = {"type": "text", "text": "frozen-mcp-journey-complete"}
+                        require(receipt.get("is_error") is True, "same-name replacement was not rejected")
+                        require("admission was lost during recovery" in text_of(receipt), "missing recovery admission denial: " + text_of(receipt))
+                        block = {"type":"tool_use", "id":"fresh-discovery", "name":"ToolSearch", "input":{"query":"select:mcp__http__inspect"}}
+                    else:
+                        require(index == 5, "unexpected recovery inference request")
+                        receipt = [b for m in request["messages"] for b in m["content"] if b.get("type") == "tool_result" and b.get("tool_use_id") == "fresh-discovery"][-1]
+                        discovered = nested_result(receipt)["structuredContent"]["tools"]
+                        require(discovered == [{"name":"mcp__http__inspect", "description":"Inspect synthetic content", "input_schema":remote["schema"]}], "fresh recovery cell failed to discover current schema")
+                        block = {"type":"text", "text":"frozen-mcp-journey-complete"}
                 except Exception as error:
                     errors.append(str(error)); block = {"type": "text", "text": "fixture-assertion-failed"}
                 (artifact / "recovery-messages.json").write_text(json.dumps(recovery_messages, indent=2))
-                body = sse(block, request["model"])
+                body = sse(nested_call(block), request["model"])
                 try:
                     self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
                 except (BrokenPipeError, ConnectionResetError): pass
@@ -158,24 +223,24 @@ else: print('{}')
             messages.append(request)
             try:
                 require(self.path == "/v1/messages", "unexpected request path")
-                tools = {tool["name"]: tool for tool in request["tools"]}
-                require({"ToolSearch", "WaitForMcpServers", "ListMcpResourcesTool", "ReadMcpResourceTool"} <= tools.keys(), "native discovery tools missing")
-                require(not ({"exec", "wait", "tool_search", "exec_command"} & tools.keys()), "Codex tools advertised in Claude")
+                require({tool["name"] for tool in request["tools"]} == {"exec", "wait"}, "default Claude must expose only exec/wait")
                 if stage:
-                    if stage < 9:
-                        require(tools["mcp__http__inspect"]["input_schema"] == SCHEMA, "remote schema changed or dynamic discovery was frozen")
-                        require(tools["mcp__http__inspect"].get("defer_loading") is True, "MCP schema was eagerly exposed")
-                    else:
-                        require("mcp__http__inspect" not in tools, "removed remote MCP tool remained advertised")
                     receipt = [b for m in request["messages"] for b in m["content"] if b.get("type") == "tool_result" and b.get("tool_use_id") == f"mcp_{stage-1}"][-1]
                     name, arguments, failed, marker = steps[stage-1]
-                    require(bool(receipt.get("is_error", False)) == failed, f"wrong {name} error status: {receipt}")
+                    result = nested_result(receipt)
+                    require(bool(result.get("isError", False)) == failed, f"wrong {name} error status: {result}")
+                    catalog = nested_catalog(receipt)
+                    require({"ToolSearch", "WaitForMcpServers", "ListMcpResourcesTool", "ReadMcpResourceTool"} <= catalog, "nested discovery tools missing")
+                    if stage >= 10:
+                        require("mcp__http__inspect" not in catalog, "removed tool remained in nested runtime catalog")
                     if marker is not None:
-                        require(marker in text_of(receipt), f"missing {name} marker {marker}: {receipt}")
+                        require(marker in json.dumps(result, separators=(",", ":")), f"missing {name} marker {marker}: {result}")
                     if arguments.get("message") == "image" or (name == "ReadMcpResourceTool" and arguments["uri"] == "fixture://http"):
                         require(any(b.get("type") == "image" and b["source"]["data"] == PNG for b in receipt["content"]), "native image lost")
                     if stage == 2:
-                        require({b.get("tool_name") for b in receipt["content"] if b.get("type") == "tool_reference"} == {"mcp__http__inspect", "mcp__stdio__echo"}, "native ToolSearch references missing")
+                        require({b.get("tool_name") for b in result["content"] if b.get("type") == "tool_reference"} == {"mcp__http__inspect", "mcp__stdio__echo"}, "nested ToolSearch references missing")
+                        discovered = result["structuredContent"]["tools"]
+                        require(next(t for t in discovered if t["name"] == "mcp__http__inspect")["input_schema"] == SCHEMA, "nested discovery changed provider schema")
                 if stage < len(steps):
                     name, arguments, _, _ = steps[stage]
                     block = {"type": "tool_use", "id": f"mcp_{stage}", "name": name, "input": arguments}
@@ -183,14 +248,14 @@ else: print('{}')
             except Exception as error:
                 errors.append(str(error)); block = {"type": "text", "text": "fixture-assertion-failed"}
             (artifact / "messages.json").write_text(json.dumps(messages, indent=2))
-            body = sse(block, request["model"])
+            body = sse(nested_call(block), request["model"])
             self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Server)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     command = [str(binary), "run", "--claude", "--model", "claude-sonnet-5-5", "--thinking", "medium", "--claude-api-key", "synthetic-claude-key", "--claude-messages-url", f"http://127.0.0.1:{server.server_port}/v1/messages", "--cwd", str(workspace), "--rollouts", "false", "--browser=none", "--mcp-defaults", "false", "--mcp-codex-config", "false", "--web-search", "false", "--image-generation", "false", "--subagents", "false", "--memory", "false", "--mcp", f"http=http://127.0.0.1:{server.server_port}/mcp", "--mcp-bearer-env", "http=SYNTHETIC_MCP_TOKEN", "--mcp-stdio", f"stdio={shutil.which('node')}", "--mcp-arg", f"stdio={root}/crates/nanocodex-oai-tools/tests/fixtures/mcp-stdio-server.mjs", "--claude-hooks", str(hooks), "--local-durability", str(artifact / "session.sqlite"), "--local-durability-state-id", "native-mcp-journey-" + artifact.name, "--request-id", "native-mcp-operation", "Exercise native MCP tools and resources."]
     environment = {**os.environ, "NANOCODEX_COMPUTER": "off", "SYNTHETIC_MCP_TOKEN": "synthetic-mcp-configuration-token"}
-    (artifact / "scenario.json").write_text(json.dumps({"command": command, "shell_command": shlex.join(command), "environment_overrides": {"NANOCODEX_COMPUTER":"off","SYNTHETIC_MCP_TOKEN":"synthetic-mcp-configuration-token"}, "expected": "real MCP HTTP+stdio exact schema, native image/error/structured metadata, resources and validation"}, indent=2))
+    (artifact / "scenario.json").write_text(json.dumps({"command": command, "shell_command": shlex.join(command), "environment_overrides": {"NANOCODEX_COMPUTER":"off","SYNTHETIC_MCP_TOKEN":"synthetic-mcp-configuration-token"}, "expected": "default exec/wait only; nested MCP HTTP+stdio exact schema, native image/error/structured metadata, resources, validation, terminal replay, restored pending exec denial, and active-cell schema drift"}, indent=2))
     outcome = {"success": False}
     try:
         result = subprocess.run(command, cwd=workspace, env=environment, capture_output=True, timeout=90)
@@ -233,7 +298,26 @@ else: print('{}')
         require(b"frozen-mcp-journey-complete" in resumed.stdout, "frozen journey incomplete")
         require(sum(r["method"] == "tools/call" for r in rpc) == 4, "same-name replacement or replay dispatched an effect")
         require(len((workspace / "hooks.jsonl").read_text().splitlines()) == hooks_before, "changed schema ran replacement hooks")
-        outcome.update(success=True, requests=len(messages), recovery_requests=len(recovery_messages), mcp_requests=len(rpc), checks=len(steps))
+        phase["name"] = "code-mode"
+        remote.update(removed=False, schema=SCHEMA)
+        code_command = [str(artifact / "code-mode.sqlite") if v == str(artifact / "session.sqlite") else v for v in command[:-1]] + ["Refresh a same-name MCP schema inside an active cell, reject stale dispatch, then use the new schema in a fresh cell."]
+        (artifact / "code-mode-scenario.json").write_text(json.dumps({"command":code_command, "shell_command":shlex.join(code_command), "expected":"same active cell cannot invoke same-name replacement after ToolSearch refresh; fresh cell admits and invokes replacement", "old_schema":SCHEMA}, indent=2))
+        before_rpc = len(rpc)
+        code_result = subprocess.run(code_command, cwd=workspace, env=environment, capture_output=True, timeout=90)
+        (artifact / "code-mode.jsonl").write_bytes(code_result.stdout)
+        (artifact / "code-mode.stderr.log").write_bytes(code_result.stderr)
+        require(code_result.returncode == 0, "Code Mode CLI failed: " + code_result.stderr.decode(errors="replace"))
+        require(not errors, "; ".join(errors))
+        require(b"code-mode-mcp-drift-complete" in code_result.stdout, "Code Mode drift journey incomplete")
+        calls = [r["params"]["arguments"] for r in rpc[before_rpc:] if r["method"] == "tools/call"]
+        require(calls == [{"message":"schema-drift"}, {"message":"fresh-schema", "new_authority":True}], "stale cell reached MCP replacement or fresh cell failed: " + json.dumps(calls))
+        require(len(code_messages) == 5, "wrong Code Mode inference count")
+        code_hooks = [json.loads(line) for line in (workspace / "hooks.jsonl").read_text().splitlines()]
+        require(not any(event.get("tool_input", {}).get("message") == "stale-schema" for event in code_hooks), "stale cell ran replacement hooks")
+        outcome.update(success=True, requests=len(messages), recovery_requests=len(recovery_messages), mcp_requests=len(rpc), checks=len(steps), code_mode_schema_drift=True, code_mode_requests=len(code_messages), restored_pending_exec_denied=True, default_code_mode_only=True)
+    except Exception as error:
+        outcome["error"] = str(error)
+        raise
     finally:
         (artifact / "outcome.json").write_text(json.dumps(outcome, indent=2)); server.shutdown()
         print(artifact)

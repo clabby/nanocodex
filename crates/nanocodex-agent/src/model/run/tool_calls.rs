@@ -580,28 +580,34 @@ where
             .with_instruction_revision(instruction_revision)
             .with_host_context(host_context)
             .with_turn_id(Some(turn_id));
-            let mut execution = match call.kind {
-                CodeCallKind::Function => match RawValue::from_string(call.input.clone()) {
-                    Ok(input) => tools
-                        .execute_tool(&qualified_name, ToolInput::Function(input), context)
+            let mut execution = if tools.is_code_only() {
+                ToolOutput::error(
+                    "This tool requires Code Mode; no direct handler was invoked. Reconcile any prior recovered effect before calling it through tools inside exec.",
+                )
+            } else {
+                match call.kind {
+                    CodeCallKind::Function => match RawValue::from_string(call.input.clone()) {
+                        Ok(input) => tools
+                            .execute_tool(&qualified_name, ToolInput::Function(input), context)
+                            .instrument(tool_span.clone())
+                            .await
+                            .map_err(interrupted_tool_host)?,
+                        Err(error) => ToolOutput::error(format!(
+                            "failed to encode {qualified_name} arguments: {error}"
+                        )),
+                    },
+                    CodeCallKind::Custom => tools
+                        .execute_tool(
+                            &qualified_name,
+                            ToolInput::Freeform(call.input.clone()),
+                            context,
+                        )
                         .instrument(tool_span.clone())
                         .await
                         .map_err(interrupted_tool_host)?,
-                    Err(error) => ToolOutput::error(format!(
-                        "failed to encode {qualified_name} arguments: {error}"
-                    )),
-                },
-                CodeCallKind::Custom => tools
-                    .execute_tool(
-                        &qualified_name,
-                        ToolInput::Freeform(call.input.clone()),
-                        context,
-                    )
-                    .instrument(tool_span.clone())
-                    .await
-                    .map_err(interrupted_tool_host)?,
-                CodeCallKind::ToolSearch => {
-                    unreachable!("tool search is not an ordinary direct tool")
+                    CodeCallKind::ToolSearch => {
+                        unreachable!("tool search is not an ordinary direct tool")
+                    }
                 }
             };
             // The explicit result is retained by CompletedToolCall. Move it before
@@ -650,14 +656,20 @@ where
             .with_instruction_revision(instruction_revision)
             .with_host_context(host_context)
             .with_turn_id(Some(turn_id));
-            let execution = match RawValue::from_string(call.input.clone()) {
-                Ok(input) => tools
-                    .execute_tool("tool_search", ToolInput::Function(input), context)
-                    .instrument(tool_span.clone())
-                    .await
-                    .map_err(interrupted_tool_host)?,
-                Err(error) => {
-                    ToolOutput::error(format!("failed to encode tool_search arguments: {error}"))
+            let execution = if tools.is_code_only() {
+                ToolOutput::error(
+                    "Tool discovery requires Code Mode; call tools.tool_search inside exec. No direct discovery was executed.",
+                )
+            } else {
+                match RawValue::from_string(call.input.clone()) {
+                    Ok(input) => tools
+                        .execute_tool("tool_search", ToolInput::Function(input), context)
+                        .instrument(tool_span.clone())
+                        .await
+                        .map_err(interrupted_tool_host)?,
+                    Err(error) => ToolOutput::error(format!(
+                        "failed to encode tool_search arguments: {error}"
+                    )),
                 }
             };
             if let Some(content) = serialize_trace_content(&execution.output) {

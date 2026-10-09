@@ -7,6 +7,7 @@ import json
 import subprocess
 import threading
 import shlex
+from claude_code_fixture import wrap_tool, normalize_request
 from pathlib import Path
 from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -61,15 +62,15 @@ def main():
     class Provider(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers['content-length'])))
+            request = normalize_request(json.loads(self.rfile.read(int(self.headers['content-length']))), artifact)
             user_text = '\n'.join(text_of(m) for m in request['messages'] if m['role'] == 'user')
-            child = next((name for name in ('PINNED_CHILD_EXEC', 'FRESH_CHILD_EXEC') if name in user_text), None)
+            child = next((name for name in ('PINNED_CHILD_EXEC', 'FRESH_CHILD_EXEC', 'CLEAN_PIN_CHILD_EXEC') if name in user_text), None)
             if child:
                 stage = child_counts.get(child, 0)
                 child_counts[child] = stage + 1
                 child_requests.append({'child': child, 'request': request})
                 try:
-                    expected_root = root / '.claude/worktrees/pinned' if child == 'PINNED_CHILD_EXEC' else root
+                    expected_root = root / '.claude/worktrees/close-clean' if child == 'CLEAN_PIN_CHILD_EXEC' else root / '.claude/worktrees/pinned' if child == 'PINNED_CHILD_EXEC' else root
                     if stage == 0:
                         if child == 'PINNED_CHILD_EXEC':
                             require(parent_exited.wait(15), 'parent blocked before KEEP exit while child pending')
@@ -77,16 +78,16 @@ def main():
                     elif stage == 1:
                         receipt = request['messages'][-1]['content'][-1]
                         require(not receipt.get('is_error', False) and str(expected_root) in text_of(receipt), f'child workspace not pinned: {receipt}')
-                        block = {'type': 'tool_use', 'id': child + '_write', 'name': 'Write', 'input': {'file_path': child + '.txt', 'content': 'child effect'}}
-                    elif stage == 2:
+                        block = {'type':'tool_use','id':child+'_result','name':'submit_result','input':{'output':child+' complete'}} if child == 'CLEAN_PIN_CHILD_EXEC' else {'type': 'tool_use', 'id': child + '_write', 'name': 'Write', 'input': {'file_path': child + '.txt', 'content': 'child effect'}}
+                    elif stage == 2 and child != 'CLEAN_PIN_CHILD_EXEC':
                         require(not request['messages'][-1]['content'][-1].get('is_error', False), 'child Write failed')
-                        block = {'type': 'tool_use', 'id': child + '_result', 'name': 'SubmitResult', 'input': {'output': child + ' complete'}}
+                        block = {'type': 'tool_use', 'id': child + '_result', 'name': 'submit_result', 'input': {'output': child + ' complete'}}
                     else:
                         block = {'type': 'text', 'text': 'Child complete'}
                 except Exception as error:
                     errors.append(str(error))
                     block = {'type': 'text', 'text': 'fixture-failed'}
-                body = sse(block, request['model'])
+                body = sse(wrap_tool(block), request['model'])
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.send_header('Content-Length', str(len(body)))
@@ -120,7 +121,7 @@ def main():
                 errors.append(str(error))
                 block = {'type': 'text', 'text': 'fixture-failed'}
             (artifact / 'provider.json').write_text(json.dumps(requests, indent=2))
-            body = sse(block, request['model'])
+            body = sse(wrap_tool(block), request['model'])
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(body)))
@@ -185,20 +186,27 @@ def main():
         require('claude/clean' not in git('branch', '--list'), 'cleanup left branch')
         phase.update(name='children', start=len(requests), steps=[
             ('EnterWorktree', {'name': 'pinned'}, False, None),
-            ('Agent', {'description': 'Pinned worktree fork', 'prompt': 'PINNED_CHILD_EXEC verify retained workspace', 'subagent_type': 'fork'}, False, 'agent-1'),
+            ('spawn_agent', {'role': 'Pinned worktree child', 'task': 'PINNED_CHILD_EXEC verify retained workspace', 'output_contract': {'kind':'string'}}, False, 'agent_id'),
             ('ExitWorktree', {'cleanup': True}, True, 'active background or child'),
             ('ExitWorktree', {}, False, '"kept":true'),
             ('Bash', {'command': 'pwd'}, False, str(root)),
-            ('TaskOutput', {'task_id': 'agent-1', 'block': True, 'timeout': 20000}, False, 'PINNED_CHILD_EXEC complete'),
-            ('Agent', {'description': 'Fresh original workspace', 'prompt': 'FRESH_CHILD_EXEC verify new child workspace', 'run_in_background': True}, False, 'agent-2'),
-            ('TaskOutput', {'task_id': 'agent-2', 'block': True, 'timeout': 20000}, False, 'FRESH_CHILD_EXEC complete'),
+            ('wait_agent', {'agent_ids': [1], 'timeout_ms': 20000}, False, 'PINNED_CHILD_EXEC complete'),
+            ('spawn_agent', {'role': 'Fresh original workspace', 'task': 'FRESH_CHILD_EXEC verify new child workspace', 'output_contract': {'kind':'string'}}, False, 'agent_id'),
+            ('wait_agent', {'agent_ids': [2], 'timeout_ms': 20000}, False, 'FRESH_CHILD_EXEC complete'),
+            ('close_agent', {'agent_id': 1}, False, 'closed'),
+            ('close_agent', {'agent_id': 2}, False, 'closed'),
+            ('EnterWorktree', {'name':'close-clean'}, False, None),
+            ('spawn_agent', {'role':'clean child','task':'CLEAN_PIN_CHILD_EXEC return a result without writing files','output_contract':{'kind':'string'}}, False, 'agent_id'),
+            ('wait_agent', {'agent_ids':[3], 'timeout_ms':20000}, False, 'completed'),
+            ('close_agent', {'agent_id':3}, False, 'closed'),
+            ('ExitWorktree', {'cleanup':True}, False, '"kept":false'),
         ])
         child_command = list(command)
         child_command[child_command.index('--subagents') + 1] = 'true'
         run('children', child_command + ['--request-id', 'children', 'Verify child workspaces remain pinned'])
-        require((root / '.claude/worktrees/pinned/PINNED_CHILD_EXEC.txt').read_text() == 'child effect', 'fork write escaped pinned workspace')
+        require((root / '.claude/worktrees/pinned/PINNED_CHILD_EXEC.txt').read_text() == 'child effect', 'child write escaped pinned workspace')
         require((root / 'FRESH_CHILD_EXEC.txt').read_text() == 'child effect', 'new child did not snapshot current parent workspace')
-        require(not (root / 'PINNED_CHILD_EXEC.txt').exists(), 'fork retargeted with parent')
+        require(not (root / 'PINNED_CHILD_EXEC.txt').exists(), 'child retargeted with parent')
         outcome.update(success=True, cli_processes=len(commands), provider_requests=len(requests), child_provider_requests=len(child_requests), replay_provider_requests=0, multiroot_rewind=True, background_cleanup_refused=True, child_cleanup_refused=True, evidence=str(artifact))
     finally:
         server.shutdown()

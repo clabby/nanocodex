@@ -42,16 +42,16 @@ export type CodexHarnessOptions = Readonly<{
   thinking?: import('../types.mjs').Thinking;
   instructions?: string;
   workspace?: string;
-  toolMode?: 'code' | 'code-only' | 'direct';
-  /** Overrides Node's native evaluator; required for Code Mode in non-Worker Web API hosts. */
+  toolMode?: 'code-only';
+  /** Overrides Node QuickJS; required in non-Worker Web API hosts. */
   codeEvaluator?: import('../types.mjs').CodeEvaluator;
   tools?: import('../types.mjs').ToolConfiguration;
 }>;
 export type Options = Readonly<{
   harness?: 'claude';
-  /** Direct native tools by default; code-only exposes only exec and wait. */
-  toolMode?: 'direct' | 'code-only';
-  /** Required for code-only; evaluation is never inferred from ambient JavaScript. */
+  /** Only exec and wait are exposed to the model; native tools run inside exec. */
+  toolMode?: 'code-only';
+  /** Overrides Node QuickJS or browser Worker evaluation; required in other Web API hosts. */
   codeEvaluator?: import('../types.mjs').CodeEvaluator;
   /** Opt in to the canonical shared subagent task tree. */
   subagents?: Readonly<{ maxConcurrency?: number }>;
@@ -72,15 +72,12 @@ export type Options = Readonly<{
   sessionId?: string;
   workspace?: string;
   tools?: readonly Tool[];
-  /** Explicit provider-owned tool definitions, not host capabilities. */
-  serverTools?: readonly Record<string, unknown>[];
   maxTokens?: number;
   thinking?: 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   adaptiveThinking?: boolean;
   keepThinking?: boolean;
   cache?: 'off' | '5m' | '1h';
   parallelTools?: boolean;
-  clientToolSearch?: boolean;
   contextWindowTokens?: number;
   autoCompactWindowTokens?: number;
   /** Disabling automatic compaction is not supported. */

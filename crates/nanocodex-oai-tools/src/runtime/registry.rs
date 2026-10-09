@@ -195,17 +195,23 @@ impl ToolRegistry {
             return ToolOutput::error(format!("unsupported nested tool call: {name}"));
         };
         let input = match definition {
-            ToolDefinition::Function { .. } if !input.is_object() => {
+            ToolDefinition::Function { .. } | ToolDefinition::ToolSearch { .. }
+                if !input.is_object() =>
+            {
                 return ToolOutput::error(format!(
                     "nested function tool {name} requires an object argument"
                 ));
             }
-            ToolDefinition::Function { .. } => match to_raw_value(&input) {
-                Ok(input) => ToolInput::Function(input),
-                Err(error) => {
-                    return ToolOutput::error(format!("failed to encode {name} input: {error}"));
+            ToolDefinition::Function { .. } | ToolDefinition::ToolSearch { .. } => {
+                match to_raw_value(&input) {
+                    Ok(input) => ToolInput::Function(input),
+                    Err(error) => {
+                        return ToolOutput::error(format!(
+                            "failed to encode {name} input: {error}"
+                        ));
+                    }
                 }
-            },
+            }
             ToolDefinition::Custom { .. } => match input.as_str() {
                 Some(input) => ToolInput::Freeform(input.to_owned()),
                 None => {
@@ -217,11 +223,6 @@ impl ToolRegistry {
             ToolDefinition::Namespace { .. } => {
                 return ToolOutput::error(
                     "Responses namespace definitions cannot execute as nested Code Mode tools",
-                );
-            }
-            ToolDefinition::ToolSearch { .. } => {
-                return ToolOutput::error(
-                    "provider-native tool_search cannot execute as a nested Code Mode tool",
                 );
             }
         };
@@ -317,11 +318,8 @@ impl ToolRegistry {
             self.definitions
                 .iter()
                 .zip(&self.exposures)
-                .filter(|(definition, exposure)| {
-                    exposure.is_available_in_code_mode()
-                        && !matches!(definition, ToolDefinition::ToolSearch { .. })
-                })
-                .map(|(definition, _)| definition.clone()),
+                .filter(|(_, exposure)| exposure.is_available_in_code_mode())
+                .map(|(definition, _)| nested_definition(definition.clone())),
         )
     }
 
@@ -357,10 +355,8 @@ impl ToolRegistry {
                     .iter()
                     .flat_map(|provider| provider.available_definitions()),
             )
-            .filter(|definition| {
-                !matches!(definition, ToolDefinition::ToolSearch { .. })
-                    && !host_owned_name(definition.name())
-            });
+            .filter(|definition| !host_owned_name(definition.name()))
+            .map(nested_definition);
         first_normalized_definitions(definitions)
     }
 
@@ -408,4 +404,17 @@ fn definition_metadata(name: &str, definition: &ToolDefinition) -> Value {
         "input_schema": definition.parameters().map(|schema| schema.as_value()),
         "output_schema": definition.output_schema().map(|schema| schema.as_value()),
     })
+}
+
+// Native provider discovery is an ordinary function inside JavaScript. Preserve
+// its exact input contract while removing the provider-only ToolSearch variant.
+fn nested_definition(definition: ToolDefinition) -> ToolDefinition {
+    match definition {
+        ToolDefinition::ToolSearch {
+            description,
+            parameters,
+            ..
+        } => ToolDefinition::function("tool_search", description, parameters),
+        other => other,
+    }
 }

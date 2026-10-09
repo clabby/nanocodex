@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
+import { WebSocketServer } from 'ws';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { Agent, Subagents, Transport, createQuickJsEvaluator } from '../host/index.mjs';
 import { Agent as NodeAgent } from '../node/index.mjs';
@@ -31,6 +32,7 @@ test('public SDK shares canonical children across both native harness families',
   const module = await WebAssembly.compile(await readFile(new URL('../pkg-web/nanocodex_bg.wasm', import.meta.url)));
   const trace = [], effects = [], events = [], fixtureErrors = [], rejectedBatches = [];
   let responseId = 0;
+  const nodeRootSteps = new Map();
   let blockedCallIssued = false;
   let codeCalls = 0;
   let blockedStarted;
@@ -38,7 +40,7 @@ test('public SDK shares canonical children across both native harness families',
   let blockedAborted;
   const aborted = new Promise(resolve => { blockedAborted = resolve; });
   let blockedContext;
-  const server = createServer(async (request, response) => {
+  const respond = async (request, response) => {
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks));
@@ -48,28 +50,44 @@ test('public SDK shares canonical children across both native harness families',
       trace.push({ path: request.url, model: body.model, familyAuthMatched: true, body });
       const history = claude ? body.messages : body.input;
       const encoded = JSON.stringify(history.filter(item => item.type !== 'additional_tools'));
-      const submitted = history.some(item => item.type === 'function_call' && item.name === 'submit_result'
-        || Array.isArray(item.content) && item.content.some(block => block.type === 'tool_use' && block.name === 'submit_result'));
+      const definitions = claude ? body.tools : [...(body.tools ?? []), ...body.input.filter(item => item.type === 'additional_tools').flatMap(item => item.tools)];
+      assert.deepEqual(definitions.map(tool => tool.name).sort(), ['exec', 'wait']);
+      if (encoded.includes('NODE_ROOT_DEFAULT_EVALUATOR')) {
+        const step = nodeRootSteps.get(body.model) ?? 0;
+        nodeRootSteps.set(body.model, step + 1);
+        if (step) assert.match(encoded, /NODE_ROOT_EXEC_OK/);
+        const code = 'text("NODE_ROOT_EXEC_OK");';
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (claude) response.end(messages(step ? [{ type: 'text', text: 'NODE_ROOT_DONE' }]
+          : [{ type: 'tool_use', id: 'node-root-exec', name: 'exec', input: { code } }], step ? 'end_turn' : 'tool_use'));
+        else response.end(`data: ${JSON.stringify({ type: 'response.completed', response: { id: `node-root-${step}`, status: 'completed', output: step
+          ? [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'NODE_ROOT_DONE' }] }]
+          : [{ type: 'custom_tool_call', call_id: 'node-root-exec', name: 'exec', input: code }] } })}\n\n`);
+        return;
+      }
+      const submitted = encoded.includes('tools.submit_result(');
       const block = claude && encoded.includes('BLOCK_UNTIL_INTERRUPT') && !blockedCallIssued;
       if (block) blockedCallIssued = true;
       const tool = block ? 'await_abort' : !encoded.includes('MIXED_EFFECT_RECEIPT') ? 'proof' : !submitted ? 'submit_result' : undefined;
       const args = tool === 'proof' ? {} : { output: { ok: true, model: body.model } };
       response.writeHead(200, { 'content-type': 'text/event-stream' });
+      const code = tool ? `text(await tools.${tool}(${JSON.stringify(args)}));` : undefined;
+      if (tool === 'proof') codeCalls++;
       if (claude) {
-        response.end(messages(tool ? [{ type: 'tool_use', id: `${tool}-${++responseId}`, name: tool, input: args }] : [{ type: 'text', text: 'CHILD_COMPLETE' }], tool ? 'tool_use' : 'end_turn'));
+        response.end(messages(tool ? [{ type: 'tool_use', id: `${tool}-code-${++responseId}`, name: 'exec', input: { code } }] : [{ type: 'text', text: 'CHILD_COMPLETE' }], tool ? 'tool_use' : 'end_turn'));
       } else {
-        const definitions = [...(body.tools ?? []), ...body.input.filter(item => item.type === 'additional_tools').flatMap(item => item.tools)];
-        const definition = tool && definitions.find(def => def.name === tool || def.description?.startsWith(`${tool}\n`));
-        const exec = tool === 'proof' && !definition && definitions.find(def => def.name === 'exec');
-        if (tool) assert.ok(definition || exec, `${tool} is an actual declared canonical/native tool or Code Mode capability`);
-        if (exec) codeCalls++;
-        const output = exec ? [{ type: 'custom_tool_call', call_id: `proof-code-${++responseId}`, name: exec.name, input: 'text(await tools.proof({}));' }]
-          : tool ? [{ type: 'function_call', call_id: `${tool}-${++responseId}`, name: definition.name, arguments: JSON.stringify(args) }]
+        const output = tool ? [{ type: 'custom_tool_call', call_id: `${tool}-code-${++responseId}`, name: 'exec', input: code }]
           : [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'CHILD_COMPLETE' }] }];
         response.end(`data: ${JSON.stringify({ type: 'response.completed', response: { id: `response-${++responseId}`, status: 'completed', output, usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11 } } })}\n\n`);
       }
     } catch (error) { fixtureErrors.push(String(error)); response.destroy(error); }
-  });
+  };
+  const server = createServer(respond);
+  const sockets = new WebSocketServer({ server });
+  sockets.on('connection', socket => socket.on('message', bytes => respond({
+    url: '/v1/responses', headers: { authorization: 'Bearer synthetic-codex' },
+    async *[Symbol.asyncIterator]() { yield bytes; },
+  }, { writeHead() {}, end(frame) { socket.send(frame.slice('data: '.length).trim()); }, destroy(error) { fixtureErrors.push(String(error)); socket.terminate(); } })));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const proof = { name: 'proof', description: 'Commit one synthetic effect', parameters: { type: 'object', properties: {}, additionalProperties: false }, handler(_input, context) {
@@ -78,8 +96,9 @@ test('public SDK shares canonical children across both native harness families',
     effects.push({ model: context.model, sessionId: context.sessionId, subagent: context.subagent, parentCallId: context.parentCallId });
     return 'MIXED_EFFECT_RECEIPT';
   } };
-  const codex = { module, model: 'gpt-6.1-sol', thinking: 'low', toolMode: 'direct', tools: [proof], transport: Transport.openAi({ apiKey: 'synthetic-codex', apiBaseUrl: `${base}/v1`, stateless: true }) };
-  const claude = { module, model: 'claude-sonnet-5-5', thinking: 'low', endpoint: `${base}/v1/messages`, auth: { apiKey: 'synthetic-claude' }, tools: [{ name: proof.name, description: proof.description, inputSchema: proof.parameters, handler: proof.handler }, {
+  const codeEvaluator = createQuickJsEvaluator(await newQuickJSAsyncWASMModuleFromVariant(asyncVariant));
+  const codex = { module, model: 'gpt-6.1-sol', thinking: 'low', codeEvaluator, tools: [proof], transport: Transport.openAi({ apiKey: 'synthetic-codex', apiBaseUrl: `${base}/v1`, stateless: true }) };
+  const claude = { module, codeEvaluator, model: 'claude-sonnet-5-5', thinking: 'low', endpoint: `${base}/v1/messages`, auth: { apiKey: 'synthetic-claude' }, tools: [{ name: proof.name, description: proof.description, inputSchema: proof.parameters, handler: proof.handler }, {
     name: 'await_abort', description: 'Hold one synthetic effect until cancellation', handler(_input, context) {
       assert.ok(context.subagent, 'interrupted handler receives child identity');
       assert.equal(context.signal.aborted, false);
@@ -93,15 +112,28 @@ test('public SDK shares canonical children across both native harness families',
   }] };
   const roots = [];
   try {
+    for (const toolMode of ['direct', 'code']) {
+      for (const SDK of [Agent, NodeAgent]) {
+        await assert.rejects(async () => SDK.create({ ...codex, toolMode }), /code-only/);
+        await assert.rejects(async () => SDK.create({ ...claude, harness: 'claude', toolMode }), /code-only/);
+        await assert.rejects(async () => SDK.create({ ...claude, harness: 'claude', harnesses: { codex: { ...codex, toolMode } } }), /code-only/);
+      }
+    }
+    assert.equal(trace.length, 0, 'unsupported modes reject before inference');
     roots.push(await Agent.create({ ...codex, harnesses: { claude } }));
     roots.push(await Agent.create({ ...claude, harness: 'claude', subagents: {}, harnesses: { codex } }));
     const beforeMissingEvaluator = trace.length;
-    await assert.rejects(Agent.create({ ...claude, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code' } } }), /explicit codeEvaluator/);
+    await assert.rejects(Agent.create({ ...claude, codeEvaluator: undefined, harness: 'claude', subagents: {}, harnesses: { codex } }), /explicit codeEvaluator/);
     assert.equal(trace.length, beforeMissingEvaluator, 'missing host Code Mode evaluator fails before provider dispatch');
     const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);
-    roots.push(await Agent.create({ ...claude, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code', codeEvaluator: createQuickJsEvaluator(quickJs) } } }));
-    roots.push(await NodeAgent.create({ ...claude, module: undefined, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code' } } }));
+    roots.push(await Agent.create({ ...claude, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code-only', codeEvaluator: createQuickJsEvaluator(quickJs) } } }));
+    roots.push(await NodeAgent.create({ ...claude, codeEvaluator: undefined, module: undefined, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, codeEvaluator: undefined } } }));
     roots.push(await Agent.create({ ...claude, model: 'claude-proxy-fixture', maxTokens: 1024, thinking: undefined, harness: 'claude', subagents: {} }));
+    roots.push(await NodeAgent.create({ ...codex, module: undefined, codeEvaluator: undefined, transport: Transport.openAi({ apiKey: 'synthetic-codex', websocketUrl: `ws://127.0.0.1:${server.address().port}`, websocketWarmup: false }) }));
+    for (const root of [roots[3], roots[5]]) {
+      assert.equal((await root.turn.prompt({ input: 'NODE_ROOT_DEFAULT_EVALUATOR' }).result()).finalMessage, 'NODE_ROOT_DONE');
+    }
+    assert.deepEqual([...nodeRootSteps.values()], [2, 2], 'both Node roots execute with their default evaluator');
     const batchTask = { role: 'batch fixture', task: 'Perform proof once, then submit the typed result.', outputSchema: { type: 'object' } };
     for (const override of [{ harness: 'claude' }, { harness: 'codex' }, { model: 'sol' }, { thinking: 'low' }]) {
       const before = trace.length;
@@ -126,7 +158,7 @@ test('public SDK shares canonical children across both native harness families',
     assert.equal(effects.length, 5, 'one real host effect per child');
     assert.equal(effects[0].model, 'claude-opus-5-5', 'Codex dispatches the explicitly selected Opus child');
     assert.equal(effects[4].model, 'claude-proxy-fixture', 'native models inherit without catalog coercion');
-    assert.equal(codeCalls, 2, 'host explicit evaluator and Node default evaluator execute actual Code Mode');
+    assert.equal(codeCalls, 5, 'host explicit evaluator and Node default evaluator execute actual Code Mode');
     for (const effect of effects.slice(2, 4)) assert.match(effect.parentCallId, /^proof-code-/, 'the actual host effect belongs to the Code Mode cell');
     assert.deepEqual(new Set(trace.map(row => row.path)), new Set(['/v1/responses', '/v1/messages']));
     const modelOnly = await Subagents.spawn(roots[1], { role: 'model fixture', task: 'Perform proof once, then submit the typed result.', model: 'sonnet', outputSchema: { type: 'object' } });
@@ -159,9 +191,11 @@ test('public SDK shares canonical children across both native harness families',
     await Subagents.close(root, child.agent_id);
   } finally {
     await Promise.all(roots.map(root => root.session.shutdown()));
+    for (const socket of sockets.clients) socket.terminate();
+    await new Promise(resolve => sockets.close(resolve));
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     const output = new URL('../../../output/mixed-harness-wasm/', import.meta.url);
     await mkdir(output, { recursive: true });
-    await writeFile(new URL('trace.json', output), JSON.stringify({ command: 'node --test js/nanocodex/test/mixed-harness-wasm.test.mjs', expected: 'four mixed children, one inherited native model and one model-only Claude selection; host and Node Code Mode; interrupt aborts handler before inactive; same identity on recovery; seven proof effects; invalid family and batch overrides never dispatched', observed: { codeCalls, blockedCallIssued, blockedSignalAborted: blockedContext?.signal.aborted }, fixtureErrors, rejectedBatches, trace, effects, events }, null, 2));
+    await writeFile(new URL('trace.json', output), JSON.stringify({ command: 'node --test js/nanocodex/test/mixed-harness-wasm.test.mjs', expected: 'four mixed children, one inherited native model and one model-only Claude selection; host and Node Code Mode; interrupt aborts handler before inactive; same identity on recovery; seven proof effects; invalid family and batch overrides never dispatched', observed: { nodeRootSteps: Object.fromEntries(nodeRootSteps), codeCalls, blockedCallIssued, blockedSignalAborted: blockedContext?.signal.aborted }, fixtureErrors, rejectedBatches, trace, effects, events }, null, 2));
   }
 });

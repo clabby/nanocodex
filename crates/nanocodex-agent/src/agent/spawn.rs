@@ -171,6 +171,11 @@ where
         .tools
         .materialize(child_handle.clone())?
         .for_session(&session_id_text);
+    if tools.exposure() != nanocodex_oai_tools::ToolExposure::CodeModeOnly {
+        return Err(NanocodexError::InvalidRequest(
+            "Nanocodex agents require CodeModeOnly tool exposure; direct exposure is only available to standalone tool runtimes".to_owned(),
+        ));
+    }
     let prompt_cache_key = spawner
         .prompt_cache_key
         .as_deref()

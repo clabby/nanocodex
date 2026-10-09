@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
@@ -14,10 +15,10 @@ test("stateless GPT transport executes a tool with full replay through the real 
       assert.equal(input.reasoning_effort, "low");
       calls += 1;
       if (calls === 1) {
-        const tool = input.tools.find(tool => tool.function.description.startsWith("runtimeInfo\n"));
+        const tool = input.tools.find(tool => tool.function.description.startsWith("exec\n"));
         assert.ok(tool, "Rust tool declaration reaches GPT");
         return { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{
-          id: "gpt-runtime", type: "function", function: { name: tool.function.name, arguments: "{}" },
+          id: "gpt-runtime", type: "function", function: { name: tool.function.name, arguments: JSON.stringify({ input: "text(await tools.runtimeInfo({}));" }) },
         }] } }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } };
       }
       assert.equal(calls, 2);
@@ -29,7 +30,7 @@ test("stateless GPT transport executes a tool with full replay through the real 
     },
   }, { model: "gpt-6.1-sol" });
   const agent = await Agent.create({
-    module, model: "gpt-6.1-sol", thinking: "low", toolMode: "direct",
+    module, model: "gpt-6.1-sol", thinking: "low", codeEvaluator,
     transport: Transport.hostManaged({ ...transport, stateless: true,
       websocketPreconnect: true, websocketWarmup: true, websocketUrl: "wss://stateless.invalid/responses",
       createResponse(endpoint, sessionId, request) {

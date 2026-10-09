@@ -6,9 +6,9 @@ description: Register host tools, compose them in Code Mode, and select the link
 # TypeScript tools, Code Mode, and subagents
 
 JavaScript owns host capabilities. Rust/WASM owns the model/tool turn. Register
-plain async handlers, then let the default Code Mode surface compose them
-through `exec`. Deferred search and deliberately direct tools may remain
-alongside that execution entrypoint.
+plain async handlers, then compose them through Code Mode. Every harness exposes
+only `exec` and `wait`; discovery, subagents and application tools are called
+inside those cells.
 
 ## Register a typed host tool
 
@@ -51,14 +51,14 @@ finish out of order.
 
 ## Keep remote catalogs deferred
 
-Streamable HTTP MCP servers stay behind `tool_search`. Search loads only matching
+Streamable HTTP MCP servers stay behind `tools.tool_search` inside Code Mode. Search loads only matching
 namespaces, and discovered functions use canonical
 `mcp__<server>__<tool>` names below Code Mode. This keeps a large catalog out of
 the stable initial prompt prefix.
 
-Runtimes that reject `eval` or `new Function`, including Cloudflare Workers,
-can pass `createQuickJsEvaluator(...)`. That changes the JavaScript evaluator,
-not the Rust-owned agent lifecycle or tool contract.
+Node uses an isolated QuickJS evaluator and browsers use a Worker. Other Web API
+hosts, including Cloudflare Workers, supply `createQuickJsEvaluator(...)` through
+`codeEvaluator`. The Rust-owned agent lifecycle and tool contract stay the same.
 
 ## Select Rust-backed subagents
 
@@ -81,6 +81,7 @@ second WASM plugin or maintain a parallel scheduler.
 
 The extension exposes `spawn_agent`, `submit_result`, `send_agent_message`,
 `list_agents`, `wait_agent`, `interrupt_agent`, and `close_agent`. Root shutdown
-closes its children. All subagents are ephemeral, including children of a durable
-root: root restart resumes only the root and discards the child tree. Read the [binding guide](https://github.com/gakonst/nanocodex/blob/master/js/nanocodex/README.md#standard-web-and-browser-tools)
+closes its children. Durable roots restore journaled child identities and
+committed snapshots when their host capabilities are reattached. In-flight
+work can remain interrupted; JavaScript cells are process-local. Read the [binding guide](https://github.com/gakonst/nanocodex/blob/master/js/nanocodex/README.md#standard-web-and-browser-tools)
 and [branches and subagents](/core/branching).

@@ -94,6 +94,8 @@ pub(super) enum SubmissionOutcome {
     Superseded,
 }
 
+type RestorationOutcome = watch::Receiver<Option<Result<(), String>>>;
+
 pub struct Registry {
     session_handles: std::sync::RwLock<HashMap<String, AgentHandle>>,
     spawn_router: std::sync::RwLock<Option<Arc<dyn crate::SpawnRouter>>>,
@@ -109,8 +111,7 @@ pub struct Registry {
     /// Per-root journals adopted from durable root handles.
     journals: std::sync::RwLock<HashMap<String, Arc<dyn SubagentStore>>>,
     /// Per-root restoration outcome. Pending and failed roots must never be saved.
-    restored:
-        std::sync::Mutex<HashMap<String, tokio::sync::watch::Receiver<Option<Result<(), String>>>>>,
+    restored: std::sync::Mutex<HashMap<String, RestorationOutcome>>,
     journal_writer: std::sync::atomic::AtomicBool,
     checkpoints: std::sync::Mutex<HashMap<(String, AgentId), ChildSnapshot>>,
     /// In-flight mid-turn checkpoint captures; `true` requests one more pass.
@@ -1411,6 +1412,20 @@ impl Registry {
             .await
             .root_by_session
             .contains_key(session_id)
+    }
+
+    /// Resolve an owned child's session for host resource lifecycle management.
+    /// The caller must have the same management authority required for closure.
+    pub async fn child_session_id(&self, caller: &str, id: AgentId) -> std::io::Result<String> {
+        self.await_restored(caller).await?;
+        let state = self.state.lock().await;
+        let root = state.authorize(caller, id)?;
+        state
+            .scopes
+            .get(&root)
+            .and_then(|scope| scope.sessions.get(&id))
+            .map(|session| session.descriptor.session_id.clone())
+            .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {id}")))
     }
 
     /// Returns embedding-private context for one retained child session.
@@ -3337,7 +3352,12 @@ mod tests {
         registry.capture_progress("root", id);
         registry.capture_progress("root", id);
         timeout(Duration::from_secs(5), async {
-            while !has_checkpoint() || registry.progress_captures.lock().unwrap().contains_key(&key)
+            while !has_checkpoint()
+                || registry
+                    .progress_captures
+                    .lock()
+                    .unwrap()
+                    .contains_key(&key)
             {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
@@ -3353,7 +3373,12 @@ mod tests {
         registry.checkpoints.lock().unwrap().remove(&key);
         registry.capture_progress("root", id);
         timeout(Duration::from_secs(5), async {
-            while registry.progress_captures.lock().unwrap().contains_key(&key) {
+            while registry
+                .progress_captures
+                .lock()
+                .unwrap()
+                .contains_key(&key)
+            {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })

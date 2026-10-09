@@ -170,7 +170,7 @@ export async function create(options = {}) {
           );
         }
         harnesses = await prepareHarnesses(options.harnesses, events.emit, {
-          subagentSessions, subagentRouting: internalRuntime?.subagentRouting,
+          subagentSessions, subagentRouting: internalRuntime?.subagentRouting, codeEvaluator,
         });
         activateHost(host);
         await host.ready();

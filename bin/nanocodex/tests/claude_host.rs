@@ -1,5 +1,7 @@
 //! Shipped-CLI journeys against synthetic Messages/SSE. No live inference or
 //! credentials. Artifacts retain every provider request and CLI stdout/stderr.
+#[path = "support/claude_code_fixture.rs"]
+mod code_fixture;
 use axum::{Json, Router, routing::post};
 use serde_json::{Value, json};
 use std::{
@@ -27,7 +29,7 @@ fn sse(block: Value) -> impl axum::response::IntoResponse {
     ([("content-type", "text/event-stream")], body)
 }
 fn tool(stage: usize, name: &str, input: Value) -> Value {
-    json!({"type":"tool_use","id":format!("call-{stage}"),"name":name,"input":input})
+    code_fixture::tool(format!("call-{stage}"), name, input)
 }
 fn result(body: &Value) -> Option<&Value> {
     body["messages"]
@@ -112,7 +114,7 @@ async fn native_cli_background_bash_tasks_and_agent_lifecycle() {
     let count = root_count.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
-    let app = Router::new().route("/v1/messages",post(move |Json(body): Json<Value>| {
+    let app = Router::new().route("/v1/messages",post(move |Json(body): Json<Value>| {let body = code_fixture::normalize(body);
         let log = log.clone(); let count = count.clone(); let bash_ids = bash_ids.clone();
         async move {
             let first = body["messages"][0]["content"].to_string();
@@ -120,7 +122,7 @@ async fn native_cli_background_bash_tasks_and_agent_lifecycle() {
             log.lock().unwrap().push(json!({"child":child,"request":body}));
             let reply = if child {
                 if first.contains("HOST_CHILD_SLOW") { tokio::time::sleep(Duration::from_secs(30)).await; }
-                if result(&body).is_none() { tool(100,"SubmitResult",json!({"output":"child-complete"})) }
+                if result(&body).is_none() { tool(100,"submit_result",json!({"output":"child-complete"})) }
                 else { json!({"type":"text","text":"child finished"}) }
             } else {
                 let stage = { let mut n = count.lock().unwrap(); let current = *n; *n += 1; current };
@@ -139,18 +141,18 @@ async fn native_cli_background_bash_tasks_and_agent_lifecycle() {
                     9 => tool(stage,"TaskUpdate",json!({"taskId":"1","status":"completed"})),
                     10 => tool(stage,"TaskGet",json!({"taskId":"1"})),
                     11 => tool(stage,"TodoWrite",json!({"todos":[{"content":"Verify native host","activeForm":"Verifying native host","status":"completed"}]})),
-                    12 => tool(stage,"Agent",json!({"description":"CLI child","prompt":"HOST_CHILD_FIXTURE return child-complete","run_in_background":true})),
-                    13 => tool(stage,"TaskOutput",json!({"task_id":"agent-1","block":true,"timeout":20000})),
-                    14 => tool(stage,"ListAgents",json!({"include_completed":true})),
-                    15 => tool(stage,"SendMessage",json!({"recipient":"agent-1","content":"HOST_CHILD_FIXTURE follow-up"})),
-                    16 => tool(stage,"Agent",json!({"description":"foreground child","prompt":"HOST_CHILD_FIXTURE return child-complete"})),
-                    17 => tool(stage,"TaskStop",json!({"task_id":"agent-2"})),
-                    18 => tool(stage,"Agent",json!({"description":"unsupported mode","prompt":"never execute","isolation":"invalid-other"})),
+                    12 => tool(stage,"spawn_agent",json!({"role":"CLI child","task":"HOST_CHILD_FIXTURE return child-complete","output_contract":{"kind":"string"}})),
+                    13 => tool(stage,"wait_agent",json!({"agent_ids":[1],"timeout_ms":20000})),
+                    14 => tool(stage,"list_agents",json!({"include_completed":true})),
+                    15 => tool(stage,"send_agent_message",json!({"agent_id":1,"message":"HOST_CHILD_FIXTURE follow-up"})),
+                    16 => tool(stage,"spawn_agent",json!({"role":"second child","task":"HOST_CHILD_FIXTURE return child-complete","output_contract":{"kind":"string"}})),
+                    17 => tool(stage,"wait_agent",json!({"agent_ids":[2],"timeout_ms":20000})),
+                    18 => tool(stage,"spawn_agent",json!({"role":"unsupported family","task":"never execute","harness":"invalid-other","output_contract":{"kind":"string"}})),
                     19 => tool(stage,"Bash",json!({"command":"touch invalid-background.txt","run_in_background":true,"timeout":0})),
-                    20 => tool(stage,"Agent",json!({"description":"interruptible child","prompt":"HOST_CHILD_FIXTURE HOST_CHILD_SLOW wait for cancellation","run_in_background":true})),
-                    21 => tool(stage,"TaskStop",json!({"task_id":"agent-3"})),
-                    22 => tool(stage,"TaskOutput",json!({"task_id":"agent-3","block":false})),
-                    23 => tool(stage,"Agent",json!({"description":"resume child","prompt":"HOST_CHILD_FIXTURE resume prompt","resume":"agent-1"})),
+                    20 => tool(stage,"spawn_agent",json!({"role":"interruptible child","task":"HOST_CHILD_FIXTURE HOST_CHILD_SLOW wait for cancellation","output_contract":{"kind":"string"}})),
+                    21 => tool(stage,"interrupt_agent",json!({"agent_id":3})),
+                    22 => tool(stage,"wait_agent",json!({"agent_ids":[3],"timeout_ms":1})),
+                    23 => tool(stage,"send_agent_message",json!({"agent_id":1,"message":"HOST_CHILD_FIXTURE resume prompt","purpose":"delegate"})),
                     24 => tool(stage,"Bash",json!({"command":"(sleep 0.3; printf should-not-run > independent-stopped.txt) & wait","run_in_background":true})),
                     25 => tool(stage,"Bash",json!({"command":"sleep 0.5; printf independent-done; printf survived > independent.txt","run_in_background":true})),
                     26 => tool(stage,"TaskStop",json!({"task_id":ids[2]})),
@@ -209,26 +211,7 @@ async fn native_cli_background_bash_tasks_and_agent_lifecycle() {
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    for name in [
-        "Bash",
-        "Agent",
-        "TaskOutput",
-        "TaskStop",
-        "ListAgents",
-        "CloseAgent",
-        "SendMessage",
-        "SubmitResult",
-        "TaskCreate",
-        "TaskGet",
-        "TaskList",
-        "TaskUpdate",
-        "TodoWrite",
-    ] {
-        assert!(names.contains(&name), "missing {name}");
-    }
-    for name in ["exec", "wait", "tool_search", "spawn_agent", "exec_command"] {
-        assert!(!names.contains(&name), "leaked {name}");
-    }
+    assert_eq!(names, vec!["exec", "wait"]);
     assert!(
         parsed_result(roots[1])["task_id"]
             .as_str()
@@ -253,7 +236,7 @@ async fn native_cli_background_bash_tasks_and_agent_lifecycle() {
     assert!(parsed_result(roots[7]).to_string().contains("timed out"));
     assert_eq!(parsed_result(roots[9])["task"]["id"], "1");
     assert_eq!(parsed_result(roots[11])["task"]["status"], "completed");
-    assert_eq!(parsed_result(roots[13])["task_id"], "agent-1");
+    assert_eq!(parsed_result(roots[13])["agent_id"], 1);
     assert!(
         parsed_result(roots[14])
             .to_string()
@@ -264,18 +247,18 @@ async fn native_cli_background_bash_tasks_and_agent_lifecycle() {
     assert!(parsed_result(roots[15]).to_string().contains("CLI child"));
     assert_ne!(result(roots[16]).unwrap()["is_error"], true);
     assert!(
-        parsed_result(roots[17])
+        parsed_result(roots[18])
             .to_string()
             .contains("child-complete")
     );
-    assert_eq!(parsed_result(roots[21])["task_id"], "agent-3");
+    assert_eq!(parsed_result(roots[21])["agent_id"], 3);
     assert_ne!(result(roots[22]).unwrap()["is_error"], true);
     assert!(
         parsed_result(roots[23]).to_string().contains("interrupted"),
         "{}",
         parsed_result(roots[23])
     );
-    assert_eq!(parsed_result(roots[24])["task_id"], "agent-1");
+    assert_eq!(parsed_result(roots[24])["to_agent_id"], 1);
     assert_ne!(result(roots[24]).unwrap()["is_error"], true);
     let workspace = artifact.join("workspace").canonicalize().unwrap();
     assert_eq!(
@@ -357,7 +340,7 @@ async fn native_cli_foreground_bash_auto_background_preserves_cwd_and_stops_desc
     std::fs::create_dir_all(workspace.join("sub")).unwrap();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let captured = requests.clone();
-    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {let body = code_fixture::normalize(body);
         let captured = captured.clone();
         async move {
             let mut requests = captured.lock().unwrap();
@@ -442,7 +425,7 @@ async fn native_cli_disabled_background_bash_terminates_at_foreground_deadline()
     let workspace = artifact.join("workspace");
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let captured = requests.clone();
-    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+    let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {let body = code_fixture::normalize(body);
         let captured = captured.clone();
         async move {
             let mut requests = captured.lock().unwrap();
@@ -451,7 +434,7 @@ async fn native_cli_disabled_background_bash_terminates_at_foreground_deadline()
             sse(match stage {
                 0 => tool(stage,"Bash",json!({"command":"printf started; sleep 0.5; touch must-not-exist","timeout":25})),
                 1 => tool(stage,"Bash",json!({"command":"touch denied-background","run_in_background":true})),
-                2 => tool(stage,"Bash",json!({"command":"sleep 0.7; printf cleanup-complete"})),
+                2 => tool(stage,"Bash",json!({"command":"sleep 1.2; printf cleanup-complete"})),
                 _ => json!({"type":"text","text":"disabled-background-complete"}),
             })
         }
@@ -534,7 +517,7 @@ async fn native_cli_background_deadlines_and_environment_limits() {
         let workspace = artifact.join("workspace");
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let captured = requests.clone();
-        let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {
+        let app = Router::new().route("/v1/messages", post(move |Json(body): Json<Value>| {let body = code_fixture::normalize(body);
             let captured = captured.clone();
             async move {
                 let mut requests = captured.lock().unwrap();
@@ -548,9 +531,9 @@ async fn native_cli_background_deadlines_and_environment_limits() {
                     3 => tool(stage,"TaskOutput",json!({"task_id":id(3),"block":true,"timeout":10000})),
                     4 => tool(stage,"Bash",json!({"command":"touch rejected-background","run_in_background":true,"timeout":maximum_ms+1})),
                     5 => tool(stage,"Bash",json!({"command":"touch rejected-foreground","timeout":600001})),
-                    6 => tool(stage,"Bash",json!({"command":"printf start; (sleep 0.5; touch deadline-leak) & echo $! > deadline-child.pid; wait","run_in_background":true,"timeout":100})),
+                    6 => tool(stage,"Bash",json!({"command":"printf start; (sleep 2; touch deadline-leak) & echo $! > deadline-child.pid; wait","run_in_background":true,"timeout":1000})),
                     7 => tool(stage,"TaskOutput",json!({"task_id":id(7),"block":true,"timeout":10000})),
-                    8 => tool(stage,"Bash",json!({"command":"sleep 0.7; printf cleanup-complete"})),
+                    8 => tool(stage,"Bash",json!({"command":"sleep 1.2; printf cleanup-complete"})),
                     9 => tool(stage,"Bash",json!({"command":"printf promoted; sleep 0.1","timeout":25})),
                     10 => tool(stage,"TaskOutput",json!({"task_id":id(10),"block":true,"timeout":10000})),
                     _ => json!({"type":"text","text":"background-deadlines-complete"}),
@@ -563,7 +546,7 @@ async fn native_cli_background_deadlines_and_environment_limits() {
         let mut cmd = command(&workspace, &endpoint);
         cmd.envs(overrides)
             .arg("Exercise real background deadlines and environment overrides.");
-        std::fs::write(artifact.join("scenario.txt"),format!("Command: {cmd:?}\nExpected: default {default_ms}ms; background maximum {maximum_ms}ms; foreground max600000ms unchanged; 100ms explicit deadline kills delayed descendant, no fake clock; promotion uses background default.\n")).unwrap();
+        std::fs::write(artifact.join("scenario.txt"),format!("Command: {cmd:?}\nExpected: default {default_ms}ms; background maximum {maximum_ms}ms; foreground max600000ms unchanged; 1000ms explicit deadline kills delayed descendant, no fake clock; promotion uses background default.\n")).unwrap();
         let output = tokio::time::timeout(Duration::from_secs(25), cmd.output())
             .await
             .unwrap()
@@ -599,13 +582,13 @@ async fn native_cli_background_deadlines_and_environment_limits() {
         for stage in [5, 6] {
             assert_eq!(result(&requests[stage]).unwrap()["is_error"], true);
         }
-        assert_eq!(parsed_result(&requests[7])["background_timeout_ms"], 100);
+        assert_eq!(parsed_result(&requests[7])["background_timeout_ms"], 1000);
         assert_eq!(parsed_result(&requests[8])["status"], "failed");
         assert!(
             parsed_result(&requests[8])["error"]
                 .as_str()
                 .unwrap()
-                .contains("background time limit (100 milliseconds)")
+                .contains("background time limit (1000 milliseconds)")
         );
         assert_eq!(parsed_result(&requests[9])["stdout"], "cleanup-complete");
         assert_eq!(parsed_result(&requests[10])["auto_backgrounded"], true);
@@ -652,6 +635,7 @@ async fn native_cli_background_deadlines_and_environment_limits() {
         let app = Router::new().route(
             "/v1/messages",
             post(move |Json(body): Json<Value>| {
+                let body = code_fixture::normalize(body);
                 let captured = captured.clone();
                 async move {
                     let mut requests = captured.lock().unwrap();

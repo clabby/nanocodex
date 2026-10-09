@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Shipped CLI, SQLite and PTY rewind acceptance. Only external inference is synthetic."""
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse
 import errno
 import fcntl
@@ -57,7 +58,7 @@ def main():
             pass
 
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers['content-length'])))
+            request = json.loads(self.rfile.read(int(self.headers['content-length']))); request = normalize_request(request, artifact)
             name, stage = phase['name'], len(requests) - phase['start']
             requests.append({'phase': name, 'request': request})
             try:
@@ -92,7 +93,7 @@ def main():
                 errors.append(str(error))
                 block = {'type': 'text', 'text': 'fixture-assertion-failed'}
             (artifact / 'provider.json').write_text(json.dumps(requests, indent=2))
-            response = sse(block, request['model'])
+            response = sse(wrap_tool(block), request['model'])
             try:
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')

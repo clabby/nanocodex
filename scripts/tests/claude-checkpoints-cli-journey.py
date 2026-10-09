@@ -3,6 +3,7 @@
 Only the external Messages/SSE provider is synthetic. Retain commands, requests,
 stdout, stderr and outcome in output/ so this journey is independently replayable.
 """
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse
 import json
 import os
@@ -73,7 +74,7 @@ else:
             pass
 
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers['content-length'])))
+            request = json.loads(self.rfile.read(int(self.headers['content-length']))); request = normalize_request(request, artifact)
             stage = len(requests) - phase['start']
             requests.append(request)
             try:
@@ -93,7 +94,7 @@ else:
                 errors.append(str(error))
                 block = {'type': 'text', 'text': 'fixture-assertion-failed'}
             (artifact / 'provider.json').write_text(json.dumps(requests, indent=2))
-            response = sse(block, request['model'])
+            response = sse(wrap_tool(block), request['model'])
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(response)))

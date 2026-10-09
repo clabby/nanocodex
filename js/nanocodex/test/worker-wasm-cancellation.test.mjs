@@ -23,6 +23,7 @@ test("compiled Worker Agent replaces an active model call after cancelling its q
   const server = await startResponsesServer();
   const worker = new NodeWebWorker(AGENT_WORKER_URL, { name: "agent-model-cancel-replace" });
   const agent = await createWorkerAgent({
+    // Disable the browser workspace bootstrap; Code Mode uses the default Worker evaluator.
     harness: false,
     module: await readFile(WASM_URL),
     sessionId: "018f1f9a-7b3c-7a07-8000-000000000014",
@@ -79,6 +80,7 @@ for (const [label, source] of [
     const wasm = await readFile(WASM_URL);
     const worker = new NodeWebWorker(AGENT_WORKER_URL, { name: `agent-${label}` });
     const agent = await createWorkerAgent({
+      // Disable the browser workspace bootstrap; Code Mode uses the default Worker evaluator.
       harness: false,
       module: wasm,
       sessionId: label === "CPU loop"
@@ -148,8 +150,9 @@ test("compiled Worker Agent aborts active nested work and reuses the tool runtim
   const wasm = await readFile(WASM_URL);
   const worker = new NodeWebWorker(TOOL_AGENT_WORKER_URL, { name: "agent-nested-cancel" });
   const agent = await createWorkerAgent({
-    blockedUrl: blocker.url,
+    // Disable the browser workspace bootstrap; Code Mode uses the default Worker evaluator.
     harness: false,
+    blockedUrl: blocker.url,
     module: wasm,
     sessionId: "018f1f9a-7b3c-7a07-8000-000000000013",
     thinking: "low",

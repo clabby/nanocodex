@@ -21,9 +21,10 @@ type WorkerMcpServer = Readonly<{
   timeoutMs?: number | undefined;
 }>;
 type WorkerMcpServers = Readonly<Record<string, string | URL | WorkerMcpServer>>;
-type WorkerToolExposureOptions =
-  | { mcp?: false | undefined; toolMode?: "code" | "code-only" | "direct" | undefined }
-  | { mcp: WorkerMcpServers; toolMode?: "code" | "code-only" | undefined };
+type WorkerToolExposureOptions = {
+  mcp?: WorkerMcpServers | false | undefined;
+  toolMode?: "code-only" | undefined;
+};
 
 /** Creates a Rust/WASM Agent in a package-owned browser module Worker. */
 export function create(options: import('../runtime/claude.mjs').Options & { harness: 'claude' }): Promise<import('../runtime/claude.mjs').Agent>;

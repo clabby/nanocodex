@@ -1,3 +1,4 @@
+import { codeEvaluator } from '../quickjs-fixture.mjs';
 // Real public Agent in a fresh process, sharing only the SQLite durability file.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -35,7 +36,7 @@ const durability = { ...store, replace(id, request) {
   return result;
 } };
 const events = [];
-const agent = await Agent.create({ module, harness: false, durability, durabilityId: "timing-operation",
+const agent = await Agent.create({ module, codeEvaluator, durability, durabilityId: "timing-operation",
   transport: Transport.openAi({ apiKey: "synthetic", WebSocketImpl: WebSocket,
     websocketUrl, websocketWarmup: false }),
   tools: { marker: {

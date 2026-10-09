@@ -8,6 +8,9 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { resolveThreadRoute, routingPolicySchema, ThreadRoutePin, OSS_MODEL } from "../src/thread-model-routing.ts";
 import { initializeManagedAgentSettingsSchema } from "../src/agent-settings-schema.ts";
+import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
+import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
+import { createQuickJsEvaluator } from "../../nanocodex/host/index.mjs";
 import { Agent, Transport } from "../../nanocodex/host/index.mjs";
 import { createWorkersAiResponses } from "../../nanocodex/cloudflare/workers-ai-responses.mjs";
 
@@ -53,14 +56,14 @@ test("Jev -> committed route -> real WASM GLM tool loop -> second turn retains m
     assert.equal(input.reasoning_effort, "low");
     glmCalls++;
     if (glmCalls === 1 || glmCalls === 3) {
-      const tool = input.tools.find(tool => tool.function.description.startsWith("runtimeInfo\n"));
+      const tool = input.tools.find(tool => tool.function.name === "exec" || tool.function.name.endsWith("_exec") || tool.function.description.startsWith("exec\n"));
       assert.ok(tool, "real Rust tool declaration reaches GLM");
       if (glmCalls === 3) {
         assert.ok(input.messages.some(message => message.content?.includes("TURN_1_OK")), "second turn retains first answer");
         assert.ok(input.messages.some(message => message.content?.includes("Now inspect again")));
       }
       return { choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{
-        id: `runtime-${glmCalls}`, type: "function", function: { name: tool.function.name, arguments: "{}" },
+        id: `runtime-${glmCalls}`, type: "function", function: { name: tool.function.name, arguments: JSON.stringify({input: "text(await tools.runtimeInfo({}));"}) },
       }] } }] };
     }
     assert.ok(glmCalls === 2 || glmCalls === 4);
@@ -78,7 +81,8 @@ test("Jev -> committed route -> real WASM GLM tool loop -> second turn retains m
   const transport = createWorkersAiResponses(binding);
   const agent = await Agent.create({
     module: await readFile(new URL("../../nanocodex/pkg-web/nanocodex_bg.wasm", import.meta.url)),
-    model: store.settings().model, thinking: store.settings().thinking, toolMode: "direct",
+    model: store.settings().model, thinking: store.settings().thinking, toolMode: "code-only",
+    codeEvaluator: createQuickJsEvaluator(await newQuickJSAsyncWASMModuleFromVariant(asyncVariant)),
     transport: Transport.hostManaged({ ...transport, websocketPreconnect: false, createWebSocket() { assert.fail("GLM attempted WebSocket"); } }),
     tools: { runtimeInfo: { description: "Return fixture runtime", parameters: { type: "object", additionalProperties: false },
       handler() { executions++; return { runtime: "local-routing-fixture", execution: executions }; },
@@ -127,10 +131,10 @@ for (const model of ["kimi-k3", "mimo-v2.6-pro"]) test(`${model} real WASM execu
         { choices: [{ index: 0, delta: {}, finish_reason }] }, "[DONE]",
       ].map(value => `data: ${typeof value === "string" ? value : JSON.stringify(value)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
       if (calls === 1) {
-        const tool = body.tools.find(t => t.function.description.startsWith("runtimeInfo\n"));
+        const tool = body.tools.find(t => t.function.name === "exec" || t.function.name.endsWith("_exec") || t.function.description.startsWith("exec\n"));
         assert.ok(tool);
         return reply({
-          reasoning_details: details, tool_calls: [{ id: "fixture-host-call", type: "function", function: { name: tool.function.name, arguments: "{}" } }],
+          reasoning_details: details, tool_calls: [{ id: "fixture-host-call", type: "function", function: { name: tool.function.name, arguments: JSON.stringify({input: "text(await tools.runtimeInfo({}));"}) } }],
         }, "tool_calls");
       }
       assert.equal(calls, 2);
@@ -140,7 +144,8 @@ for (const model of ["kimi-k3", "mimo-v2.6-pro"]) test(`${model} real WASM execu
       return reply({ content: "HOST_TOOL_OK" }, "stop");
     } });
   const agent = await Agent.create({ module: await readFile(new URL("../../nanocodex/pkg-web/nanocodex_bg.wasm", import.meta.url)),
-    model, thinking: "low", toolMode: "direct",
+    model, thinking: "low", toolMode: "code-only",
+    codeEvaluator: createQuickJsEvaluator(await newQuickJSAsyncWASMModuleFromVariant(asyncVariant)),
     transport: Transport.hostManaged({ ...transport, websocketPreconnect: false, createWebSocket() { assert.fail("gateway attempted account WebSocket"); } }),
     tools: { runtimeInfo: { description: "Inspect fixture", parameters: { type: "object", properties: {} }, handler() { executions++; return { runtime: "gateway-host-fixture" }; } } },
   });

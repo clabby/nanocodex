@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
@@ -14,7 +15,7 @@ import { createBrowserVoice } from "../internal.mjs";
 test("WASM voice starts without scanning or injecting workspace context", async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const agent = await Agent.create({
-    module, harness: false,
+    module, codeEvaluator,
     transport: Transport.openAi({ apiKey: "test-key", websocketWarmup: false }),
   });
   const original = globalThis.nanocodexHost;
@@ -73,7 +74,7 @@ const createWarmAgent = ({
   ...options
 }) => Agent.create({
   ...options,
-  codeEvaluator: options.codeEvaluator ?? evaluateInTestRealm,
+  codeEvaluator: options.codeEvaluator ?? codeEvaluator,
   transport: Transport.openAi({
     apiKey,
     createWebSocket,
@@ -82,26 +83,6 @@ const createWarmAgent = ({
     websocketWarmup: true,
   }),
 });
-
-async function evaluateInTestRealm(source, environment) {
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const script = new AsyncFunction(
-    "tools", "ALL_TOOLS", "text", "image", "generatedImage", "store", "load", "exit",
-    "require", "console", source,
-  );
-  await script(
-    environment.tools,
-    environment.toolDefinitions,
-    environment.text,
-    environment.image,
-    environment.generatedImage,
-    environment.store,
-    environment.load,
-    environment.exit,
-    environment.require,
-    environment.console,
-  );
-}
 
 test("web-target WASM runs the shared model loop through the browser host", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -221,7 +202,7 @@ test("web-target WASM runs the shared model loop through the browser host", asyn
   }
 });
 
-test("web-target WASM directly dispatches a CSP-safe application tool", async () => {
+test("web-target WASM executes a nested CSP-safe application tool", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve, reject) => {
     server.once("listening", resolve);
@@ -236,7 +217,6 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
     module: wasm,
     sessionId: "018f1f9a-7b3c-7a07-8000-000000000008",
     thinking: "low",
-    toolMode: "direct",
     tools: {
       runtimeInfo: {
         description: "Return the runtime.",
@@ -254,16 +234,7 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
     const reader = messageReader(socket);
     const warmup = await reader.next();
     const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
-    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name), [
-      "close_agent",
-      "interrupt_agent",
-      "list_agents",
-      "runtimeInfo",
-      "send_agent_message",
-      "spawn_agent",
-      "submit_result",
-      "wait_agent",
-    ]);
+    assert.deepEqual(toolPrefix.tools.map(tool => tool.name), ['exec', 'wait']);
     send(socket, { type: "response.completed", response: { id: "direct-warmup", usage: null } });
     const generation = await reader.next();
     assert.equal(generation.previous_response_id, "direct-warmup");
@@ -273,18 +244,18 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
         id: "direct-tool",
         status: "completed",
         output: [{
-          type: "function_call",
+          type: "custom_tool_call",
           call_id: "call-runtime",
-          name: "runtimeInfo",
-          arguments: "{}",
+          name: "exec",
+          input: "text(await tools.runtimeInfo({}));",
         }],
         usage: null,
       },
     });
     const continuation = await reader.next();
-    assert.equal(continuation.input[0].type, "function_call_output");
+    assert.equal(continuation.input[0].type, "custom_tool_call_output");
     assert.equal(continuation.input[0].call_id, "call-runtime");
-    assert.deepEqual(JSON.parse(continuation.input[0].output), { runtime: "worker" });
+    assert.match(JSON.stringify(continuation.input[0].output), /worker/);
     send(socket, {
       type: "response.completed",
       response: {
@@ -311,7 +282,7 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
   }
 });
 
-test("web-target WASM directly dispatches a discovered pure-attached tool", async () => {
+test("web-target WASM executes a nested discovered pure-attached tool", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve, reject) => {
     server.once("listening", resolve);
@@ -370,36 +341,34 @@ test("web-target WASM directly dispatches a discovered pure-attached tool", asyn
         id: "attached-search",
         status: "completed",
         output: [{
-          type: "tool_search_call",
-          call_id: "search-attached",
-          execution: "client",
-          arguments: { query: "browser echo deterministic message", limit: 1 },
+          type: "custom_tool_call",
+          call_id: "search-attached", name: "exec",
+          input: 'text(await tools.tool_search({query:"browser echo deterministic message",limit:1}));',
         }],
         usage: null,
       },
     });
 
     const searched = await reader.next();
-    assert.equal(searched.input[0].type, "tool_search_output");
-    assert.equal(searched.input[0].tools[0].name, "browser_echo");
+    assert.equal(searched.input[0].type, "custom_tool_call_output");
+    assert.match(JSON.stringify(searched.input[0].output), /browser_echo/);
     send(socket, {
       type: "response.completed",
       response: {
         id: "attached-call",
         status: "completed",
         output: [{
-          type: "function_call",
-          call_id: "call-attached",
-          name: "browser_echo",
-          arguments: JSON.stringify({ message: "BROWSER_ECHO_OK" }),
+          type: "custom_tool_call",
+          call_id: "call-attached", name: "exec",
+          input: 'text(await tools.browser_echo({message:"BROWSER_ECHO_OK"}));',
         }],
         usage: null,
       },
     });
 
     const called = await reader.next();
-    assert.equal(called.input[0].type, "function_call_output");
-    assert.match(called.input[0].output, /BROWSER_ECHO_OK/);
+    assert.equal(called.input[0].type, "custom_tool_call_output");
+    assert.match(JSON.stringify(called.input[0].output), /BROWSER_ECHO_OK/);
     send(socket, {
       type: "response.completed",
       response: {
@@ -620,21 +589,7 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     const reader = messageReader(socket);
     const warmup = await reader.next();
     const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
-    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name ?? tool.type), [
-      "exec",
-      "wait",
-      "exec_command",
-      "update_plan",
-      "apply_patch",
-      "view_image",
-      "tool_search",
-      ...SUBAGENT_TOOL_NAMES,
-    ]);
-    assert.equal(toolPrefix.tools[0].type, "custom");
-    assert.equal(
-      toolPrefix.tools.find((tool) => (tool.name ?? tool.type) === "tool_search")?.type,
-      "tool_search",
-    );
+    assert.deepEqual(toolPrefix.tools.map(tool => tool.name), ['exec', 'wait']);
     send(socket, { type: "response.completed", response: { id: "combined-warmup", usage: null } });
 
     const generation = await reader.next();
@@ -644,55 +599,22 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       response: {
         id: "combined-direct",
         status: "completed",
-        output: [
-          {
-            type: "function_call",
-            call_id: "call-shell",
-            name: "exec_command",
-            arguments: '{"cmd":"pwd"}',
-          },
-          {
-            type: "function_call",
-            call_id: "call-plan",
-            name: "update_plan",
-            arguments: '{"explanation":"fixture","plan":[{"step":"exercise tools","status":"completed"}]}',
-          },
-          {
-            type: "custom_tool_call",
-            call_id: "call-patch",
-            name: "apply_patch",
-            input: "*** Begin Patch\n*** Update File: note.txt\n@@\n-before\n+after\n*** End Patch",
-          },
-          {
-            type: "function_call",
-            call_id: "call-view",
-            name: "view_image",
-            arguments: '{"path":"/workspace/pixel.png","detail":"original"}',
-          },
-        ],
+        output: [{ type: "custom_tool_call", call_id: "call-workspace", name: "exec", input: [
+          'text(await tools.exec_command({cmd:"pwd"}));',
+          'text(await tools.update_plan({explanation:"fixture",plan:[{step:"exercise tools",status:"completed"}]}));',
+          'text(await tools.apply_patch("*** Begin Patch\\n*** Update File: note.txt\\n@@\\n-before\\n+after\\n*** End Patch"));',
+          'image(await tools.view_image({path:"/workspace/pixel.png",detail:"original"}));',
+        ].join("\n") }],
         usage: null,
       },
     });
 
     const direct = await reader.next();
     assert.equal(direct.previous_response_id, "combined-direct");
-    assert.deepEqual(direct.input.map(({ type, call_id }) => ({ type, call_id })), [
-      { type: "function_call_output", call_id: "call-shell" },
-      { type: "function_call_output", call_id: "call-plan" },
-      { type: "custom_tool_call_output", call_id: "call-patch" },
-      { type: "function_call_output", call_id: "call-view" },
-    ]);
-    assert.deepEqual(JSON.parse(direct.input[0].output), {
-      exit_code: 0,
-      output: "browser-shell:pwd",
-      wall_time_seconds: 0,
-    });
-    assert.equal(direct.input[1].output, "Plan updated");
-    assert.match(direct.input[2].output, /Success.*M note\.txt/s);
-    assert.deepEqual(direct.input[3].output, [{
-      type: "input_image",
-      image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=",
-    }]);
+    assert.equal(direct.input[0].type, 'custom_tool_call_output');
+    assert.match(JSON.stringify(direct.input[0].output), /browser-shell:pwd/);
+    assert.match(JSON.stringify(direct.input[0].output), /M note/);
+    assert.ok(direct.input[0].output.some(part => part.type === 'input_image'));
     assert.equal(await workspace.readText("/workspace/note.txt"), "after\n");
 
     send(socket, {
@@ -701,27 +623,17 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
         id: "combined-search",
         status: "completed",
         output: [{
-          type: "tool_search_call",
-          call_id: "call-search",
-          execution: "client",
-          arguments: { query: "deterministic fixture echo", limit: 1 },
+          type: "custom_tool_call",
+          call_id: "call-search", name: "exec",
+          input: 'text(await tools.tool_search({query:"deterministic fixture echo",limit:1}));',
         }],
         usage: null,
       },
     });
     const searched = await reader.next();
     assert.equal(searched.previous_response_id, "combined-search");
-    assert.deepEqual(searched.input.map(({ type, call_id }) => ({ type, call_id })), [{
-      type: "tool_search_output",
-      call_id: "call-search",
-    }]);
-    assert.deepEqual(
-      searched.input[0].tools.map((namespace) => ({
-        name: namespace.name,
-        tools: namespace.tools.map((tool) => tool.name),
-      })),
-      [{ name: "mcp__fixture__", tools: ["echo"] }],
-    );
+    assert.equal(searched.input[0].type, 'custom_tool_call_output');
+    assert.match(JSON.stringify(searched.input[0].output), /mcp__fixture__/);
 
     const code = [
       "await tools.lifecycle_probe({});",
@@ -859,7 +771,7 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     }]);
     assert.deepEqual(effects.images, [{
       url: "https://demo.test/api/tools/image-generation",
-      body: { images: [], prompt: "fixture image" },
+      body: { images: [], prompt: "fixture image", transparent_background: false },
     }]);
     assert.deepEqual(effects.rememberedImages, [{
       sessionId: agent.sessionId,
@@ -875,10 +787,12 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     assert.deepEqual(
       events.filter((event) => event.type === "tool.call").map((event) => event.payload.tool),
       [
+        "exec",
         "exec_command",
         "update_plan",
         "apply_patch",
         "view_image",
+        "exec",
         "tool_search",
         "exec",
         "lifecycle_probe",

@@ -74,7 +74,6 @@ where
         saved.reasoning.validate(&history)?;
         let mut session = self.empty_session(Some(&saved.workspace))?;
         session.validate_workspace(requested_workspace)?;
-        #[cfg(target_family = "wasm")]
         let (history, prefix) = if session.tools.is_code_only() {
             let mut history = history;
             clear_code_only_schemas(&mut history);

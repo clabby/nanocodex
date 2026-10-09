@@ -8,7 +8,7 @@ import { resolveTools } from './tool-configuration.mjs';
 /** Explicit alternate-family capabilities; the Rust registry owns every child. */
 export async function prepareHarnesses(harnesses, emit, {
   createCodexHost = createBrowserHost,
-  subagentSessions, subagentRouting, toolProviders, codeEffectJournal, traceTool,
+  subagentSessions, subagentRouting, toolProviders, codeEffectJournal, traceTool, codeEvaluator,
 } = {}) {
   if (harnesses === undefined) return { close() {} };
   if (!harnesses || typeof harnesses !== 'object' || Array.isArray(harnesses)
@@ -24,7 +24,7 @@ export async function prepareHarnesses(harnesses, emit, {
   const result = { close };
   try {
     if (harnesses.claude) {
-      const options = harnesses.claude;
+      const options = { ...harnesses.claude, codeEvaluator: harnesses.claude.codeEvaluator ?? codeEvaluator };
       if (options.durability !== undefined || options.durabilityId !== undefined || options.sessionId !== undefined || options.harnesses !== undefined) throw new TypeError('child harness capabilities must be ephemeral and cannot contain nested harnesses');
       const config = toClaudeConfig(options);
       const host = createClaudeHost({ ...options, onEvent: emit, subagentSessions, subagentRouting, codeEffectJournal, traceTool });
@@ -35,14 +35,14 @@ export async function prepareHarnesses(harnesses, emit, {
         ...(parallelSafeTools.length ? { parallelSafeTools } : {}) };
     }
     if (harnesses.codex) {
-      const options = harnesses.codex;
+      const options = { ...harnesses.codex, codeEvaluator: harnesses.codex.codeEvaluator ?? codeEvaluator };
       if (options.durability !== undefined || options.durabilityId !== undefined || options.sessionId !== undefined || options.harnesses !== undefined || options.resume !== undefined) throw new TypeError('child harness capabilities must be ephemeral and cannot contain nested harnesses');
       const transport = resolveResponsesTransport(options.transport);
       if (transport.subscription || transport.mpp) throw new TypeError('alternate Codex harness requires an explicit API or host-managed transport');
       if (options.codeEvaluator !== undefined && typeof options.codeEvaluator !== 'function') throw new TypeError('Codex harness codeEvaluator must be a function');
-      if (createCodexHost === createBrowserHost && (options.toolMode === 'code' || options.toolMode === 'code-only') && typeof globalThis.Worker !== 'function' && options.codeEvaluator === undefined) throw new TypeError('Codex harness Code Mode requires an explicit codeEvaluator outside a browser Worker host');
+      if (createCodexHost === createBrowserHost && typeof globalThis.Worker !== 'function' && options.codeEvaluator === undefined) throw new TypeError('Codex harness Code Mode requires an explicit codeEvaluator outside a browser Worker host');
       const { tools } = resolveTools(options.tools, { defaultSubagents: false });
-      const host = createCodexHost({ ...transport, hostAuth: transport.hostAuth === true, tools, workspace: options.workspace, toolMode: options.toolMode ?? 'direct', codeEvaluator: options.codeEvaluator, onEvent: emit, subagentSessions, subagentRouting, toolProviders, codeEffectJournal, traceTool });
+      const host = createCodexHost({ ...transport, hostAuth: transport.hostAuth === true, tools, workspace: options.workspace, toolMode: options.toolMode ?? 'code-only', codeEvaluator: options.codeEvaluator, onEvent: emit, subagentSessions, subagentRouting, toolProviders, codeEffectJournal, traceTool });
       const id = registerDefinitionHost(host);
       hosts.push([id, host]);
       await host.ready();

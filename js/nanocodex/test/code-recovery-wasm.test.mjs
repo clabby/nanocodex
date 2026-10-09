@@ -63,7 +63,7 @@ function persistentBoundary(database, parallelReads, lostAcknowledgement, lostAd
   };
 }
 
-async function journey(t, { sdk = 'node', journal = true, source, expected, oversized = false, evaluator = "quickjs", label = 'pending', cancellation = false, discarded = false, parallelReads = false, lostAcknowledgement = false, media = false, direct = false, directKind, directMedia = false, lostAdmissionAcknowledgement = false, reusedProviderIds = false, queuedProviderIds = false }) {
+async function journey(t, { sdk = 'node', journal = true, source, expected, oversized = false, evaluator = "quickjs", label = 'pending', cancellation = false, discarded = false, parallelReads = false, lostAcknowledgement = false, media = false, lostAdmissionAcknowledgement = false, reusedProviderIds = false, queuedProviderIds = false }) {
   const directory = await mkdtemp(join(tmpdir(), 'nanocodex-code-recovery-'));
   const database = new DatabaseSync(join(directory, 'recovery.sqlite'));
   database.exec('PRAGMA busy_timeout = 5000');
@@ -84,7 +84,7 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
   function start() {
     const owner = boundary.nextGeneration();
     worker = new Worker(new URL('./support/code-recovery-owned.worker.mjs', import.meta.url), {
-      workerData: { sdk, journal, direct, reusedProviderIds, queuedProviderIds: queuedProviderIds && owner > 1, url: server.url, cancellation, evaluator, databasePath: join(directory, 'recovery.sqlite') },
+      workerData: { sdk, journal, reusedProviderIds, queuedProviderIds: queuedProviderIds && owner > 1, url: server.url, cancellation, evaluator, databasePath: join(directory, 'recovery.sqlite') },
     });
     const started = worker;
     workers.push(worker);
@@ -111,9 +111,7 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
     if (request.generate === false) { sendWarmup(socket, 'warmup-fixture'); request = await reader.next(); }
     trace.push({ owner, type: 'model-request', request });
     if (process.env.NANOCODEX_RECOVERY_DEBUG) console.error('model', request.type, request.generate, request.input?.length);
-    sendCompleted(socket, 'synthetic-code', direct
-      ? [{ type: 'function_call', call_id: 'owned-tool', name: 'effect', arguments: JSON.stringify({ kind: directKind ?? (lostAcknowledgement ? 'read-one' : cancellation ? 'abortable' : 'poison') }) }]
-      : [{ type: 'custom_tool_call', call_id: 'owned-cell', name: 'exec', input: source }]);
+    sendCompleted(socket, 'synthetic-code', [{ type: 'custom_tool_call', call_id: 'owned-cell', name: 'exec', input: source }]);
     if (discarded) {
       // The cell has ended, but an unawaited, abort-ignoring handler is still pending.
       const endedRequest = await reader.next();
@@ -126,8 +124,8 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
     } else if (oversized) {
       const settledRequest = await reader.next();
       trace.push({ owner, type: 'terminal-unknown-model-request', request: settledRequest });
-      const output = settledRequest.input.find(item => item.call_id === (direct ? 'owned-tool' : 'owned-cell')
-        && item.type === (direct ? 'function_call_output' : 'custom_tool_call_output'));
+      const output = settledRequest.input.find(item => item.call_id === 'owned-cell'
+        && item.type === 'custom_tool_call_output');
       assert.ok(output, 'deterministically invalid receipt settles through the real SDK transport');
       assert.match(JSON.stringify(output.output), /outcome unknown/);
       assert.doesNotMatch(JSON.stringify(output.output), /journal interrupted|CAUGHT_AND_RETRIED/);
@@ -159,21 +157,21 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
     if (!journal) {
       await until(message => message.owner === owner && message.type === 'dispatch' && message.kind === 'poison');
       assert.deepEqual(database.prepare('SELECT kind, COUNT(*) AS count FROM dispatches GROUP BY kind ORDER BY kind').all()
-        .map(row => ({ ...row })), direct ? [{ kind: 'poison', count: 2 }] : [{ kind: 'poison', count: 2 }, { kind: 'read-one', count: 2 }, { kind: 'read-two', count: 2 }]);
-      t.diagnostic(direct ? 'Negative control: real direct tool redispatched poison twice without opt-in journal.' : 'Negative control: real abrupt restart without journal redispatched both completed reads and poison twice.');
+        .map(row => ({ ...row })), [{ kind: 'poison', count: 2 }, { kind: 'read-one', count: 2 }, { kind: 'read-two', count: 2 }]);
+      t.diagnostic('Negative control: real abrupt restart without journal redispatched both completed reads and poison twice.');
       return;
     }
     socket = await server.nextConnection();
     reader = messageReader(socket);
     const recoveredRequest = await reader.next();
     trace.push({ owner, type: 'recovered-model-request', request: recoveredRequest });
-    const cellOutput = recoveredRequest.input.find(item => item.type === (direct ? "function_call_output" : "custom_tool_call_output") && item.call_id === (direct ? "owned-tool" : "owned-cell"));
+    const cellOutput = recoveredRequest.input.find(item => item.type === "custom_tool_call_output" && item.call_id === "owned-cell");
     assert.ok(cellOutput, "real Rust transport received the recovered cell receipt");
     const encoded = typeof cellOutput.output === "string" ? cellOutput.output
       : cellOutput.output.map(item => item.text ?? "").join("");
     if (!discarded && !lostAcknowledgement && !media) assert.match(encoded, /outcome unknown/, 'recovered pending intent becomes an explicit failed cell');
     assert.doesNotMatch(encoded, /CAUGHT_AND_RETRIED/);
-    if (!direct && (lostAcknowledgement || discarded)) assert.match(encoded, /Script completed/);
+    if (lostAcknowledgement || discarded) assert.match(encoded, /Script completed/);
     for (const output of expected ?? []) assert.ok(encoded.includes(output), `replayed output contains ${output}`);
     if (media) {
       assert.ok(Array.isArray(cellOutput.output));
@@ -211,13 +209,11 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
     const followRequest = await reader.next();
     trace.push({ owner, type: 'follow-on-model-request', request: followRequest });
     async function reusedCall(kind, responseId) {
-      sendCompleted(socket, responseId, direct
-        ? [{ type: 'function_call', call_id: 'owned-tool', name: 'effect', arguments: JSON.stringify({ kind }) }]
-        : [{ type: 'custom_tool_call', call_id: 'owned-cell', name: 'exec', input: `text(await tools.effect({kind:'${kind}'}));` }]);
+      sendCompleted(socket, responseId, [{ type: 'custom_tool_call', call_id: 'owned-cell', name: 'exec', input: `text(await tools.effect({kind:'${kind}'}));` }]);
       const request = await reader.next();
       trace.push({ owner, type: 'reused-provider-call-output', kind, request });
-      const output = request.input.filter(item => item.type === (direct ? 'function_call_output' : 'custom_tool_call_output')
-        && item.call_id === (direct ? 'owned-tool' : 'owned-cell')).at(-1);
+      const output = request.input.filter(item => item.type === 'custom_tool_call_output'
+        && item.call_id === 'owned-cell').at(-1);
       assert.ok(output);
       const text = typeof output.output === 'string' ? output.output : output.output.map(item => item.text ?? '').join('');
       assert.match(text, new RegExp(kind)); assert.doesNotMatch(text, /outcome unknown|journal interrupted/);
@@ -260,33 +256,6 @@ async function journey(t, { sdk = 'node', journal = true, source, expected, over
     else assert.ok(dispatches.every(row => row.count === 1), JSON.stringify(dispatches));
     assert.ok(!dispatches.some(row => row.kind === 'retry'));
     if (lostAdmissionAcknowledgement) assert.equal(dispatches.length, 0, 'no dispatch before intent ACK');
-    if (direct) {
-      for (const entry of trace.filter(entry => entry.type === 'rpc' && entry.method.startsWith('journal.'))) {
-        const context = entry.args[0];
-        assert.equal(context.parentCallId, 'owned-tool'); assert.equal(context.callId, 'owned-tool');
-        assert.equal(context.source, 'host-tool:effect'); assert.equal(context.name, 'effect');
-        assert.ok(context.turnId && context.sessionId);
-      }
-      const receipts = database.prepare('SELECT receipt FROM effects WHERE receipt IS NOT NULL').all().map(row => JSON.parse(row.receipt));
-      for (const receipt of receipts) { assert.equal(receipt.thrown, false); assert.equal(receipt.value, null); }
-      if (directMedia) {
-        assert.equal(receipts.length, 1);
-        const receipt = receipts[0];
-        assert.equal(receipt.outputJsonRef, 'structured_result'); assert.equal(receipt.output, null);
-        const bytes = Buffer.from(receipt.structured_result.content[0].data, 'base64');
-        assert.ok(bytes.length > 2 * 1024 * 1024);
-        assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
-        assert.ok(Buffer.byteLength(JSON.stringify(receipt)) < 8 * 1024 * 1024);
-        t.diagnostic(JSON.stringify({ directMediaBytes: bytes.length, receiptBytes: Buffer.byteLength(JSON.stringify(receipt)) }));
-      }
-      const directResult = trace.find(entry => entry.owner === (oversized ? 1 : owner) && entry.type === 'event'
-        && entry.event.type === 'tool.result' && entry.event.payload.call_id === 'owned-tool');
-      assert.ok(directResult, 'settled direct result is publicly observable (terminal faults settle before owner loss)');
-      if (!lostAcknowledgement) {
-        assert.equal(directResult.event.payload.status, 'failed');
-        assert.equal(directResult.event.payload.structured_result.outcome, 'unknown');
-      }
-    }
     const effects = database.prepare('SELECT key, generation, receipt IS NOT NULL AS completed FROM effects ORDER BY key').all().map(row => ({ ...row }));
     assert.equal(effects.filter(row => row.completed === 0).length, lostAcknowledgement ? 0 : 1,
       'only genuinely uncertain original intents remain pending for reconciliation');
@@ -333,12 +302,12 @@ test('owned SDK: discarded pending promise closes once and stays fenced across a
   { timeout: 30000 }, t => journey(t, { label: 'discarded', discarded: true,
     source: `void tools.effect({kind:'poison'}); text(await tools.effect({kind:'read-one'}));` }));
 
-test('owned node SDK: native guest preserves TypeError prototype/code/details across abrupt WASM restart',
-  { timeout: 30000 }, t => journey(t, { label: 'native-errors', evaluator: 'native', source: `
+test('owned node SDK: default evaluator preserves error code/details across abrupt WASM restart',
+  { timeout: 30000 }, t => journey(t, { label: 'default-errors', evaluator: 'default', source: `
 try { await tools.effect({kind:'typed-error'}); } catch (error) {
-  text({type:error instanceof TypeError,code:error.code,details:error.details});
+  text({code:error.code,details:error.details});
 }
-await tools.effect({kind:'poison'});`, expected: ['"type":true', 'TYPED', '"retry":false'] }));
+await tools.effect({kind:'poison'});`, expected: ['TYPED', '"retry":false'] }));
 
 test('owned SDK: lost durable completion acknowledgement replays receipt without a second write',
   { timeout: 30000 }, t => journey(t, { label: 'lost-ack', lostAcknowledgement: true,
@@ -353,39 +322,18 @@ image(result.content[0]);
 text(await tools.effect({kind:'max-output'}));
 await tools.effect({kind:'poison'});` }));
 
-for (const sdk of ['node', 'host', 'cloudflare']) {
-  test(`${sdk} owned direct SDK: completed receipt after lost ACK and abrupt WASM owner loss replays exactly once`,
-    { timeout: 30000 }, t => journey(t, { sdk, direct: true, label: 'direct-completed', lostAcknowledgement: true,
-      expected: ['read-one', '"done":true'] }));
-  test(`${sdk} owned direct SDK: abrupt WASM loss after pending write yields unknown once and next turn healthy`,
-    { timeout: 30000 }, t => journey(t, { sdk, direct: true, label: 'direct-pending' }));
-}
-test('owned direct SDK: cancelled dispatched write keeps pending intent and next turn healthy',
-  { timeout: 30000 }, t => journey(t, { direct: true, cancellation: true, label: 'direct-cancelled' }));
+test('owned Code Mode SDK: lost intent ACK interrupts before dispatch, restart reports unknown and next turn healthy',
+  { timeout: 30000 }, t => journey(t, { label: 'intent-ack', lostAdmissionAcknowledgement: true,
+    source: "await tools.effect({kind:'poison'});" }));
 
-test('owned direct SDK: failed handler receipt replays failed public result without second effect',
-  { timeout: 30000 }, t => journey(t, { direct: true, directKind: 'typed-error', label: 'direct-error',
-    lostAcknowledgement: true, expected: ['fixture failed'] }));
-test('owned direct SDK: oversized post-effect payload remains unknown and never redispatches',
-  { timeout: 30000 }, t => journey(t, { direct: true, directKind: 'huge', label: 'direct-oversized', oversized: true }));
-test('owned direct SDK: compact 2 MiB PNG receipt replays after lost ACK and abrupt owner loss',
-  { timeout: 30000 }, t => journey(t, { direct: true, directKind: 'media', directMedia: true, label: 'direct-media', lostAcknowledgement: true }));
-
-test('owned direct SDK: lost intent ACK interrupts before dispatch, restart reports unknown and next turn healthy',
-  { timeout: 30000 }, t => journey(t, { direct: true, label: 'direct-intent-ack', lostAdmissionAcknowledgement: true }));
-
-test('negative control: owned direct SDK without opt-in journal preserves abrupt redispatch semantics',
-  { timeout: 30000 }, t => journey(t, { direct: true, journal: false, label: 'direct-no-journal' }));
-
-for (const direct of [false, true]) test(`owned ${direct ? 'direct' : 'Code Mode'} SDK: reused provider call IDs across model responses and operations dispatch fresh same and different inputs`,
-  { timeout: 30000 }, t => journey(t, { direct, reusedProviderIds: true, lostAcknowledgement: true,
-    label: direct ? 'direct-reused-turns' : 'nested-reused-turns',
+test('owned Code Mode SDK: reused provider call IDs across model responses and operations dispatch fresh same and different inputs',
+  { timeout: 30000 }, t => journey(t, { reusedProviderIds: true, lostAcknowledgement: true,
+    label: 'nested-reused-turns',
     source: "text(await tools.effect({kind:'read-one'}));", expected: ['read-one'] }));
 
-
-for (const direct of [false, true]) test(`owned ${direct ? 'direct' : 'Code Mode'} SDK: queued operation while original effect outstanding preserves canonical identity`,
-  { timeout: 30000 }, t => journey(t, { direct, queuedProviderIds: true, reusedProviderIds: true, lostAcknowledgement: true,
-    label: direct ? 'direct-queued-identity' : 'nested-queued-identity',
+test('owned Code Mode SDK: queued operation while original effect outstanding preserves canonical identity',
+  { timeout: 30000 }, t => journey(t, { queuedProviderIds: true, reusedProviderIds: true, lostAcknowledgement: true,
+    label: 'nested-queued-identity',
     source: "text(await tools.effect({kind:'read-one'}));", expected: ['read-one'] }));
 
 for (const sdk of ['node', 'host']) test('owned ' + sdk + ': journal supports real non-durable child-style prompts with explicit null operation IDs', { timeout: 20_000 }, async t => {

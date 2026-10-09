@@ -40,6 +40,8 @@ const LIMIT: Duration = Duration::from_secs(45);
 #[derive(Clone, Copy, PartialEq)]
 enum Journey {
     Smoke,
+    StaleDirect,
+    SiblingMessages,
     Mixed,
     MissingChildAuth,
     Subscription,
@@ -77,21 +79,33 @@ impl Provider {
         };
         let stage = *self.counts.entry(key.clone()).or_default();
         *self.counts.get_mut(&key).unwrap() += 1;
-        let reply = if family == "claude" {
-            for tool in request["tools"].as_array().unwrap() {
-                let name = tool["name"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .trim_start_matches('_');
-                assert!(
-                    !["exec", "wait", "tool_search"].contains(&name),
-                    "Claude leaked {name}"
-                );
-            }
-            self.native_script(label, stage, &request)
+        // Responses carries schemas in developer messages; Messages uses tools.
+        // Later websocket deltas can retain the previously published catalog.
+        let catalog = request["tools"].as_array().or_else(|| {
+            request["input"]
+                .as_array()?
+                .iter()
+                .rev()
+                .find_map(|item| item["tools"].as_array())
+        });
+        if let Some(catalog) = catalog {
+            let names = catalog
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().trim_start_matches('_'))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                names,
+                ["exec", "wait"].into_iter().collect(),
+                "{family} model catalog must be Code Mode only"
+            );
         } else {
-            self.script(label, stage)
-        };
+            assert!(
+                family == "codex"
+                    && (stage > 0 || label == "followup" || label == "sibling-codex-message"),
+                "initial model request omitted tools"
+            );
+        }
+        let reply = self.script(label, stage, &request);
         if matches!(reply, Reply::Pause) {
             self.pauses += 1;
         }
@@ -107,186 +121,79 @@ impl Provider {
         reply
     }
 
-    // Claude fixtures speak the shipped native catalog. Other providers retain
-    // their Code Mode journeys, including the mixed registry lifecycle checks.
-    fn native_script(&self, label: &str, stage: usize, request: &Value) -> Reply {
-        let call = |name, input| Reply::Native { name, input };
-        let submit = |answer| call("SubmitResult", json!({"output":{"answer":answer}}));
-        let spawn = |family: Option<&str>, task: &str, background: bool| {
-            let mut input = json!({"description":task,"prompt":task,"output_contract":contract(),"run_in_background":background});
-            if let Some(family) = family {
-                input["harness"] = json!(family);
-                input["model"] = json!(model(family));
-            }
-            call("Agent", input)
-        };
-        let receipt = native_receipt(request);
-        let answer = |expected| {
-            assert_eq!(
-                receipt["report"]["agents"][0]["status"]["output"]["answer"], expected,
-                "native child receipt: {receipt}"
-            )
-        };
-        let error = || {
-            assert!(
-                native_error(request),
-                "expected native tool error: {receipt}"
-            )
-        };
-        if self.journey == Journey::ContextRouting {
+    fn script(&self, label: &str, stage: usize, request: &Value) -> Reply {
+        if self.journey == Journey::SiblingMessages {
+            let unique = self.artifact.file_name().unwrap().to_str().unwrap();
+            let outbound = format!("CLAUDE_TO_CODEX_{unique}");
+            let reply_payload = format!("CODEX_TO_CLAUDE_{unique}");
+            let metadata = |field: &str| -> u64 {
+                user_text(request)
+                    .rsplit_once(field)
+                    .expect("missing directed-message metadata")
+                    .1
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
             return match (label, stage) {
-                ("root", 0..=1) => {
-                    if stage > 0 {
-                        answer("context-child-answer");
-                    }
-                    spawn(Some(["claude", "codex"][stage]), "MIXED_CHILD", false)
+                ("root", 0) => Reply::Code(format!(r#"
+const c=await tools.spawn_agent({{harness:'codex',model:'{CODEX_MODEL}',role:'codex-peer',task:'SIBLING_CODEX',thinking:null,output_contract:{contract}}});
+store('codex-peer',c.agent_id);
+const ready=await tools.wait_agent({{agent_ids:[c.agent_id],timeout_ms:20000}}); text(ready);
+if(ready.agents[0].status.output.answer!=='codex-ready') throw Error('recipient not ready');
+const a=await tools.spawn_agent({{harness:'claude',model:'{CLAUDE_MODEL}',role:'claude-peer',task:'SIBLING_CLAUDE',thinking:null,output_contract:{contract}}});
+store('claude-peer',a.agent_id);
+text(await tools.wait_agent({{agent_ids:[a.agent_id],timeout_ms:20000}}));
+"#, contract=contract())),
+                ("root", 1) => Reply::Code(r#"
+const c=await tools.wait_agent({agent_ids:[load('codex-peer')],timeout_ms:20000}); text(c);
+if(c.agents[0].status.output.answer!=='codex-replied') throw Error('Codex recipient did not reply');
+const a=await tools.wait_agent({agent_ids:[load('claude-peer')],timeout_ms:20000}); text(a);
+if(a.agents[0].status.output.answer!=='claude-received-reply') throw Error('Claude sender did not receive reply');
+text('SIBLING_EXCHANGE_OK');
+"#.into()),
+                ("root", _) => Reply::Text("sibling-messages-answer".into()),
+                ("sibling-codex", 0) => Reply::Code("text(await tools.submit_result({output:{answer:'codex-ready'}}));".into()),
+                ("sibling-codex", _) => Reply::Text("Codex recipient ready".into()),
+                ("sibling-claude", 0) => Reply::Code(format!(r#"
+const peers=await tools.list_agents({{include_completed:true}});
+const peer=peers.agents.find(a=>a.role==='codex-peer'); if(!peer) throw Error('missing Codex sibling');
+const sent=await tools.send_agent_message({{agent_id:peer.agent_id,purpose:'coordinate',priority:'deferred',message:{payload}}});
+store('exchange-thread',sent.thread_id); text({{sent}});
+text(await tools.submit_result({{output:{{answer:'claude-sent'}}}}));
+"#,payload=json!(outbound))),
+                ("sibling-claude", _) => Reply::Text("Claude message sent".into()),
+                ("sibling-codex-message", 0) => {
+                    assert_eq!(user_text(request).rsplit_once("\nMessage body:\n").unwrap().1.lines().next().unwrap(), outbound, "Codex did not receive exact sibling payload");
+                    Reply::Code(format!(r#"
+const peers=await tools.list_agents({{include_completed:true}});
+const peer=peers.agents.find(a=>a.role==='claude-peer'); if(!peer) throw Error('missing Claude sibling');
+const replied=await tools.send_agent_message({{agent_id:peer.agent_id,purpose:'reply',priority:'deferred',in_reply_to:{message_id},message:{payload}}});
+if(replied.thread_id!=={thread_id}) throw Error('reply changed thread'); text({{replied}});
+text(await tools.submit_result({{output:{{answer:'codex-replied'}}}}));
+"#,message_id=metadata("Message ID: "),thread_id=metadata("Thread ID: "),payload=json!(reply_payload)))
                 }
-                ("root", _) => {
-                    answer("context-child-answer");
-                    Reply::Text("context-routing-answer".into())
+                ("sibling-codex-message", _) => Reply::Text("Codex sibling replied".into()),
+                ("sibling-claude-reply", 0) => {
+                    assert_eq!(user_text(request).rsplit_once("\nMessage body:\n").unwrap().1.lines().next().unwrap(), reply_payload, "Claude did not receive exact sibling reply");
+                    Reply::Code(format!(r#"
+if(load('exchange-thread')!=={thread_id}) throw Error('received reply on wrong thread');
+text(await tools.submit_result({{output:{{answer:'claude-received-reply'}}}}));
+"#,thread_id=metadata("Thread ID: ")))
                 }
-                ("child", 0) => submit("context-child-answer"),
-                _ => Reply::Text("context child finished".into()),
+                ("sibling-claude-reply", _) => Reply::Text("Claude received sibling reply".into()),
+                _ => panic!("unexpected sibling route {label}/{stage}"),
             };
         }
-
-        if matches!(
-            self.journey,
-            Journey::Subscription | Journey::SubscriptionRecovery
-        ) {
-            return if label == "child" && stage == 1 {
-                submit("subscription-child-answer")
-            } else {
-                self.script(label, stage)
-            };
-        }
-        if self.journey == Journey::MissingChildAuth {
+        if self.journey == Journey::StaleDirect {
             return match stage {
-                0 => spawn(Some("codex"), "AUTH_CHILD", false),
-                1 => {
-                    error();
-                    call("ListAgents", json!({"include_completed":true}))
-                }
-                _ => {
-                    assert_eq!(receipt["agents"].as_array().unwrap().len(), 0);
-                    Reply::Text("auth-denied-answer".into())
-                }
+                0 => Reply::DirectExecCommand,
+                1 => Reply::Code("text(await tools.exec_command({cmd:\"printf recovered > recovered.txt\",shell:\"/bin/sh\",login:false}));".into()),
+                _ => Reply::Text("stale-direct-recovered".into()),
             };
         }
-        if self.journey != Journey::Mixed {
-            return self.script(label, stage);
-        }
-        match (label, stage) {
-            ("root", 0) => call(
-                "Agent",
-                json!({"description":"invalid","prompt":"INVALID_CHILD","harness":"bogus"}),
-            ),
-            ("root", 1) => {
-                error();
-                call(
-                    "Agent",
-                    json!({"description":"invalid","prompt":"INVALID_CHILD","harness":"claude","model":"sol"}),
-                )
-            }
-            ("root", 2) => {
-                error();
-                call(
-                    "Agent",
-                    json!({"description":"invalid","prompt":"INVALID_CHILD","harness":"codex","model":"claude-sonnet-4-6"}),
-                )
-            }
-            ("root", 3) => {
-                error();
-                call("ListAgents", json!({"include_completed":true}))
-            }
-            ("root", 4) => {
-                assert_eq!(receipt["agents"].as_array().unwrap().len(), 0);
-                spawn(Some("codex"), "MIXED_CHILD", false)
-            }
-            ("root", 5) => {
-                answer("nested-answer");
-                spawn(None, "INHERITED_CHILD", false)
-            }
-            ("root", 6) => {
-                answer("inherited-answer");
-                call(
-                    "SendMessage",
-                    json!({"recipient":"agent-1","content":"FOLLOWUP_CHILD"}),
-                )
-            }
-            ("root", 7) => {
-                assert!(!native_error(request));
-                call("TaskOutput", json!({"task_id":"agent-1","timeout":20000}))
-            }
-            ("root", 8) => {
-                answer("followup-answer");
-                call("CloseAgent", json!({"task_id":"agent-1"}))
-            }
-            ("root", 9) => {
-                let agents = receipt["agents"].as_array().unwrap();
-                assert_eq!(agents.len(), 2);
-                assert!(agents.iter().all(|a| a["status"]["state"] == "closed"));
-                call(
-                    "SendMessage",
-                    json!({"recipient":"agent-1","content":"cannot revive"}),
-                )
-            }
-            ("root", 10) => {
-                error();
-                call("ListAgents", json!({"include_completed":true}))
-            }
-            ("root", 11) => spawn(Some("codex"), "PAUSED_CHILD", true),
-            ("root", 12) => {
-                assert_eq!(receipt["task_id"], "agent-4");
-                call("TaskOutput", json!({"task_id":"agent-4","timeout":1000}))
-            }
-            ("root", 13) => {
-                assert_eq!(receipt["report"]["timed_out"], true);
-                assert_eq!(receipt["report"]["agents"][0]["status"]["state"], "running");
-                call("TaskStop", json!({"task_id":"agent-4"}))
-            }
-            ("root", 14) => {
-                let agents = receipt["agents"].as_array().unwrap();
-                assert_eq!(agents.len(), 2);
-                assert!(agents.iter().all(|a| a["status"]["state"] == "interrupted"));
-                call("CloseAgent", json!({"task_id":"agent-4"}))
-            }
-            ("root", _) => {
-                let agents = receipt["agents"].as_array().unwrap();
-                assert_eq!(agents.len(), 2);
-                assert!(agents.iter().all(|a| a["status"]["state"] == "closed"));
-                Reply::Text("mixed-routing-answer".into())
-            }
-            ("child", 0) => spawn(Some("codex"), "MIXED_GRANDCHILD", false),
-            ("child", 1) => {
-                answer("grandchild-answer");
-                call("SubmitResult", json!({"output":{"answer":42}}))
-            }
-            ("child", 2) => {
-                error();
-                submit("nested-answer")
-            }
-            ("child", _) => {
-                assert_eq!(receipt["accepted"], true);
-                Reply::Text("child finished".into())
-            }
-            ("followup", 0) => submit("followup-answer"),
-            ("followup", _) => Reply::Text("followup finished".into()),
-            ("grandchild", 0) => Reply::Write {
-                path: "grandchild.txt",
-                content: "grandchild-effect",
-            },
-            ("grandchild", 1) => submit("grandchild-answer"),
-            ("grandchild", _) => Reply::Text("grandchild finished".into()),
-            ("inherited", 0) => submit("inherited-answer"),
-            ("inherited", _) => Reply::Text("inherited finished".into()),
-            ("paused-child", 0) => spawn(Some("codex"), "PAUSED_GRANDCHILD", false),
-            ("paused-grandchild", _) => Reply::Pause,
-            _ => Reply::Text("unexpected native fixture request".into()),
-        }
-    }
-
-    fn script(&self, label: &str, stage: usize) -> Reply {
         if self.journey == Journey::ProjectContext {
             return match stage {
                 0 => Reply::Read {
@@ -481,10 +388,7 @@ text(await tools.submit_result({output:{answer:'grandchild-answer'}}));
 }
 
 enum Reply {
-    Native {
-        name: &'static str,
-        input: Value,
-    },
+    DirectExecCommand,
     Read {
         path: &'static str,
     },
@@ -499,7 +403,9 @@ enum Reply {
 impl Reply {
     fn value(&self) -> Value {
         match self {
-            Self::Native { name, input } => json!({"tool":name,"input":input}),
+            Self::DirectExecCommand => {
+                json!({"tool":"exec_command","cmd":"printf bypass > stale-direct.txt"})
+            }
             Self::Read { path } => json!({"tool":"Read","file_path":path}),
             Self::Code(code) => json!({"code":code}),
             Self::Text(text) => json!({"text":text}),
@@ -511,13 +417,16 @@ impl Reply {
     }
     fn codex(&self, id: &str) -> Value {
         let output = match self {
+            Self::DirectExecCommand => {
+                json!({"type":"function_call","name":"exec_command","call_id":id,"arguments":json!({"cmd":"printf bypass > stale-direct.txt","shell":"/bin/sh","login":false}).to_string()})
+            }
             Self::Code(code) => {
                 json!({"type":"custom_tool_call","name":"exec","call_id":id,"input":code})
             }
             Self::Text(text) => {
                 json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]})
             }
-            Self::Native { .. } | Self::Read { .. } | Self::Write { .. } => {
+            Self::Read { .. } | Self::Write { .. } => {
                 unreachable!("native file tools cannot route to Codex Responses")
             }
             Self::Pause => unreachable!("paused generation has no terminal response"),
@@ -537,30 +446,29 @@ impl Reply {
             }
         };
         let (block, delta, stop) = match self {
-            Self::Native { name, input } => (
-                json!({"type":"tool_use","id":id,"name":tool_name(name),"input":{}}),
-                json!({"type":"input_json_delta","partial_json":input.to_string()}),
-                "tool_use",
+            Self::DirectExecCommand => unreachable!("Codex stale direct call fixture"),
+            Self::Read { path } => code_block(
+                &format!(
+                    "text(await nativeTools.Read({{file_path:{}}}));",
+                    json!(path)
+                ),
+                id,
+                &tool_name("exec"),
             ),
-            Self::Read { path } => (
-                json!({"type":"tool_use","id":id,"name":tool_name("Read"),"input":{}}),
-                json!({"type":"input_json_delta","partial_json":json!({"file_path":path}).to_string()}),
-                "tool_use",
-            ),
-            Self::Code(code) => (
-                json!({"type":"tool_use","id":id,"name":tool_name("exec"),"input":{}}),
-                json!({"type":"input_json_delta","partial_json":json!({"code":code}).to_string()}),
-                "tool_use",
-            ),
+            Self::Code(code) => code_block(code, id, &tool_name("exec")),
             Self::Text(text) => (
                 json!({"type":"text","text":""}),
                 json!({"type":"text_delta","text":text}),
                 "end_turn",
             ),
-            Self::Write { path, content } => (
-                json!({"type":"tool_use","id":id,"name":tool_name("Write"),"input":{}}),
-                json!({"type":"input_json_delta","partial_json":json!({"file_path":path,"content":content}).to_string()}),
-                "tool_use",
+            Self::Write { path, content } => code_block(
+                &format!(
+                    "text(await nativeTools.Write({{file_path:{},content:{}}}));",
+                    json!(path),
+                    json!(content)
+                ),
+                id,
+                &tool_name("exec"),
             ),
             Self::Pause => unreachable!("paused generation has no terminal response"),
         };
@@ -571,6 +479,15 @@ impl Reply {
             json!({"type":"message_delta","delta":{"stop_reason":stop},"usage":{"output_tokens":1}}),
             json!({"type":"message_stop"})].iter().map(|event|format!("data: {event}\n\n")).collect()
     }
+}
+
+fn code_block(code: &str, id: &str, name: &str) -> (Value, Value, &'static str) {
+    let code = format!("const nativeTools = tools;\n{code}");
+    (
+        json!({"type":"tool_use","id":id,"name":name,"input":{}}),
+        json!({"type":"input_json_delta","partial_json":json!({"code":code}).to_string()}),
+        "tool_use",
+    )
 }
 
 fn contract() -> Value {
@@ -585,8 +502,8 @@ fn model(family: &str) -> &'static str {
 }
 
 // Routing uses user input only, never a tool catalog or fixture-script copy.
-fn label(request: &Value) -> String {
-    let input = request
+fn user_text(request: &Value) -> String {
+    request
         .get("messages")
         .or_else(|| request.get("input"))
         .and_then(Value::as_array)
@@ -603,8 +520,20 @@ fn label(request: &Value) -> String {
             _ => vec![],
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    if input.contains("PAUSED_GRANDCHILD") {
+        .join("\n")
+}
+
+fn label(request: &Value) -> String {
+    let input = user_text(request);
+    if input.contains("CODEX_TO_CLAUDE_") {
+        "sibling-claude-reply"
+    } else if input.contains("CLAUDE_TO_CODEX_") {
+        "sibling-codex-message"
+    } else if input.contains("SIBLING_CODEX") {
+        "sibling-codex"
+    } else if input.contains("SIBLING_CLAUDE") {
+        "sibling-claude"
+    } else if input.contains("PAUSED_GRANDCHILD") {
         "paused-grandchild"
     } else if input.contains("PAUSED_CHILD") {
         "paused-child"
@@ -642,33 +571,6 @@ fn last_tool_result(request: &Value) -> Value {
         })
         .map(|item| item["output"].clone())
         .unwrap_or(Value::Null)
-}
-
-fn native_receipt(request: &Value) -> Value {
-    let value = last_tool_result(request);
-    let text = if let Some(text) = value.as_str() {
-        text.to_owned()
-    } else {
-        value
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|b| b["text"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    serde_json::from_str(&text).unwrap_or(json!(text))
-}
-fn native_error(request: &Value) -> bool {
-    request["messages"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .rev()
-        .filter_map(|m| m["content"].as_array())
-        .flat_map(|b| b.iter().rev())
-        .find(|b| b["type"] == "tool_result")
-        .is_some_and(|b| b["is_error"] == true)
 }
 
 struct Servers {
@@ -930,7 +832,7 @@ async fn subscription_servers_with_recovery(
                     };
                     let request: Value = serde_json::from_str(text.as_str()).unwrap();
                     let current = label(&request);
-                    if session_label.is_none() || current == "followup" {
+                    if session_label.is_none() || current == "followup" || current == "sibling-codex-message" {
                         session_label = Some(current);
                     }
                     // Pause only the external provider response, after observing
@@ -1047,6 +949,8 @@ fn command(
             "--memory",
             "false",
         ])
+        .arg("--api-base-url")
+        .arg(endpoints.claude.trim_end_matches("/messages"))
         .arg("--cwd")
         .arg(workspace)
         .stdout(Stdio::piped())
@@ -1256,6 +1160,8 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
             "mixed"
         } else if kind == Journey::Smoke {
             "only"
+        } else if kind == Journey::SiblingMessages {
+            "sibling-messages"
         } else {
             "missing-auth"
         }
@@ -1276,7 +1182,7 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
         &servers,
         family,
         kind == Journey::Mixed || family == "codex",
-        kind == Journey::Mixed || family == "claude",
+        matches!(kind, Journey::Mixed | Journey::SiblingMessages) || family == "claude",
         kind == Journey::Smoke,
     );
     command.args(["--model", model(family)]);
@@ -1286,6 +1192,8 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
     command.arg("HARNESS_ROUTING_ROOT");
     let answer = match kind {
         Journey::Smoke => "claude-only-answer",
+        Journey::StaleDirect => "stale-direct-recovered",
+        Journey::SiblingMessages => "sibling-messages-answer",
         Journey::Mixed => "mixed-routing-answer",
         Journey::MissingChildAuth => "auth-denied-answer",
         Journey::Subscription => "subscription-native-answer",
@@ -1319,10 +1227,71 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
         assert_eq!(provider.connections.len(), 1);
         assert_eq!(provider.log[0]["family"], "claude");
         assert_eq!(provider.log[0]["request"]["stream"], true);
+    } else if kind == Journey::SiblingMessages {
+        let mut exchange = Vec::new();
+        for (label, family, marker) in [
+            ("sibling-codex-message", "codex", "CLAUDE_TO_CODEX_"),
+            ("sibling-claude-reply", "claude", "CODEX_TO_CLAUDE_"),
+        ] {
+            let delivery = provider
+                .log
+                .iter()
+                .find(|entry| entry["label"] == label && entry["stage"] == 0)
+                .expect("missing sibling delivery");
+            assert_eq!(delivery["family"], family);
+            let delivered = user_text(&delivery["request"]);
+            assert!(delivered.contains(marker));
+            let metadata = |field| -> u64 {
+                delivered
+                    .rsplit_once(field)
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            };
+            exchange.push(json!({"recipient_harness":family,"payload":delivered.rsplit_once("\nMessage body:\n").unwrap().1.lines().next().unwrap(),"message_id":metadata("Message ID: "),"thread_id":metadata("Thread ID: ")}));
+        }
+        assert_eq!(exchange[0]["thread_id"], exchange[1]["thread_id"]);
+        assert_ne!(exchange[0]["message_id"], exchange[1]["message_id"]);
+        std::fs::write(
+            artifact.join("sibling-exchange.json"),
+            serde_json::to_vec_pretty(
+                &json!({"exchange":exchange,"transport":"real CLI; Codex Responses WebSocket and Claude Messages SSE; only inference synthetic","provider_trace":"provider.json"}),
+            )?,
+        )?;
+        let completed = provider
+            .log
+            .iter()
+            .find(|entry| entry["label"] == "root" && entry["stage"] == 2)
+            .unwrap();
+        assert!(
+            completed["tool_result"]
+                .to_string()
+                .contains("SIBLING_EXCHANGE_OK")
+        );
+    } else if kind == Journey::StaleDirect {
+        assert!(
+            !artifact.join("workspace/stale-direct.txt").exists(),
+            "direct hidden tool executed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(artifact.join("workspace/recovered.txt"))?,
+            "recovered"
+        );
+        assert_eq!(provider.log.len(), 3);
+        assert!(
+            provider.log[1]["tool_result"]
+                .to_string()
+                .contains("Code Mode"),
+            "missing direct-call rejection receipt"
+        );
     } else if kind == Journey::MissingChildAuth {
         assert_eq!(
             provider.log.len(),
-            if family == "claude" { 3 } else { 2 },
+            2,
             "unauthorized child contacted a model provider"
         );
         assert!(
@@ -1332,13 +1301,11 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
                 .all(|connection| connection["family"] == family),
             "unauthorized child opened a provider connection"
         );
-        if family != "claude" {
-            assert!(
-                provider.log[1]["tool_result"]
-                    .to_string()
-                    .contains("auth-denied-ok")
-            );
-        }
+        assert!(
+            provider.log[1]["tool_result"]
+                .to_string()
+                .contains("auth-denied-ok")
+        );
     } else {
         for (label, expected_family) in [
             ("root", family),
@@ -1373,10 +1340,6 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
             ("child", 1, "grandchild-ok"),
             ("child", 2, "contract-recovered-ok"),
         ] {
-            // Claude receipts are asserted at each native call in native_script.
-            if (label == "root" && family == "claude") || (label == "child" && family == "codex") {
-                continue;
-            }
             let call = provider
                 .log
                 .iter()
@@ -1398,10 +1361,19 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
             .iter()
             .find(|call| call["label"] == "inherited")
             .unwrap();
+        let request = &inherited["request"];
         let effort = if family == "claude" {
-            &inherited["request"]["output_config"]["effort"]
+            &request["output_config"]["effort"]
+        } else if let Some(reasoning) = request.get("reasoning") {
+            &reasoning["effort"]
         } else {
-            &inherited["request"]["reasoning"]["effort"]
+            &request["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|item| item["type"] == "configuration_update")
+                .expect("missing inherited reasoning configuration")["reasoning"]["effort"]
         };
         assert_eq!(
             effort, "medium",
@@ -1422,6 +1394,14 @@ async fn journey(family: &'static str, kind: Journey) -> Result<()> {
 #[tokio::test]
 async fn claude_root_needs_only_anthropic_credentials() -> Result<()> {
     journey("claude", Journey::Smoke).await
+}
+#[tokio::test]
+async fn claude_and_codex_siblings_exchange_a_threaded_message_and_reply() -> Result<()> {
+    journey("codex", Journey::SiblingMessages).await
+}
+#[tokio::test]
+async fn codex_rejects_stale_direct_tools_and_recovers_through_code_mode() -> Result<()> {
+    journey("codex", Journey::StaleDirect).await
 }
 #[tokio::test]
 async fn codex_claude_codex_nested_lifecycle_and_inheritance() -> Result<()> {
@@ -1445,7 +1425,7 @@ async fn root_selection_and_missing_auth_fail_before_provider_dispatch() -> Resu
             "codex-wrong-model",
             "codex",
             true,
-            vec!["--model", CLAUDE_MODEL],
+            vec!["--harness", "codex", "--model", CLAUDE_MODEL],
         ),
         (
             "claude-wrong-model",
@@ -2109,8 +2089,8 @@ async fn claude_subscription_login_refresh_restart_and_logout() -> Result<()> {
             }
             let tools = request["tools"].as_array().unwrap();
             assert!(
-                tools.iter().any(|tool| tool["name"] == "_Agent"),
-                "native agent tool lacks subscription wire prefix"
+                tools.iter().any(|tool| tool["name"] == "_exec"),
+                "Code Mode tool lacks subscription wire prefix"
             );
         }
         assert_ne!(
@@ -2445,11 +2425,10 @@ async fn native_cli_project_context_is_bounded_lazy_and_explicitly_replaceable()
                 .iter()
                 .filter_map(|tool| tool["name"].as_str())
                 .collect::<Vec<_>>();
-            assert!(names.contains(&if family == "claude" {
-                "Read"
-            } else {
-                "read_file"
-            }));
+            assert_eq!(
+                names.into_iter().collect::<std::collections::BTreeSet<_>>(),
+                ["exec", "wait"].into_iter().collect()
+            );
             assert!(!initial["tools"].as_array().unwrap().iter().any(|tool| {
                 tool["type"]
                     .as_str()
@@ -2587,13 +2566,11 @@ async fn native_cli_cross_family_children_resolve_defaults_and_preserve_explicit
             let output = run(invocation, &artifact, "root spawns Claude and Codex children; family defaults independent of parent, explicit replacement inherited without context").await?;
             success(&output, &artifact, "context-routing-answer")?;
             let provider = provider.lock().unwrap();
-            if family != "claude" {
-                assert!(
-                    provider.log.last().unwrap()["tool_result"]
-                        .to_string()
-                        .contains("context-routing-ok")
-                );
-            }
+            assert!(
+                provider.log.last().unwrap()["tool_result"]
+                    .to_string()
+                    .contains("context-routing-ok")
+            );
             for target in ["claude", "codex"] {
                 let call = provider
                     .log

@@ -3,7 +3,8 @@
 The additive `Claude.create` constructor runs the Rust Messages backend with the
 **same** `nanocodex-durability` store, fencing, admission, effect receipts and
 terminal replay machinery. It does not route through OpenAI Responses, launch
-Claude Code, or install the Codex catalog.
+Claude Code, or install the Codex native catalog. Both harnesses expose only
+`exec` and `wait`; supplied capabilities are called inside shared Code Mode.
 
 `Agent.create({ harness: "claude", ...options })` also selects this native
 backend in the Node, host, and browser SDKs. Browser mixed-family sessions run
@@ -48,12 +49,13 @@ Within a Claude tree, `{ model: "sonnet", ... }` selects Sonnet without repeatin
 `harness: "claude"`. `Subagents.spawnMany` inherits the parent's family, model
 and thinking for the entire batch and rejects any overrides before admitting
 children. Use `Subagents.spawn` to select a child's family or model explicitly.
-Children retain their native transcripts and are reusable only while the root
-runtime lives. A durable root's reopen does not recreate a child task tree.
+Children retain their native transcripts in the shared task tree. Durable roots
+restore journaled child identities, status and committed snapshots after reopen;
+hosts must reattach their capabilities and authorization. Interrupted work still
+requires reconciliation, and process-local JavaScript cells cannot resume.
 
-Hosted managed threads retain their existing provider selection and Claude
-`Task` capabilities; the explicit SDK recipes above do not configure hosted
-account routing.
+Hosted managed threads use the same canonical task tree and Code Mode contract;
+the explicit SDK recipes above do not configure hosted account routing.
 
 ```js
 import { Claude } from "nanocodex/node";
@@ -137,9 +139,12 @@ subscription admission and synthetic JS tests remain distinct. See
 
 ## Tools and lifecycle boundaries
 
-Only the explicit Claude tool array is advertised. Explicit `strict` and
-deferred-definition flags must be preserved or rejected, never silently ignored. No ambient workspace, shell,
-web, MCP, Code Mode or subagent tools are installed. The injected handler owns
+The explicit Claude tool array forms the nested Code Mode catalog. The model
+sees only `exec` and `wait`, and calls capabilities with `tools.<name>(input)`
+inside JavaScript. Explicit `strict` and deferred-definition flags must be
+preserved or rejected, never silently ignored. Workspace, shell, web and MCP
+capabilities require supplied handlers; subagents require an enabled task tree.
+The injected handler owns
 permission, isolation, resource bounds and external idempotency; stable call
 identities and schema validation are not an OS sandbox. Thrown handler errors
 become detail-free error results. Deliberate error output is tool-result data.

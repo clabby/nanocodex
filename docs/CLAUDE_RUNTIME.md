@@ -241,7 +241,7 @@ journeys do not establish every CLI integration, OAuth flow or MCP feature.
 ## Native host operations
 
 The CLI installs a task board, retained Bash jobs and, when enabled, a shared
-child-agent registry. `TaskOutput`/`TaskStop` distinguish process jobs from agents.
+child-agent registry. `TaskOutput`/`TaskStop` operate retained process, monitor and workflow jobs; shared agent tools use numeric agent IDs.
 Bash jobs and registry snapshots live in the process; SQLite receipt persistence
 does not reconstruct them after process exit. An eligible foreground Bash
 command reaching its return timeout becomes a retained background job. Commands
@@ -265,25 +265,25 @@ retained output immediately available through `TaskOutput`. Capture is bounded
 to 4096 bytes; merged stdout/stderr is reported as stdout. No Bash PTY parameter
 or OS security sandbox is supplied; reference agent-view PTY is a separate surface.
 
-`Agent` starts a general-purpose child or delegates another prompt to an owned
-child. `ListAgents`, `SendMessage`, and `CloseAgent` retain the registry's tree and
-management checks; closing releases an owned subtree's retained sessions. Child completion uses `SubmitResult`, a Nanocodex extension.
-`Agent(subagent_type="fork")` starts a background child with native conversation
-history through the completed boundary before the current tool batch. Signed
-thinking and native tool results remain intact; the current batch and its pending
-effects are excluded. The fork keeps the parent's model, ignores a model override,
-and rejects harness, thinking, resume and output-contract overrides. It has a new
-session and independent effect receipts; parent tool effects are not replayed.
-Project `.claude/agents/**/*.md` definitions are discovered through
-`ListAgentProfiles` and selected by native `subagent_type`. Host-selected models,
-exact tool allow/deny lists and restrictive permission modes intersect inherited
-policy before the first child request. The admitted profile remains immutable
-on resume even when its definition changes; descendants inherit its restrictions.
-`isolation: worktree` creates a child-owned tree without moving the parent.
-Completion retains it for resume; authorized `CloseAgent` removes only exact
-owned unchanged trees after releasing subtree pins and reports preserved dirty,
-committed or pinned trees. This does not restore process-local child registries
-on restart. Named teams remain unavailable. See [profile configuration](claude-agent-profiles.md).
+The native CLI installs the exact same subagent handlers and input schemas as
+Codex: `spawn_agent`, `send_agent_message`, `list_agents`, `wait_agent`,
+`interrupt_agent`, `close_agent` and `submit_result`. The shared registry owns
+fresh children, family/model selection, result contracts, message routing,
+management checks and subtree shutdown. Claude-native agent aliases and profile
+selection are not part of the CLI tool catalog. Inherited workspace and permission
+restrictions still apply to Claude children.
+
+Both native runtimes discover the same Computer Use provider with the same
+`NANOCODEX_COMPUTER` configuration. Its nested tools retain the exact
+`mcp__cua_repl__*` names, provider schemas and handlers. `--workspace-tools false`
+skips local CUA discovery. Text, screenshots, structured results and provider
+errors cross the native Messages adapter; hidden lifecycle tools stay hidden.
+
+The CLI always uses the shared QuickJS Code Mode engine, independent of harness.
+Claude sees only `exec` and `wait`; `exec` accepts `{ "code": "..." }`. Native tools,
+shared subagent tools and CUA tools are callable on `tools` inside JavaScript.
+Permissions, hooks and file checkpoints wrap each nested native invocation.
+See the [tool inventory and usage](TOOL_RUNTIMES.md) for both runtime catalogs.
 
 `--claude-hooks PATH` explicitly loads synchronous command hooks for
 `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `SessionStart`,
@@ -324,7 +324,7 @@ or `full-access`/`bypassPermissions`. With no saved or explicit policy the CLI
 retains full-access compatibility. Selecting a rules file defaults to manual
 admission. Deny rules take precedence over ask, then allow; unsupported syntax
 fails configuration. Rules support tool names, MCP server/tool patterns, bounded
-Read/Edit path patterns, Bash patterns, Agent/Skill selectors and WebFetch domains.
+Read/Edit path patterns, Bash patterns, spawn_agent role/Skill selectors and WebFetch domains.
 Shell compounds require every simple command to match an allow rule; complex
 shell syntax requires approval, and file deny/ask rules conservatively cover Bash.
 `acceptEdits` admits workspace edits except sensitive `.git`/`.claude` paths.
@@ -441,9 +441,9 @@ registry, with no direct filesystem, network or process bridge.
 Limits are 15 agent calls per run, four concurrent, five minutes, 512 KiB script
 and 64 KiB result. Admission pins the workspace for scripts and all late-spawned
 children; completed resumable children retain their own pins. Read/Edit
-restrictions conservatively cover script loading and persistence; Agent deny/ask
-rules also cover the entire Workflow, including parameter-scoped Agent rules.
-Agent allow rules do not grant Workflow authority. Runs start in
+restrictions conservatively cover script loading and persistence; spawn_agent deny/ask
+rules also cover the entire Workflow, including parameter-scoped spawn_agent rules.
+spawn_agent allow rules do not grant Workflow authority. Runs start in
 the background with `wf_` IDs for `TaskOutput`/`TaskStop`. Same-session terminal
 `resumeFromRunId` reuses only confirmed matching prompt/options results; uncertain,
 failed or pending calls remain fenced. Resume cannot retarget another workspace.
@@ -603,8 +603,8 @@ protocol](claude-authentication.md). Those observations do not establish live
 admission of the continuation capabilities above. Natural expiry, managed live
 admission and billing remain separate acceptance boundaries.
 
-The native host implements 26 of the 35 names in the pinned interactive capture,
-including verified opt-in Workflow. Nine conditional product names remain absent:
+The native host exposes its capabilities through Code Mode. Conditional product
+tools remain absent:
 Artifact, DesignSync, EndConversation, PowerShell, PushNotification, RemoteTrigger,
 ReportFindings, SendFeedback and ShareOnboardingGuide. Remaining differences include
 complete permission-mode equivalence, named teams, Bash PTY/agent-view support,

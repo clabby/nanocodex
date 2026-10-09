@@ -14,9 +14,10 @@ import type { Workspace } from "./workspace.mjs";
 import type { Tools } from "../tools/Tools.mjs";
 
 export type Agent = DefaultAgent;
-type ToolExposureOptions =
-  | { mcp?: false | undefined; toolMode?: "code" | "code-only" | "direct" | undefined }
-  | { mcp: McpServers; toolMode?: "code" | "code-only" | undefined };
+type ToolExposureOptions = {
+  mcp?: McpServers | false | undefined;
+  toolMode?: "code-only" | undefined;
+};
 
 /** Creates a Node-hosted Rust/WASM Agent. */
 export function create(options: import('../runtime/claude.mjs').Options & { harness: 'claude' }): Promise<import('../runtime/claude.mjs').Agent>;
@@ -29,7 +30,7 @@ export declare namespace create {
   }>;
   type Options = AgentOptions & ToolExposureOptions & {
     codeEvaluator?: CodeEvaluator | undefined;
-    /** Opt-in durable direct-tool and nested Code Mode receipts for safe cold recovery. */
+    /** Opt-in durable application-tool and Code Mode receipts for safe cold recovery. */
     codeEffectJournal?: CodeEffectJournal | undefined;
     /** Caller-owned rooted filesystem mounted through standard workspace tools. */
     filesystem?: Workspace | undefined;

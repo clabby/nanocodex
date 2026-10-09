@@ -194,11 +194,14 @@ impl ToolRuntime {
         }
     }
 
+    /// Whether model calls must use the Code Mode entrypoints.
+    #[must_use]
+    pub fn is_code_only(&self) -> bool {
+        self.exposure.unwrap_or_default() == ToolExposure::CodeModeOnly
+    }
+
     /// Returns the direct model-visible Code Mode tool definitions.
-    ///
-    /// Native definitions are session-independent. The session ID keeps this
-    /// method aligned with hosted runtimes whose available tools may vary by
-    /// session.
+    /// Native definitions are session-independent; the argument matches hosted runtimes.
     #[must_use]
     pub fn model_specs(&self, _session_id: &str) -> Vec<ToolDefinition> {
         let mut nested = self.registry.registered_code_mode_definitions();
@@ -225,6 +228,9 @@ impl ToolRuntime {
             ),
             code_mode::wait_spec(),
         ];
+        if self.is_code_only() {
+            return native;
+        }
         native.append(&mut direct);
         native.extend(
             self.registry

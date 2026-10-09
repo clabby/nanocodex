@@ -38,10 +38,9 @@ const shared = {
   module: await readFile(new URL('../../pkg-web/nanocodex_bg.wasm', import.meta.url)),
   durability, durabilityId: 'code-recovery-owned',
   sessionId: '018f1f9a-7b3c-7a07-8000-000000000021',
-  codeEvaluator: workerData.evaluator === "native" ? undefined
+  codeEvaluator: workerData.sdk === "node" && workerData.evaluator === "default" ? undefined
     : createQuickJsEvaluator(await newQuickJSAsyncWASMModuleFromVariant(variant)),
   codeEffectJournal,
-  toolMode: workerData.direct ? "direct" : "code",
   tools: { effect: {
     description: 'Synthetic externally observable effect', supportsParallelToolCalls: true,
     parameters: { type: 'object', properties: { kind: { type: 'string' } }, required: ['kind'] },
@@ -105,8 +104,7 @@ if (workerData.sdk === 'cloudflare') {
   };
   agent = await bindAgent(shared.module).create(owner, { durabilityId: shared.durabilityId,
     eventPersistence: 'caller', tools: shared.tools,
-    [Symbol.for('nanocodex.cloudflare.internalRuntime')]: { toolMode: shared.toolMode,
-      codeEvaluator: shared.codeEvaluator, codeEffectJournal: shared.codeEffectJournal },
+    [Symbol.for('nanocodex.cloudflare.internalRuntime')]: { codeEvaluator: shared.codeEvaluator, codeEffectJournal: shared.codeEffectJournal },
   });
 } else agent = await api.Agent.create({ ...shared,
   transport: api.Transport.openAi({ apiKey: 'synthetic', websocketUrl: workerData.url, websocketWarmup: false }),

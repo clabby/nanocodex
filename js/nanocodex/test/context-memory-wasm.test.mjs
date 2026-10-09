@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { Agent, Transport } from "../host/index.mjs";
+import { codeEvaluator } from "./quickjs-fixture.mjs";
 
 function modelFixture(totalTokens = 110) {
   const requests = [];
@@ -37,7 +38,7 @@ for (const rawApiEvents of [undefined, false]) {
   test(`real WASM large generation and full-history compaction, rawApiEvents=${rawApiEvents}`, { timeout: 60_000 }, async t => {
     const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
     const fixture = modelFixture();
-    const options = { module, tools: [], harness: false, rawApiEvents,
+    const options = { codeEvaluator, module, tools: [], rawApiEvents,
       instructions: "synthetic large prefix " + "x".repeat(8 * 1024 * 1024), transport: fixture.transport };
     let agent = await Agent.create(options);
     const bridge = globalThis.nanocodexHost;
@@ -89,7 +90,7 @@ for (const rawApiEvents of [undefined, false]) {
 
 test("real WASM completed snapshot preserves the next-turn compaction decision", { timeout: 60_000 }, async () => {
   const fixture = modelFixture(265639);
-  const options = { tools: [], harness: false, rawApiEvents: false, transport: fixture.transport };
+  const options = { codeEvaluator, tools: [], rawApiEvents: false, transport: fixture.transport };
   let agent = await Agent.create(options);
   try {
     const first = await agent.turn.prompt({ input: "synthetic task" }).result();

@@ -5,9 +5,9 @@ description: Add typed application capabilities without moving the agent loop ou
 
 # Rust tools, Code Mode, and MCP
 
-This page describes the OpenAI Responses tool runtime. Claude uses the separate
-`nanocodex-claude-tools` crate and native Claude schemas; it does not receive
-Codex Code Mode, `apply_patch`, or Responses tool-search declarations. See the
+This page describes the Responses tool runtime. Claude's native capabilities use
+`nanocodex-claude-tools` and Claude schemas inside the same Code Mode execution
+surface. Both shipped harnesses expose only `exec` and `wait`. See the
 [Claude runtime guide](https://github.com/gakonst/nanocodex/blob/master/docs/CLAUDE_RUNTIME.md)
 for explicit Claude host capabilities.
 
@@ -35,13 +35,12 @@ Mark a tool parallel only when its local effects are safe to overlap. Implement
 the `Tool` trait directly when execution needs `ToolContext`, freeform input,
 multimodal output, or a custom definition.
 
-## Choose model-visible exposure
+## Model-visible exposure
 
-`Tools` defaults ordinary tools to Code Mode-only exposure. The model can loop,
+Agent runtimes require Code Mode-only exposure. The model can loop,
 branch, and call typed nested tools with `await tools.<name>(...)` through the
-Code Mode execution surface. `wait`, deferred search, and deliberately direct
-tools may remain visible beside it. Choose direct-and-Code-Mode exposure only
-when a consumer needs the same ordinary tools visible directly as well.
+Code Mode execution surface. Only `exec` and `wait` are model-visible;
+discovery and all action tools are invoked inside `exec`.
 
 The default native workspace set includes bounded command execution, retained
 stdin sessions, Rust-verified patch application, image viewing, planning, web
@@ -65,7 +64,7 @@ let tools = Tools::builder().provider(mcp).build()?;
 ```
 
 MCP discovery starts with the owning tool runtime. Deferred schemas stay out of
-the initial model prefix, are found through `tool_search`, and become available
+the initial model prefix, are found through `tools.tool_search` inside `exec`, and become available
 under canonical server/tool names in Code Mode. Native MCP is part of
 `nanocodex-oai-tools`; it is not another agent runtime.
 

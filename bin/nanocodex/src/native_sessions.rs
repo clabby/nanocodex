@@ -173,16 +173,34 @@ fn read_payload(db: &Connection, id: &str, key: &str) -> Result<String> {
     if let Some(value) = record.strip_prefix('=') {
         return Ok(value.into());
     }
-    let count = record
-        .strip_prefix('+')
-        .ok_or_else(|| eyre!("unsupported native record encoding"))?
-        .parse::<usize>()?;
-    if count > 128 {
-        return Err(eyre!("native checkpoint exceeds discovery size limit"));
-    }
+    let keys = if let Some(hashes) = record.strip_prefix('#') {
+        if hashes.is_empty()
+            || hashes.len() % 64 != 0
+            || !hashes.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(eyre!("invalid native checkpoint chunk manifest"));
+        }
+        // Current journals use content-addressed chunks as small as 2 KiB.
+        if hashes.len() / 64 > MAX_BYTES / 2048 + 1 {
+            return Err(eyre!("native checkpoint exceeds discovery size limit"));
+        }
+        (0..hashes.len())
+            .step_by(64)
+            .map(|offset| format!("c:{}", &hashes[offset..offset + 64]))
+            .collect::<Vec<_>>()
+    } else {
+        let count = record
+            .strip_prefix('+')
+            .ok_or_else(|| eyre!("unsupported native record encoding"))?
+            .parse::<usize>()?;
+        if count > 128 {
+            return Err(eyre!("native checkpoint exceeds discovery size limit"));
+        }
+        (0..count).map(|index| format!("{key}/{index}")).collect()
+    };
     let mut value = String::new();
-    for index in 0..count {
-        let chunk = read_record(db, id, &format!("{key}/{index}"))?;
+    for chunk_key in keys {
+        let chunk = read_record(db, id, &chunk_key)?;
         if value.len() + chunk.len() > MAX_BYTES {
             return Err(eyre!("native checkpoint exceeds discovery size limit"));
         }

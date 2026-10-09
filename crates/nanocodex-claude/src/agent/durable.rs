@@ -41,6 +41,10 @@ impl Snapshot {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Cursor {
+    // Process-local Code Mode admissions cannot survive a recovered boundary.
+    // Settled receipts still replay; unreceipted calls at this index fail closed.
+    #[serde(skip)]
+    pub(super) recovered_code_index: Option<u32>,
     #[serde(default)]
     pub(super) lifecycle_turn_id: String,
     #[serde(default)]
@@ -242,6 +246,7 @@ impl State {
             && let Some(value) = policy.continuation(operation.to_owned()).await?
         {
             let mut cursor: Cursor = serde_json::from_value(value).map_err(recovery_error)?;
+            cursor.recovered_code_index = Some(cursor.index);
             // Replay the old in-flight effect unchanged; subsequent model effects
             // can participate in the shared steering consumption contract.
             if cursor.model_receipt_start.is_none() {
@@ -278,6 +283,7 @@ impl State {
             .client
             .freeze_wire_profile(template.cache_control.is_some());
         let mut cursor = Cursor {
+            recovered_code_index: None,
             lifecycle_turn_id: candidate_id("lifecycle"),
             stop_hook_active: false,
             instruction_revision: None,
@@ -423,6 +429,13 @@ impl State {
         };
         let result = if cancel.flag.load(Ordering::SeqCst) {
             unknown()
+        } else if self.code_only
+            && cursor.recovered_code_index == Some(index)
+            && matches!(name, "exec" | "wait")
+        {
+            ContentBlock::tool_result_content(id, ToolResultContent::Text(
+                "Code Mode admission was lost during recovery; prior effects may have outcome unknown. No code was executed in this attempt. Reconcile those effects before using a fresh cell from a new model request.".into()
+            ), true)
         } else if let Some(handler) = handler {
             tokio::select! {
                 biased;

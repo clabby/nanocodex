@@ -1,3 +1,4 @@
+import { codeEvaluator } from './quickjs-fixture.mjs';
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
@@ -37,7 +38,7 @@ async function fixture(t, runtime, options = {}, { totalTokens = 100, output } =
         const items = output?.(requests) ?? [{ type: "message", role: "assistant",
           content: [{ type: "output_text", text: "fixture finished" }] }];
         send(socket, { type: "response.completed", response: {
-          id, status: "completed", end_turn: !items.some(item => item.type === "function_call"),
+          id, status: "completed", end_turn: !items.some(item => ["function_call", "custom_tool_call"].includes(item.type)),
           output: items,
           usage: { input_tokens: totalTokens - 5, output_tokens: 5, total_tokens: totalTokens },
         } });
@@ -47,7 +48,7 @@ async function fixture(t, runtime, options = {}, { totalTokens = 100, output } =
   const agent = await runtime.Agent.create({
     ...(runtime.Agent === HostAgent ? {
       module: await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url)),
-      harness: false,
+      codeEvaluator,
     } : {}),
     tools: [], mcp: false, rawApiEvents: false,
     transport: runtime.Transport.openAi({ apiKey: "fixture", websocketUrl: server.url,
@@ -163,8 +164,8 @@ test("real WASM subagents do not inherit the root preservation hook", { timeout:
     beforeCompaction: async input => { preserved.push(input); return { receiptId: "root-only-receipt" }; },
   }, {
     totalTokens: 265639,
-    output: requests => requests.length === 1 ? [{ type: "function_call",
-      call_id: "fixture-submit", name: "submit_result", arguments: JSON.stringify({ output: "child result" }),
+    output: requests => requests.length === 1 ? [{ type: "custom_tool_call",
+      call_id: "fixture-submit", name: "exec", input: 'text(await tools.submit_result({output:"child result"}));',
     }] : undefined,
   });
   const child = await Subagents.spawn(agent, { role: "synthetic-child", task: "Return the synthetic result.", outputSchema: true });
@@ -181,7 +182,7 @@ test("real WASM subagents do not inherit the root preservation hook", { timeout:
 
 test("browser Worker creation rejects beforeCompaction callbacks before starting a Worker", async () => {
   let called = false;
-  await assert.rejects(BrowserAgent.create({ harness: false, beforeCompaction: async () => {
+  await assert.rejects(BrowserAgent.create({ beforeCompaction: async () => {
     called = true;
     return { receiptId: "unreachable" };
   } }), /beforeCompaction.*functions across the Worker boundary/);

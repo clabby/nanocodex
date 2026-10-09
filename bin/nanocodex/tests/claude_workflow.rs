@@ -1,4 +1,6 @@
 //! Real CLI + QuickJS + Registry journey; only inference is synthetic.
+#[path = "support/claude_code_fixture.rs"]
+mod code_fixture;
 use axum::{Json, Router, routing::post};
 use serde_json::{Value, json};
 use std::{
@@ -24,7 +26,12 @@ fn sse(block: Value) -> String {
     [json!({"type":"message_start","message":{"id":"fixture","role":"assistant","model":"claude-sonnet-5-5","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}),json!({"type":"content_block_start","index":0,"content_block":start}),json!({"type":"content_block_delta","index":0,"delta":delta}),json!({"type":"content_block_stop","index":0}),json!({"type":"message_delta","delta":{"stop_reason":if tool {"tool_use"} else {"end_turn"}},"usage":{"output_tokens":1}}),json!({"type":"message_stop"})].iter().map(|v|format!("data: {v}\n\n")).collect()
 }
 fn tool(stage: usize, name: &str, input: Value) -> Value {
-    json!({"type":"tool_use","id":format!("wf-call-{stage}"),"name":name,"input":input})
+    let mut block = code_fixture::tool(format!("wf-call-{stage}"), name, input);
+    if name == "submit_result" {
+        let code = block["input"]["code"].as_str().unwrap();
+        block["input"]["code"] = json!(code.replacen('\n', "\nif (ALL_TOOLS.some(t => t.name === 'Workflow')) throw Error('Workflow leaked to child');\n", 1));
+    }
+    block
 }
 fn result(body: &Value) -> Option<&Value> {
     body["messages"]
@@ -119,19 +126,18 @@ async fn native_workflow_registry_sandbox_resume_and_stop() {
     let count = stage.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
-    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {let log=log.clone();let count=count.clone();let ids=ids.clone();let paths=paths.clone();async move {
+    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {let body = code_fixture::normalize(body);let log=log.clone();let count=count.clone();let ids=ids.clone();let paths=paths.clone();async move {
         let first=body["messages"][0]["content"].to_string();let child=first.contains("WORKFLOW_CHILD_");
         log.lock().unwrap().push(json!({"child":child,"request":body}));
         let reply=if child {
-            assert!(!body["tools"].as_array().unwrap().iter().any(|t|t["name"]=="Workflow"),"Workflow leaked to child");
             if first.contains("WORKFLOW_CHILD_SLOW") {tokio::time::sleep(Duration::from_secs(30)).await;}
-            if result(&body).is_none() {let value=if first.contains("verify_") {"verified"}else if first.contains("WORKFLOW_CHILD_a") {"reviewed-a"}else{"reviewed-b"};tool(100,"SubmitResult",json!({"output":value}))}else{json!({"type":"text","text":"child complete"})}
+            if result(&body).is_none() {let value=if first.contains("verify_") {"verified"}else if first.contains("WORKFLOW_CHILD_a") {"reviewed-a"}else{"reviewed-b"};tool(100,"submit_result",json!({"output":value}))}else{json!({"type":"text","text":"child complete"})}
         } else {
             let stage={let mut n=count.lock().unwrap();let current=*n;*n+=1;current};
             if [2,4,6,10,13].contains(&stage) {let receipt=parsed(&body);ids.lock().unwrap().push(receipt["task_id"].as_str().unwrap_or_else(||panic!("missing workflow ID at stage {stage}: {receipt}")).into());if stage==2 {paths.lock().unwrap().push(receipt["scriptPath"].as_str().unwrap().into());}}
             let ids=ids.lock().unwrap().clone();let paths=paths.lock().unwrap().clone();
             match stage {
-                0=>{assert!(body["tools"].as_array().unwrap().iter().any(|t|t["name"]=="Workflow"));tool(stage,"Workflow",json!({"script":"export const meta = {name: (() => 'bad')(), description:'No effects'}; await agent('SHOULD_NOT_SPAWN');"}))},
+                0=>{assert_eq!(body["tools"].as_array().unwrap().len(),2);tool(stage,"Workflow",json!({"script":"export const meta = {name: (() => 'bad')(), description:'No effects'}; await agent('SHOULD_NOT_SPAWN');"}))},
                 1=>{assert_eq!(result(&body).unwrap()["is_error"],true);tool(stage,"Workflow",json!({"name":"fixture","args":["a","b"]}))},
                 2=>tool(stage,"TaskOutput",json!({"task_id":ids[0],"block":true,"timeout":15000})),
                 3=>{let receipt=parsed(&body);assert_eq!(receipt["status"],"completed","{receipt}");assert_eq!(receipt["output"]["values"],json!([["verified"],["verified"]]));assert_eq!(receipt["output"]["sandbox"],json!(["undefined","undefined","undefined"]));assert_eq!(receipt["output"]["catalog"],json!(["workflow_bridge"]));tool(stage,"Workflow",json!({"scriptPath":paths[0],"resumeFromRunId":ids[0],"args":["a","b"]}))},
@@ -191,19 +197,19 @@ async fn native_workflow_requires_explicit_cli_opt_in() {
     let app = Router::new().route(
         "/v1/messages",
         post(move |Json(body): Json<Value>| {
+            let body = code_fixture::normalize(body);
             let seen = seen.clone();
             async move {
-                assert!(
-                    !body["tools"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|t| t["name"] == "Workflow")
-                );
-                *seen.lock().unwrap() = true;
+                let reply = if result(&body).is_none() {
+                    tool(0, "Workflow", json!({"script":"export const meta={name:'disabled',description:'No effects'}; return 1;"}))
+                } else {
+                    assert_eq!(result(&body).unwrap()["is_error"], true);
+                    *seen.lock().unwrap() = true;
+                    json!({"type":"text","text":"opt-in-required"})
+                };
                 (
                     [("content-type", "text/event-stream")],
-                    sse(json!({"type":"text","text":"opt-in-required"})),
+                    sse(reply),
                 )
             }
         }),
@@ -259,13 +265,13 @@ async fn native_workflow_pins_late_children_and_retained_children() {
     let retained_trees = trees.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
-    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {let log=log.clone();let count=count.clone();let ids=ids.clone();let trees=trees.clone();async move {
+    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {let body = code_fixture::normalize(body);let log=log.clone();let count=count.clone();let ids=ids.clone();let trees=trees.clone();async move {
         let first=body["messages"][0]["content"].to_string();let child=first.contains("WORKFLOW_PIN_");log.lock().unwrap().push(json!({"child":child,"request":body}));
         let reply=if child {
             let calls=body["messages"].as_array().unwrap().iter().filter_map(|m|m["content"].as_array()).flatten().filter(|b|b["type"]=="tool_result").count();
             if first.contains("WORKFLOW_PIN_DELAY") && calls==0 {tokio::time::sleep(Duration::from_millis(500)).await;}
             if first.contains("WORKFLOW_PIN_LATE") && calls==0 {tool(100,"Write",json!({"file_path":"late-child.txt","content":"late child remained in original worktree"}))}
-            else if calls==0 || (first.contains("WORKFLOW_PIN_LATE") && calls==1) {tool(101,"SubmitResult",json!({"output":"pin-child-complete"}))}
+            else if calls==0 || (first.contains("WORKFLOW_PIN_LATE") && calls==1) {tool(101,"submit_result",json!({"output":"pin-child-complete"}))}
             else {json!({"type":"text","text":"pin child finished"})}
         } else {
             let stage={let mut n=count.lock().unwrap();let current=*n;*n+=1;current};
@@ -336,6 +342,7 @@ async fn native_workflow_respects_read_denial_before_script_or_children() {
     let app = Router::new().route(
         "/v1/messages",
         post(move |Json(body): Json<Value>| {
+            let body = code_fixture::normalize(body);
             let log = log.clone();
             async move {
                 let stage = {
@@ -409,10 +416,10 @@ async fn native_workflow_enforces_agent_concurrency_and_size_budgets() {
     let starts_check = starts.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
-    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {let log=log.clone();let count=count.clone();let ids=ids.clone();let active=active.clone();let peak=peak.clone();let starts=starts.clone();let first_wave=first_wave.clone();async move {
+    let app=Router::new().route("/v1/messages",post(move |Json(body):Json<Value>| {let body = code_fixture::normalize(body);let log=log.clone();let count=count.clone();let ids=ids.clone();let active=active.clone();let peak=peak.clone();let starts=starts.clone();let first_wave=first_wave.clone();async move {
         let first=body["messages"][0]["content"].to_string();let child=first.contains("WORKFLOW_BUDGET_");log.lock().unwrap().push(json!({"child":child,"request":body}));
         let reply=if child {
-            if result(&body).is_none() {let index=starts.fetch_add(1,Ordering::SeqCst);let n=active.fetch_add(1,Ordering::SeqCst)+1;peak.fetch_max(n,Ordering::SeqCst);if index<4 {tokio::time::timeout(Duration::from_secs(5),first_wave.wait()).await.expect("four actual workflow children should reach the provider together");}tokio::time::sleep(Duration::from_millis(50)).await;active.fetch_sub(1,Ordering::SeqCst);tool(100,"SubmitResult",json!({"output":"budget-child"}))}else{json!({"type":"text","text":"budget child finished"})}
+            if result(&body).is_none() {let index=starts.fetch_add(1,Ordering::SeqCst);let n=active.fetch_add(1,Ordering::SeqCst)+1;peak.fetch_max(n,Ordering::SeqCst);if index<4 {tokio::time::timeout(Duration::from_secs(5),first_wave.wait()).await.expect("four actual workflow children should reach the provider together");}tokio::time::sleep(Duration::from_millis(50)).await;active.fetch_sub(1,Ordering::SeqCst);tool(100,"submit_result",json!({"output":"budget-child"}))}else{json!({"type":"text","text":"budget child finished"})}
         }else{
             let stage={let mut n=count.lock().unwrap();let current=*n;*n+=1;current};
             if [1,3,5,8].contains(&stage) {ids.lock().unwrap().push(parsed(&body)["task_id"].as_str().unwrap().into());}let ids=ids.lock().unwrap().clone();
@@ -468,18 +475,18 @@ async fn native_workflow_honors_agent_deny_and_ask_before_children() {
         .join("../../output/claude-workflow")
         .join(format!("agent-permissions-{}", uuid::Uuid::new_v4()));
     for (case, lane, rule, mode) in [
-        ("deny", "deny", "Agent", "bypassPermissions"),
+        ("deny", "deny", "spawn_agent", "bypassPermissions"),
         (
             "deny-scoped",
             "deny",
-            "Agent(prompt:WORKFLOW_PERMISSION_CHILD)",
+            "spawn_agent(task:WORKFLOW_PERMISSION_CHILD)",
             "bypassPermissions",
         ),
-        ("ask", "ask", "Agent", "dontAsk"),
+        ("ask", "ask", "spawn_agent", "dontAsk"),
         (
             "ask-scoped",
             "ask",
-            "Agent(prompt:WORKFLOW_PERMISSION_CHILD)",
+            "spawn_agent(task:WORKFLOW_PERMISSION_CHILD)",
             "dontAsk",
         ),
     ] {
@@ -496,7 +503,7 @@ async fn native_workflow_honors_agent_deny_and_ask_before_children() {
         let endpoint = format!("http://{}/v1/messages", listener.local_addr().unwrap());
         let app = Router::new().route(
             "/v1/messages",
-            post(move |Json(body): Json<Value>| {
+            post(move |Json(body): Json<Value>| {let body = code_fixture::normalize(body);
                 let log = log.clone();
                 async move {
                     let stage = {
@@ -525,7 +532,7 @@ async fn native_workflow_honors_agent_deny_and_ask_before_children() {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut cmd = command(&workspace, &endpoint, true);
         cmd.arg("--claude-permissions").arg(&rules);
-        std::fs::write(case_artifact.join("scenario.txt"), format!("cargo +1.97.0 test -p nanocodex-bin --test claude_workflow native_workflow_honors_agent_deny_and_ask_before_children -- --nocapture\nCLI: {cmd:?}\nInput: {lane} {rule}, mode {mode}, explicit allow Workflow.\nExpected: conservative aggregate Agent admission overrides Workflow allow; exactly two root requests, zero child requests and no persisted script.\n")).unwrap();
+        std::fs::write(case_artifact.join("scenario.txt"), format!("cargo +1.97.0 test -p nanocodex-bin --test claude_workflow native_workflow_honors_agent_deny_and_ask_before_children -- --nocapture\nCLI: {cmd:?}\nInput: {lane} {rule}, mode {mode}, explicit allow Workflow.\nExpected: conservative aggregate spawn_agent admission overrides Workflow allow; exactly two root requests, zero child requests and no persisted script.\n")).unwrap();
         let output = tokio::time::timeout(Duration::from_secs(30), cmd.output())
             .await
             .unwrap()

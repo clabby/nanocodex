@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createClaude, toClaudeConfig } from '../runtime/claude.mjs';
-import { createClaudeHost, resolveClaudeTools } from '../runtime/claude-host.mjs';
+import { createClaude as createRuntimeClaude, toClaudeConfig } from '../runtime/claude.mjs';
+import { createClaudeHost as createRuntimeClaudeHost, resolveClaudeTools } from '../runtime/claude-host.mjs';
 import { createMemoryDurabilityStore } from '../runtime/durability-store.mjs';
+
+import { codeEvaluator } from './quickjs-fixture.mjs';
+const createClaudeHost = (options) => createRuntimeClaudeHost({ codeEvaluator, ...options });
+const createClaude = (options, ...args) => createRuntimeClaude({ codeEvaluator, ...options }, ...args);
 
 const MODEL = 'claude-test';
 const SESSION = '018f1f9a-7b3c-7a01-8000-000000000031';
@@ -56,16 +60,16 @@ test('Claude-only catalog maps native inputs, errors, media and stable host iden
     } },
     { name: 'Bash', description: 'actual host execution', handler() { throw new Error('secret'); } },
   ] });
-  assert.deepEqual(JSON.parse(host.toolDefinitions()).map((x) => x.name), ['Read', 'Bash']);
-  const out = JSON.parse(await host.executeClaudeTool('Read', '{"file_path":"a"}', SESSION, 'call-1', MODEL, 'turn-1'));
-  assert.equal(out.isError, true);
+  assert.deepEqual(JSON.parse(host.toolDefinitions()).map((x) => x.name), ['exec', 'wait']);
+  const out = await host.invokeTool('Read', '{"file_path":"a"}', SESSION, 'call-1', MODEL, 'turn-1');
+  assert.equal(out.success, false);
   assert.deepEqual(out.structuredResult, { code: 'DENIED' });
   assert.deepEqual(out.metadata, { source: 'host' });
-  assert.deepEqual(out.content[1], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } });
+  assert.equal(out.output[1].image_url, 'data:image/png;base64,aGVsbG8=');
   assert.equal(context.sessionId, SESSION); assert.equal(context.turnId, 'turn-1'); assert.equal(context.callId, 'call-1');
   assert.equal(context.model, MODEL); assert.ok(context.signal instanceof AbortSignal);
-  const error = JSON.parse(await host.executeClaudeTool('Bash', '{}', SESSION, 'call-2', MODEL, 'turn-1'));
-  assert.equal(error.isError, true); assert.match(JSON.stringify(error), /secret/);
+  const error = JSON.parse(await host.executeTool('Bash', '{}', SESSION, 'call-2', MODEL, 'turn-1'));
+  assert.equal(error.success, false); assert.match(JSON.stringify(error), /secret/);
   await assert.rejects(host.executeTool('Read', '{}', SESSION, 'call', MODEL, undefined), /identities/);
   host.cancelCodeTurn(SESSION); assert.equal(context.signal.aborted, true);
   host.dispose();
@@ -132,7 +136,7 @@ test('Claude failed construction unregisters auth, durability and session routes
 });
 
 
-test('Claude native replies retain opaque media/errors and unsupported shared audio fails closed', async () => {
+test('Claude internal callbacks retain opaque media and errors', async () => {
   const native = { content: [{ type: 'text', text: 'denied', opaque: { retained: true } },
     { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aA==' } }],
     isError: true, metadata: { evidence: 'host' }, structuredResult: { code: 'NO' } };
@@ -140,8 +144,8 @@ test('Claude native replies retain opaque media/errors and unsupported shared au
     { name: 'Native', description: 'native contract', handler: () => native },
     { name: 'Audio', description: 'unsupported media', handler: () => [{ type: 'input_audio', audio_url: 'data:audio/wav;base64,aA==' }] },
   ] });
-  assert.deepEqual(JSON.parse(await host.executeClaudeTool('Native', '{}', SESSION, 'call', MODEL, 'turn')), native);
-  await assert.rejects(host.executeClaudeTool('Audio', '{}', SESSION, 'audio-call', MODEL, 'turn'), /unsupported Claude tool media/);
+  assert.deepEqual(await host.invokeTool('Native', '{}', SESSION, 'call', MODEL, 'turn'), native);
+  assert.deepEqual(await host.invokeTool('Audio', '{}', SESSION, 'audio-call', MODEL, 'turn'), [{ type: 'input_audio', audio_url: 'data:audio/wav;base64,aA==' }]);
   host.dispose();
 });
 
@@ -182,16 +186,14 @@ test('Claude refuses explicit Codex definitions rather than reinterpreting their
 
 test('Claude snapshots nested configuration before asynchronous loading', async () => {
   const systemBlocks = [{ type: 'text', text: 'original' }];
-  const serverTools = [{ type: 'web_search_20250305', name: 'web_search' }];
   const ready = Promise.withResolvers();
   const capture = {};
-  const creating = createClaude({ auth: { apiKey: 'synthetic' }, model: MODEL, systemBlocks, serverTools }, async () => {
+  const creating = createClaude({ auth: { apiKey: 'synthetic' }, model: MODEL, systemBlocks }, async () => {
     await ready.promise; return mockWasm(capture);
   }, 'test');
-  systemBlocks[0].text = 'mutated'; serverTools[0].name = 'mutated'; ready.resolve();
+  systemBlocks[0].text = 'mutated'; ready.resolve();
   const agent = await creating;
   assert.equal(capture.config.systemBlocks[0].text, 'original');
-  assert.equal(capture.config.serverTools[0].name, 'web_search');
   agent.dispose();
 });
 

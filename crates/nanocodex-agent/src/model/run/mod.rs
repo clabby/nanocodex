@@ -515,7 +515,6 @@ impl<S> ModelRun<S> {
 // Old discovery results can install direct schemas even after the request prefix
 // has been rebuilt. Preserve the transcript and call/output pairing, but remove
 // provider capability declarations when restoring an embedded strict runtime.
-#[cfg(target_family = "wasm")]
 fn code_only_checkpoint(mut checkpoint: ModelCheckpoint, runtime: &ToolRuntime) -> ModelCheckpoint {
     if !runtime.is_code_only() {
         return checkpoint;
@@ -541,7 +540,6 @@ fn code_only_checkpoint(mut checkpoint: ModelCheckpoint, runtime: &ToolRuntime) 
     checkpoint
 }
 
-#[cfg(target_family = "wasm")]
 fn clear_code_only_schemas(history: &mut [ResponseItem]) {
     for item in history {
         match item {
@@ -562,7 +560,6 @@ pub(crate) fn prepare_checkpoint(
     let selected_agents_md = context_source
         .project_instructions(checkpoint.workspace())
         .map(Arc::from);
-    #[cfg(target_family = "wasm")]
     let checkpoint = code_only_checkpoint(checkpoint, &runtime);
     PreparedCheckpoint {
         checkpoint,
@@ -606,7 +603,6 @@ pub(crate) fn prepare_resumed_checkpoint(
     let selected_agents_md = context_source
         .project_instructions(checkpoint.workspace())
         .map(Arc::from);
-    #[cfg(target_family = "wasm")]
     let checkpoint = code_only_checkpoint(checkpoint, &runtime);
     Ok(PreparedCheckpoint {
         checkpoint,
@@ -659,7 +655,6 @@ pub(crate) fn prepare_history_checkpoint(
         context_baseline,
     )?;
     checkpoint.restore_reasoning(reasoning);
-    #[cfg(target_family = "wasm")]
     let checkpoint = code_only_checkpoint(checkpoint, &runtime);
     Ok(PreparedCheckpoint {
         checkpoint,

@@ -326,25 +326,24 @@ membership, room, quota, or application routing policy. Event frames are
 `1013`, then continues by reconnecting with that pause cursor as
 `?cursor=<decimal>`.
 
-`toolMode: "code-only"` exposes only `exec` and `wait` to the model. Workspace,
+All SDK runtimes expose only `exec` and `wait` to the model. Workspace,
 application, discovery (`tools.tool_search`) and local subagent tools are callable
 inside Code Mode. Discovery returns tool information as cell output; it does not
 add direct schemas. Newly discovered tools are available in the next cell. The
-existing `"code"` mode retains direct workspace/subagent controls, and `"direct"`
-continues to expose function tools without requiring an evaluator.
+legacy `"code"` and `"direct"` mode values are rejected.
 
-Cloudflare Agents default to direct tool mode because Workers prohibit dynamic
-`eval`/`new Function`. Caller-defined tools therefore work without a code
-evaluator. Select `toolMode: "code"` or `toolMode: "code-only"` only when also
-supplying an evaluator explicitly compatible with the deployed Worker runtime. Runtime-owned
+Node uses sandboxed QuickJS by default; browsers use a child Worker. Other Web API
+hosts, including Cloudflare Workers, require an explicit compatible `codeEvaluator`.
+The same evaluator capability is inherited by alternate child harnesses. Runtime-owned
 Subagents are installed by default, including on a durable root. A durable root
 retains its child task tree, conversations, and results across runtime shutdown
 and reconstruction. Cloudflare teardown preserves the children's authorization
 and pinned routes so completed children can receive follow-up messages after
 restoration. Explicitly closing a child releases its bindings and keeps it closed
-after reconstruction. Children of roots without durability live only for the
-lifetime of the runtime. Obsolete child checkpoint tables from older versions
-are discarded; current child state belongs to the root's task-tree journal. Use
+after reconstruction. Child messages remain in the separate task-tree journal,
+not the root conversation stream. Children of roots without durability live only
+for the lifetime of the runtime. Obsolete child checkpoint tables from older
+versions are discarded; current child state belongs to the root journal. Use
 `Subagents.create({ maxConcurrency })` in `tools` to set an explicit finite
 concurrency limit. Active subagent turns are unlimited by default.
 
@@ -524,7 +523,7 @@ const agent = await Agent.create({
     websocketUrl: env.RESPONSES_WEBSOCKET_URL,
     createWebSocket: (endpoint) => new WebSocket(endpoint),
   }),
-  toolMode: "direct",
+  codeEvaluator: workerCodeEvaluator, // Explicit QuickJS evaluator for this Worker.
   tools: [
     web({
       url: env.WEB_TOOL_URL,
@@ -586,7 +585,7 @@ const tools = [
 The artifact factory performs no dynamic evaluation and is safe to load in a
 Cloudflare Worker. Browser hosts additionally install the exact iframe syntax
 validator. The model calls `tools.render_artifact({ id, title, source })` from
-Code Mode, or `render_artifact` directly when the host selects direct mode; no
+Code Mode; no
 artifact CLI is installed. Artifact capacity is host-owned: the binding adds no
 byte, source-length, ID-length, or document-count policy limits.
 
@@ -818,13 +817,9 @@ consumer is configured by this policy.
 
 Remote Streamable HTTP MCP servers are configured directly on the agent. The
 JavaScript binding uses the official MCP SDK transport, keeps remote tools
-deferred, and mirrors native Nanocodex exposure: the initial Responses request
-contains provider-native `tool_search`, while canonical `mcp__<server>__<tool>`
-functions are callable only below Code Mode. Code Mode also exposes
-`tools.tool_search`, so one cell can discover a deferred tool and invoke the
-returned canonical name. Search results return loadable namespaces for the next
-model request; remote tools never become a flat set of top-level model-visible
-calls.
+deferred: discover them with `tools.tool_search` inside `exec`, then invoke the
+returned canonical `mcp__<server>__<tool>` name in a new cell. Search returns
+schemas as data; remote tools never become top-level model-visible calls.
 
 MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. Ordinary paid HTTP uses
 `Mppx.create(...).fetch`. The public `tempo()` method is installed in both and
@@ -914,10 +909,8 @@ admission (one-second deadline, at most 128 waiters, abort/release/dispose clean
 It never derives effect authority from a parent correlation envelope or reuses
 consumed model-call metadata. Parallel nested calls share one identity promise;
 missing or conflicting metadata fails closed without effect dispatch.
-This covers direct application tools (`toolMode: "direct"`) as well as tools
-invoked by Code Mode. Direct contexts use `parentCallId = callId` and
-`source = "host-tool:" + name`; nested contexts use the exact guest source
-and a stable cell/ordinal.
+Application tools run inside Code Mode. Nested contexts use the exact guest source
+and a stable cell/ordinal; internal host callbacks retain their invocation metadata.
 Adapters can additionally implement `beginCell(context)` and
 `commitStore(context, writes)` together to persist Code Mode `store()` state.
 Before evaluation, `beginCell` durably pins the cell's immutable starting entries;
@@ -963,8 +956,8 @@ Forward those helpers into the guest environment to preserve the model-visible
 contract. `image` accepts individual MCP image blocks and honors explicit detail
 before MCP metadata; `audio` accepts MCP audio blocks. Both accept data URLs.
 
-Runtimes whose content-security policy rejects `eval`/`new Function` can supply
-a Code Mode evaluator. `createQuickJsEvaluator` accepts an asyncified
+Web API hosts without a child Worker supply an isolated Code Mode evaluator.
+`createQuickJsEvaluator` accepts an asyncified
 `quickjs-emscripten-core` module, serializes Asyncify execution, and exposes only
 the standard Nanocodex Code Mode globals across the interpreter boundary. This
 keeps deferred MCP plus Code Mode functional in Cloudflare Workers:

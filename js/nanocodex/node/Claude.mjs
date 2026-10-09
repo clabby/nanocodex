@@ -1,3 +1,4 @@
+import { createNodeEvaluator } from './code-evaluator.mjs';
 import { createRequire } from 'node:module';
 import { createClaude } from '../runtime/claude.mjs';
 import { createNodeHost } from './host.mjs';
@@ -6,7 +7,6 @@ import { createBrowserHost } from '../browser/host.mjs';
 function createCodexHost(options) {
   // Function-backed Web API transports retain their own callbacks and evaluator.
   if (options.hostAuth || options.createResponse || options.createWebSocket || options.WebSocketImpl) {
-    if ((options.toolMode === 'code' || options.toolMode === 'code-only') && typeof globalThis.Worker !== 'function' && options.codeEvaluator === undefined) throw new TypeError('host-managed Codex Code Mode requires an explicit codeEvaluator');
     return createBrowserHost(options);
   }
   return createNodeHost(options);
@@ -20,5 +20,5 @@ export function create(options) {
     const { initializeBrowserEngine } = await import('../browser/engine.mjs');
     await initializeBrowserEngine({ module });
     return wasm.Nanoclaude;
-  }, 'node', { createCodexHost });
+  }, 'node', { createCodexHost, codeEvaluator: createNodeEvaluator() });
 }

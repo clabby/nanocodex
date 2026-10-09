@@ -3,13 +3,14 @@
 //! `create` accepts camelCase JSON: model (required), apiKey OR authHostId,
 //! sessionId (optional; durable IDs must match durabilityId), endpoint,
 //! subscriptionCompatibility, hostDefinitionId (required with tools),
-//! tools (native Claude definitions), serverTools, maxTokens, thinking (effort),
+//! tools (exec/wait definitions), maxTokens, thinking (effort),
 //! adaptiveThinking, keepThinking, cache ("off", "5m", "1h"), autoCompact
 //! (false rejects unsupported disabling, true keeps backend policy),
 //! autoCompactWindowTokens, contextWindowTokens, instructions, systemBlocks,
-//! workspace, parallelTools, parallelSafeTools (host-derived), clientToolSearch,
+//! workspace, parallelTools, parallelSafeTools (host-derived),
 //! durabilityHostId, durabilityId,
-//! terminalReceiptRetention. Credentials never enter a checkpoint.
+//! terminalReceiptRetention. Code Mode is mandatory; provider tools and direct
+//! client tool search are rejected. Credentials never enter a checkpoint.
 //!
 //! Host contracts: claudeAuth(authHostId) -> Promise<JSON header map string>;
 //! executeClaudeTool(hostDefinitionId, name, inputJson, sessionId, callId, model,
@@ -111,18 +112,14 @@ enum CachePolicy {
 
 impl ClaudeConfig {
     fn validate(&self) -> Result<(), &'static str> {
-        if !matches!(
-            self.tool_mode.as_deref(),
-            None | Some("direct" | "code-only")
-        ) {
+        if !matches!(self.tool_mode.as_deref(), None | Some("code-only")) {
             return Err("unsupported Claude toolMode");
         }
-        if self.tool_mode.as_deref() == Some("code-only")
-            && (!self.server_tools.is_empty()
-                || self.client_tool_search
-                || self.tools.len() != 2
-                || !self.tools.iter().any(|tool| tool.name == "exec")
-                || !self.tools.iter().any(|tool| tool.name == "wait"))
+        if !self.server_tools.is_empty()
+            || self.client_tool_search
+            || self.tools.len() != 2
+            || !self.tools.iter().any(|tool| tool.name == "exec")
+            || !self.tools.iter().any(|tool| tool.name == "wait")
         {
             return Err("Claude Code Mode must expose only exec and wait");
         }
@@ -741,21 +738,13 @@ pub(super) async fn build_claude(
     if let Some(workspace) = config.workspace {
         builder = builder.workspace(workspace);
     }
-    if config.client_tool_search {
-        builder = builder.client_tool_search();
-    }
-    let code_only = config.tool_mode.as_deref() == Some("code-only");
-    builder = builder.code_only(code_only);
-    let code_definitions = if code_only && factory.is_some() {
+    builder = builder.code_only(true);
+    let code_definitions = if factory.is_some() {
         config.tools.clone()
     } else {
         Vec::new()
     };
-    for definition in config
-        .tools
-        .into_iter()
-        .filter(|_| !code_only || factory.is_none())
-    {
+    for definition in config.tools.into_iter().filter(|_| factory.is_none()) {
         let host_id = config
             .host_definition_id
             .ok_or_else(|| js_error("explicit Claude tools require hostDefinitionId"))?;
@@ -764,9 +753,6 @@ pub(super) async fn build_claude(
             let name = name.clone();
             async move { execute_tool(host_id, &name, input, invocation, None).await }
         });
-    }
-    for definition in config.server_tools {
-        builder = builder.server_tool(definition);
     }
     if let (Some(route_id), Some(state_id)) = (config.durability_host_id, config.durability_id) {
         let store = JavaScriptDurabilityStore { route_id };
@@ -805,9 +791,6 @@ pub(super) async fn build_claude(
                     agent,
                     registry.clone(),
                 )?;
-                if !code_only {
-                    return Ok(native);
-                }
                 let mut tools = ClaudeTools::new();
                 for definition in &code_definitions {
                     let name = definition.name.clone();

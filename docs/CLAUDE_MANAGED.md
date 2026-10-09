@@ -2,8 +2,8 @@
 
 The managed platform has an account-scoped Claude subscription connection and a
 native Messages execution path. It does not translate Claude through OpenAI
-Responses or borrow an installed Claude Code login. The OpenAI and Claude tool
-runtimes remain separate.
+Responses or borrow an installed Claude Code login. Both harnesses use shared
+Code Mode orchestration with their native inference transports.
 
 ## Connect privately
 
@@ -60,12 +60,14 @@ streams are not silently replayed.
 
 ## Tools, durability and limits
 
-Managed Claude sessions expose native `Bash`, `Read`, `Write`, `Edit` and supported
-account/Hand capabilities. Discovery uses `ToolSearch`/`ToolExecute` and
-`MCPToolSearch`/`MCPExecute`, not Responses tool-search declarations.
+Managed sessions expose only `exec` and `wait` to the model. Claude's nested
+catalog includes `Bash`, `Read`, `Write`, `Edit` and supported account/Hand
+capabilities. Call them through `tools` inside Code Mode. Discovery uses nested
+`ToolSearch`/`ToolExecute` and `MCPToolSearch`/`MCPExecute` calls.
 
 Default managed Claude sessions expose the canonical `spawn_agent`, `list_agents`,
-`send_agent_message`, `wait_agent`, `interrupt_agent` and `close_agent` tools.
+`send_agent_message`, `wait_agent`, `interrupt_agent`, `close_agent` and
+child-only `submit_result` tools inside Code Mode.
 Account-owned managed sessions can select `harness: "claude"` from a Codex
 parent or `harness: "codex"` from a Claude parent. Each child uses its native
 Messages or Responses transport and the spawning turn's retained authority;
@@ -73,10 +75,8 @@ selecting a child never changes the parent's model. Claude-root Codex children
 currently support the available GPT models; gateway models are rejected at
 admission. Child selection is checked against the account's available model
 catalog before inference. Explicit `multi_agent: { enabled: false }` disables
-delegation, and an explicit tool allowlist does not acquire additional tools. Existing configurations
-that explicitly enable `Task` retain its blocking execution, durable receipts and
-uncertainty after interruption. The session's native prompt describes its actual
-tools rather than instructing Claude to call Codex Code Mode.
+delegation, and an explicit tool allowlist does not acquire additional tools.
+Root and child sessions follow the same Code Mode contract regardless of harness.
 
 Native Messages history, opaque content and completed receipts survive normal
 Durable Object reopen in the shared durability store. Events retain streaming

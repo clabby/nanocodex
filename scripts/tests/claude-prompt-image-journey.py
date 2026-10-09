@@ -45,6 +45,8 @@ def main():
             body = json.loads(self.rfile.read(int(self.headers["content-length"])))
             requests.append(body)
             try:
+                if {t["name"] for t in body.get("tools", [])} != {"exec", "wait"}:
+                    raise AssertionError("Claude catalog must expose exactly exec/wait")
                 require(self.path == "/v1/messages", "wrong Messages route")
                 require(self.headers.get("x-api-key") == "synthetic", "wrong synthetic key")
                 blocks = body["messages"][-1]["content"]

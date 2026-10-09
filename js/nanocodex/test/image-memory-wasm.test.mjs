@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { deflateSync } from "node:zlib";
 import { Agent, Transport } from "../host/index.mjs";
+import { codeEvaluator } from "./quickjs-fixture.mjs";
 import { initializeBrowserEngine } from "../browser/engine.mjs";
 import { viewImage } from "../tools/standard.mjs";
 
@@ -45,9 +46,9 @@ async function inspect(bytes) {
     send(encoded) {
       const request = JSON.parse(encoded);
       calls++;
-      if (calls === 2) imageOutput = request.input.find(item => item.type === "function_call_output").output;
-      const output = calls === 1 ? [{ type: "function_call", call_id: "fixture-image",
-        name: "view_image", arguments: '{"path":"/brain/fixture.png","detail":"original"}' }]
+      if (calls === 2) imageOutput = request.input.find(item => item.type === "custom_tool_call_output").output;
+      const output = calls === 1 ? [{ type: "custom_tool_call", call_id: "fixture-image",
+        name: "exec", input: 'image(await tools.view_image({path:"/brain/fixture.png",detail:"original"}));' }]
         : [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "finished" }] }];
       queueMicrotask(() => this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({
         type: "response.completed", response: { id: `image-${calls}`, status: "completed",
@@ -55,7 +56,7 @@ async function inspect(bytes) {
       }) })));
     }
   }
-  const agent = await Agent.create({ harness: false, rawApiEvents: false,
+  const agent = await Agent.create({ codeEvaluator, rawApiEvents: false,
     tools: [viewImage({ workspace: { readFile: async () => bytes } })],
     transport: Transport.openAi({ apiKey: "fixture", websocketWarmup: false,
       createWebSocket: () => ({ socket: new ModelSocket(), reasoningIncluded: true }) }),
@@ -63,7 +64,9 @@ async function inspect(bytes) {
   let resultEvents = 0;
   let resultDetail;
   const stop = agent.events.watch().onEvent(event => {
-    if (event.type === "tool.result") {
+    if (event.type === "tool.result" && event.payload.call_id === "fixture-image/code-1") {
+      assert.equal(event.payload.tool, "view_image");
+      assert.equal(event.payload.status, "completed");
       resultEvents++;
       resultDetail = event.payload.structured_result?.detail;
     }
@@ -81,14 +84,15 @@ test("real WASM bounds image preparation and completes a normal 12 MP original-d
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const wasm = await initializeBrowserEngine({ module });
   const oversized = await inspect(png(8064, 6048));
-  assert.deepEqual(oversized.map(item => item.type), ["input_text"]);
-  assert.match(oversized[0].text, /image content omitted/);
+  assert.ok(oversized.every(item => item.type === "input_text"));
+  assert.match(oversized.map(item => item.text).join("\n"), /image content omitted/);
   const rejectedBytes = wasm.memory.buffer.byteLength;
   assert.ok(rejectedBytes < 32 * 1024 * 1024, `oversized image allocated ${rejectedBytes} WASM bytes`);
 
   const output = await inspect(png(4032, 3024, 3_600_000));
-  assert.equal(output[0].type, "input_image");
-  const prepared = Buffer.from(output[0].image_url.split(",")[1], "base64");
+  const images = output.filter(item => item.type === "input_image");
+  assert.equal(images.length, 1);
+  const prepared = Buffer.from(images[0].image_url.split(",")[1], "base64");
   assert.equal(prepared.readUInt32BE(16), 3669);
   assert.equal(prepared.readUInt32BE(20), 2752);
   assert.equal(prepared[25], 2);
@@ -99,8 +103,8 @@ test("real WASM bounds image preparation and completes a normal 12 MP original-d
   // The same dimensions in RGBA require a larger source pixel buffer. Reject
   // before decoding, including after a previous image has grown the allocator.
   const rgba = await inspect(png(4032, 3024, 3_600_000, true));
-  assert.deepEqual(rgba.map(item => item.type), ["input_text"]);
-  assert.match(rgba[0].text, /image content omitted/);
+  assert.ok(rgba.every(item => item.type === "input_text"));
+  assert.match(rgba.map(item => item.text).join("\n"), /image content omitted/);
   const rgbaRejectedBytes = wasm.memory.buffer.byteLength;
   assert.equal(rgbaRejectedBytes, preparedBytes,
     "over-budget RGBA decode must not grow WASM after the RGB image");

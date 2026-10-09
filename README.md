@@ -578,6 +578,10 @@ branch, fan out with `Promise.all`, and call typed tools through
 `await tools.<name>(...)`. The runtime bounds code, tool output, process output,
 and cancellation while keeping the model-facing schema compact.
 
+The Claude CLI uses the same Code Mode engine with `--claude`.
+Both native runtimes share the canonical subagent tools and discovered CUA
+provider. See the [tool catalogs and Claude Code Mode usage](docs/TOOL_RUNTIMES.md).
+
 MCP is part of the native tools crate rather than a separate agent runtime.
 The `nanocodex` CLI and Cloudflare managed agents (including `nanocodex2`
 conversations) include [Mercator](https://mercator.sh/setup.md) discovery at

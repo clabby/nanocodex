@@ -161,6 +161,9 @@ impl Policy {
                 | "EnterPlanMode"
                 | "ExitPlanMode"
                 | "TaskOutput"
+                | "list_agents"
+                | "wait_agent"
+                | "submit_result"
         );
         let edits = self.mode.as_deref() == Some("acceptEdits")
             && matches!(name, "Edit" | "Write" | "NotebookEdit")
@@ -196,6 +199,21 @@ impl<'a> Rule<'a> {
         } else {
             (text, None)
         };
+        let removed_agent_rule = [
+            ("Agent", "spawn_agent"),
+            ("ListAgents", "list_agents"),
+            ("SendMessage", "send_agent_message"),
+            ("CloseAgent", "close_agent"),
+            ("SubmitResult", "submit_result"),
+            ("ListAgentProfiles", "list_agents"),
+        ]
+        .iter()
+        .any(|(old, canonical)| wild(tool, old, false) && !wild(tool, canonical, false));
+        if removed_agent_rule {
+            bail!(
+                "removed Claude agent permission rule {text}; migrate to the canonical subagent tool names before continuing"
+            );
+        }
         if tool.is_empty()
             || !tool
                 .bytes()
@@ -229,7 +247,7 @@ impl<'a> Rule<'a> {
                         bail!("invalid WebFetch domain rule {text}");
                     }
                 }
-                "Agent" | "Skill" => {}
+                "spawn_agent" | "Skill" => {}
                 _ => {
                     if allow || !spec.contains(':') {
                         bail!("unsupported permission specifier {text}");
@@ -262,10 +280,10 @@ impl<'a> Rule<'a> {
         if name == "Workflow" && self.tool == "Edit" && !allow {
             return true;
         }
-        // Workflow's private registry bridge is an aggregate Agent operation.
+        // Workflow's private registry bridge is an aggregate spawn_agent operation.
         // Parameter-scoped restrictions also apply conservatively until each
         // generated child call goes through independent native admission.
-        if name == "Workflow" && wild(self.tool, "Agent", false) && !allow {
+        if name == "Workflow" && wild(self.tool, "spawn_agent", false) && !allow {
             return true;
         }
         let mcp = self.tool.starts_with("mcp__")
@@ -401,8 +419,8 @@ impl<'a> Rule<'a> {
                     wild(&pattern.replace('.', "/"), &host.replace('.', "/"), true)
                 }
             }
-            "Agent" => input
-                .get("subagent_type")
+            "spawn_agent" => input
+                .get("role")
                 .and_then(Value::as_str)
                 .is_some_and(|s| wild(spec, s, false)),
             "Skill" => input

@@ -707,6 +707,7 @@ impl AgentArgs {
             Some(vm) => vm.tools_builder().await?,
             None => Tools::builder().workspace(self.workspace_tools),
         }
+        .exposure(nanocodex::tools::ToolExposure::CodeModeOnly)
         .web_search(web_search)
         .image_generation(self.image_generation.unwrap_or(true));
         let managed_mcp = if self.mcp.loads_managed() {

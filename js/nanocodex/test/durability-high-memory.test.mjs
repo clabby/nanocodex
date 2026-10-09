@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { Agent, Subagents, Transport } from "../host/index.mjs";
+import { codeEvaluator } from "./quickjs-fixture.mjs";
 import { initializeBrowserEngine } from "../browser/engine.mjs";
 import { createMemoryDurabilityStore } from "../runtime/durability-store.mjs";
 
@@ -12,7 +13,7 @@ class WaitingSocket extends EventTarget {
   close() { this.readyState = 3; }
 }
 
-test("ephemeral subagent messaging survives a WASM heap beyond the Worker subarray ceiling", async () => {
+test("durable subagent messaging survives a WASM heap beyond the Worker subarray ceiling", { timeout: 30_000 }, async t => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const engine = await initializeBrowserEngine({ module });
   // Reserve address space without filling it. This puts subsequent allocations
@@ -27,13 +28,7 @@ test("ephemeral subagent messaging survives a WASM heap beyond the Worker subarr
   const padding = engine[allocator](size, 1);
   const nativeSubarray = Uint8Array.prototype.subarray;
   const store = createMemoryDurabilityStore("high-memory-messaging");
-  const writes = [];
-  const durability = { ...store, replace(stateId, request) {
-    const result = store.replace(stateId, request);
-    if (result.status === "replaced") writes.push({ stateId, records: request.records });
-    return result;
-  } };
-  const options = { module, tools: [], durability, durabilityId: "high-memory-messaging",
+  const options = { module, codeEvaluator, tools: [], durability: store, durabilityId: "high-memory-messaging",
     transport: Transport.openAi({ apiKey: "fixture", WebSocketImpl: WaitingSocket }) };
   let agent;
   try {
@@ -49,7 +44,7 @@ test("ephemeral subagent messaging survives a WASM heap beyond the Worker subarr
     for (const role of ["one", "two"]) children.push(await Subagents.spawn(agent, {
       role, task: "Wait for directed messages", outputSchema: { type: "object" },
     }));
-    const initialWrites = writes.length;
+    const rootContext = await agent.session.context();
     for (let index = 0; index < 8; index++) {
       const child = children[index % 2];
       const result = await Subagents.send(agent, {
@@ -57,21 +52,29 @@ test("ephemeral subagent messaging survives a WASM heap beyond the Worker subarr
       });
       assert.equal(result.to_agent_id, child.agent_id);
     }
-    assert.equal(writes.length, initialWrites, "child messages must not write durability");
-    const persisted = writes.flatMap(({ records }) => records.map(({ value }) => value)).join("\n");
-    assert.equal(persisted.includes("Message Ελληνικά 😀"), false);
+    assert.deepEqual(await agent.session.context(), rootContext,
+      "directed child messages must not enter the root transcript");
     assert.equal((await Subagents.list(agent)).agents.length, 2);
     await agent.session.shutdown();
     agent = await Agent.create(options);
-    assert.deepEqual((await Subagents.list(agent, { includeCompleted: true })).agents, []);
+    const restored = (await Subagents.list(agent, { includeCompleted: true })).agents;
+    assert.deepEqual(restored.map(child => child.agent_id).sort(), children.map(child => child.agent_id).sort());
+    assert.deepEqual(restored.map(child => child.role).sort(), ["one", "two"]);
+    assert.ok(restored.every(child => child.status.state === "interrupted" && child.can_message),
+      "the child journal must retain interrupted, messageable children");
+    assert.deepEqual(await agent.session.context(), rootContext,
+      "reopening the child journal must not copy messages into the root transcript");
     const replacement = await Subagents.spawn(agent, {
-      role: "after-reopen", task: "Verify ephemeral messaging after reopen", outputSchema: { type: "object" },
+      role: "after-reopen", task: "Verify directed messaging after reopen", outputSchema: { type: "object" },
     });
-    const reopenedWrites = writes.length;
+
     assert.equal((await Subagents.send(agent, {
-      agentId: replacement.agent_id, priority: "urgent", message: "Still ephemeral after reopen 😀",
+      agentId: replacement.agent_id, priority: "urgent", message: "Directed Ελληνικά message after reopen 😀",
     })).to_agent_id, replacement.agent_id);
-    assert.equal(writes.length, reopenedWrites);
+    assert.deepEqual(await agent.session.context(), rootContext);
+    t.diagnostic(JSON.stringify({ wasmBytes: engine.memory.buffer.byteLength,
+      sentBeforeReopen: 8, retainedChildren: restored.map(({ agent_id, role, status }) => ({ agent_id, role, status })), sentAfterReopen: 1,
+      rootTranscriptUnchanged: true }));
   } finally {
     Uint8Array.prototype.subarray = nativeSubarray;
     try { await agent?.session.shutdown(); }

@@ -17,10 +17,9 @@ const OPTION_KEYS = new Set([
 export function toClaudeConfig(options = {}) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('Claude options must be an object');
   for (const key of Object.keys(options)) if (!OPTION_KEYS.has(key)) throw new TypeError('unsupported Claude option');
-  if (options.toolMode !== undefined && !['direct', 'code-only'].includes(options.toolMode)) throw new TypeError('unsupported Claude toolMode');
+  if (options.toolMode !== undefined && options.toolMode !== 'code-only') throw new TypeError('Claude toolMode must be code-only');
   if (options.codeEvaluator !== undefined && typeof options.codeEvaluator !== 'function') throw new TypeError('Claude codeEvaluator must be a function');
-  if (options.toolMode === 'code-only' && typeof options.codeEvaluator !== 'function') throw new TypeError('Claude Code Mode requires an explicit codeEvaluator');
-  if (options.toolMode === 'code-only' && (options.serverTools?.length || options.clientToolSearch)) throw new TypeError('Claude Code Mode does not expose provider or client search tools directly');
+  if (options.serverTools?.length || options.clientToolSearch) throw new TypeError('Claude Code Mode does not expose provider or client search tools directly');
   if (options.harness !== undefined && options.harness !== 'claude') throw new TypeError('Claude requires harness claude');
   if (options.subagents !== undefined && (!options.subagents || typeof options.subagents !== 'object' || Array.isArray(options.subagents) || Object.keys(options.subagents).some(key => key !== 'maxConcurrency') || (options.subagents.maxConcurrency !== undefined && (!Number.isSafeInteger(options.subagents.maxConcurrency) || options.subagents.maxConcurrency < 1)))) throw new TypeError('subagents maxConcurrency must be positive');
   if (typeof options.model !== 'string' || !options.model.trim()) throw new TypeError('Claude model must be non-empty');
@@ -52,7 +51,7 @@ export function toClaudeConfig(options = {}) {
       if (!['installId','accountUuid','userId','platform','arch','version'].includes(key) || typeof value !== 'string' || !value || value.length > 8192 || /[\u0000-\u001f\u007f]/.test(value)) throw new TypeError('invalid subscriptionIdentity');
     }
   }
-  const config = {};
+  const config = { toolMode: 'code-only' };
   for (const key of OPTION_KEYS) if (!['codeEvaluator', 'auth', 'fetch', 'tools', 'module', 'durability', 'compatibilityProfile', 'harness', 'harnesses', 'subagents'].includes(key) && options[key] !== undefined) config[key] = options[key];
   if (options.compatibilityProfile !== undefined) {
     config.subscriptionCompatibility = true;
@@ -68,6 +67,7 @@ export function toClaudeConfig(options = {}) {
 
 /** Shared host lifecycle; loader selects the actual Nanoclaude WASM class. */
 export async function createClaude(options, load, type, harnessDefaults) {
+  const codeEvaluator = options?.codeEvaluator ?? harnessDefaults?.codeEvaluator;
   const reservation = options?.[CLOUDFLARE_SESSION_RESERVATION];
   const internalRuntime = options?.[Symbol.for("nanocodex.browser.internalRuntime")];
   const config = toClaudeConfig(options);
@@ -76,13 +76,13 @@ export async function createClaude(options, load, type, harnessDefaults) {
   const events = createEventChannel();
   const host = createClaudeHost({ auth: options.auth, tools: options.tools, onEvent: events.emit, fetch: options.fetch, endpoint: options.endpoint,
     subagentSessions: internalRuntime?.subagentSessions, subagentRouting: internalRuntime?.subagentRouting,
-    toolMode: options.toolMode, codeEvaluator: options.codeEvaluator,
+    toolMode: options.toolMode, codeEvaluator,
     codeEffectJournal: internalRuntime?.codeEffectJournal, traceTool: internalRuntime?.traceTool });
   const stopJournalEvents = internalRuntime?.codeEffectJournal ? events.subscribe(() => {}) : undefined;
   let harnesses;
   try { harnesses = await prepareHarnesses(options.harnesses, events.emit, { ...harnessDefaults,
     subagentSessions: internalRuntime?.subagentSessions, subagentRouting: internalRuntime?.subagentRouting,
-    toolProviders: internalRuntime?.toolProviders,
+    toolProviders: internalRuntime?.toolProviders, codeEvaluator,
     codeEffectJournal: internalRuntime?.codeEffectJournal, traceTool: internalRuntime?.traceTool,
   }); }
   catch (error) { stopJournalEvents?.(); host.dispose(); throw error; }

@@ -1,3 +1,4 @@
+import { createNodeEvaluator } from '../node/code-evaluator.mjs';
 // Run in a fresh Node process: node js/nanocodex/benchmark/wasm-cold-startup.mjs
 // Use the same generated release module for comparisons. Module compilation is
 // reported separately; engineMs is nested inside createMs. This is native Node,
@@ -17,7 +18,7 @@ const prepMs=performance.now()-start;
 const createStart=performance.now();
 await initializeBrowserEngine({module});
 const engineMs=performance.now()-createStart;
-const agent=await Agent.create({module,tools,transport:Transport.openAi({apiKey:'synthetic-startup',stateless:true}),model:'gpt-6.1-sol',thinking:'low',toolMode:'direct',instructions:'Synthetic normal Managed prompt. '.repeat(1536)});
+const agent=await Agent.create({module,tools,transport:Transport.openAi({apiKey:'synthetic-startup',stateless:true}),model:'gpt-6.1-sol',thinking:'low',codeEvaluator:createNodeEvaluator(),instructions:'Synthetic normal Managed prompt. '.repeat(1536)});
 const createMs=performance.now()-createStart;
 assert.ok(agent.sessionId);await agent.session.shutdown();await tools.close();
 console.log(JSON.stringify({compileMs,prepMs,engineMs,createMs,totalMs:prepMs+createMs,tools:32,instructionBytes:50688,subagents:true}));

@@ -85,7 +85,7 @@ test("Node host owns one Tools lifecycle and validates Tools-owned MCP policy", 
   const tools = await createTools({ mcp });
   assert.throws(
     () => createNodeHost({ tools, toolMode: "direct" }),
-    /remote MCP requires Code Mode/,
+    /toolMode must be code-only/,
   );
   assert.throws(
     () => createNodeHost({ tools, mcpServers: mcp }),
@@ -355,17 +355,7 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
     const rootWarmup = await rootReader.next();
     assert.deepEqual(
       rootWarmup.input[0].tools.map((tool) => tool.name).sort(),
-      [
-        "close_agent",
-        "exec",
-        "interrupt_agent",
-        "list_agents",
-        "send_agent_message",
-        "spawn_agent",
-        "submit_result",
-        "wait",
-        "wait_agent",
-      ],
+      ["exec", "wait"],
     );
     sendWarmup(rootSocket, "root-warmup");
 
@@ -376,11 +366,7 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
         resolve(socket);
       });
     });
-    sendCompleted(rootSocket, "root-spawn", [{
-      type: "function_call",
-      call_id: "call-spawn",
-      name: "spawn_agent",
-      arguments: JSON.stringify({
+    sendCompleted(rootSocket, "root-spawn", [codeCall("call-spawn", "spawn_agent", JSON.stringify({
         role: "reviewer",
         task: "Return the word portable.",
         output_schema: {
@@ -389,8 +375,7 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
           required: ["report"],
           additionalProperties: false,
         },
-      }),
-    }]);
+      }))]);
 
     const childSocket = await childConnection;
     assert.equal(childSocket.request.headers["session-id"], rootProviderSessionId);
@@ -399,27 +384,19 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
     assert.notEqual(childSessionId, rootProviderSessionId);
     const childReader = messageReader(childSocket);
     const childWarmup = await childReader.next();
-    assert.equal(childWarmup.input[0].tools.some((tool) => tool.name === "send_agent_message"), true);
-    const submitSchema = childWarmup.input[0].tools.find((tool) => tool.name === "submit_result").parameters;
-    assert.deepEqual(submitSchema.required, ["output"]);
-    assert.equal(Object.hasOwn(submitSchema.properties, "turn_token"), false);
+    assert.deepEqual(childWarmup.input[0].tools.map(tool => tool.name).sort(), ["exec", "wait"]);
     assert.match(childWarmup.input[0].tools[0].description, /rootOnly/);
     assert.doesNotMatch(childWarmup.input[0].tools[0].description, /decoyOnly/);
     sendWarmup(childSocket, "child-warmup");
 
     const rootSpawned = await rootReader.next();
     assert.equal(rootSpawned.input[0].call_id, "call-spawn");
-    assert.deepEqual(JSON.parse(rootSpawned.input[0].output), {
+    assert.deepEqual(codeResult(rootSpawned.input[0].output), {
       agent_id: 1,
       role: "reviewer",
       status: { state: "running" },
     });
-    sendCompleted(rootSocket, "root-wait", [{
-      type: "function_call",
-      call_id: "call-wait",
-      name: "wait_agent",
-      arguments: JSON.stringify({ agent_ids: [1], timeout_ms: 5_000 }),
-    }]);
+    sendCompleted(rootSocket, "root-wait", [codeCall("call-wait", "wait_agent", JSON.stringify({ agent_ids: [1], timeout_ms: 5_000 }))]);
 
     await childReader.next();
     sendCompleted(childSocket, "child-tool", [{
@@ -431,18 +408,13 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
     const childExecuted = await childReader.next();
     assert.equal(childExecuted.input[0].call_id, "call-child-exec");
     assert.match(JSON.stringify(childExecuted.input[0].output), /root/);
-    sendCompleted(childSocket, "child-submit", [{
-      type: "function_call",
-      call_id: "call-submit",
-      name: "submit_result",
-      arguments: JSON.stringify({ output: { report: "portable" } }),
-    }]);
+    sendCompleted(childSocket, "child-submit", [codeCall("call-submit", "submit_result", JSON.stringify({ output: { report: "portable" } }))]);
     const childSubmitted = await childReader.next();
-    assert.deepEqual(JSON.parse(childSubmitted.input[0].output), { accepted: true, status: "accepted" });
+    assert.deepEqual(codeResult(childSubmitted.input[0].output), { accepted: true, status: "accepted" });
     sendFinal(childSocket, "child-final", "submitted");
 
     const rootWaited = await rootReader.next();
-    const waited = JSON.parse(rootWaited.input[0].output);
+    const waited = codeResult(rootWaited.input[0].output);
     assert.equal(waited.timed_out, false);
     assert.equal(waited.agents[0].parent_agent_id, null);
     assert.deepEqual(waited.agents[0].status, {
@@ -482,7 +454,7 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
       childEvents
         .filter((event) => event.type === "tool.call")
         .map((event) => event.payload.tool),
-      ["exec", "rootOnly", "submit_result"],
+      ["exec", "rootOnly", "exec", "submit_result"],
     );
     assert.deepEqual(
       childEvents.map((event) => event.seq),
@@ -552,7 +524,7 @@ test("Node host invokes canonical subagent handlers without a root model turn", 
     const childWarmup = await bounded(childReader.next(), "child warmup");
     assert.equal(childWarmup.model, "gpt-6-luna");
     assert.doesNotMatch(childWarmup.input[1].content[0].text, /GPT-6 Astra/);
-    assert.match(childWarmup.input[1].content[0].text, /Use the caller's memory tools\.$/);
+    assert.match(childWarmup.input[1].content[0].text, /Use the caller's memory tools\./);
     sendWarmup(childSocket, "direct-child-warmup");
     const started = await bounded(startedPromise, "direct spawn");
     assert.deepEqual(started, {
@@ -561,24 +533,14 @@ test("Node host invokes canonical subagent handlers without a root model turn", 
       status: { state: "running" },
     });
     await bounded(childReader.next(), "child task");
-    sendCompleted(childSocket, "direct-find", [{
-      type: "function_call",
-      call_id: "direct-find-call",
-      name: "find_threads",
-      arguments: "{}",
-    }]);
+    sendCompleted(childSocket, "direct-find", [codeCall("direct-find-call", "find_threads", "{}")]);
     const found = await bounded(childReader.next(), "find_threads output");
-    assert.deepEqual(JSON.parse(found.input[0].output), { thread_id: "thread-memory" });
-    sendCompleted(childSocket, "direct-submit", [{
-      type: "function_call",
-      call_id: "direct-submit-call",
-      name: "submit_result",
-      arguments: JSON.stringify({
+    assert.deepEqual(codeResult(found.input[0].output), { thread_id: "thread-memory" });
+    sendCompleted(childSocket, "direct-submit", [codeCall("direct-submit-call", "submit_result", JSON.stringify({
         output: { answer: "thread-memory" },
-      }),
-    }]);
+      }))]);
     const submitted = await bounded(childReader.next(), "submit_result output");
-    assert.deepEqual(JSON.parse(submitted.input[0].output), { accepted: true, status: "accepted" });
+    assert.deepEqual(codeResult(submitted.input[0].output), { accepted: true, status: "accepted" });
     sendFinal(childSocket, "direct-final", "submitted");
 
     const waited = await bounded(Subagents.wait(agent, {
@@ -615,16 +577,11 @@ test("Node host invokes canonical subagent handlers without a root model turn", 
       to_agent_id: started.agent_id,
       disposition: "started",
     });
-    sendCompleted(childSocket, "direct-message-submit", [{
-      type: "function_call",
-      call_id: "direct-message-submit-call",
-      name: "submit_result",
-      arguments: JSON.stringify({
+    sendCompleted(childSocket, "direct-message-submit", [codeCall("direct-message-submit-call", "submit_result", JSON.stringify({
         output: { answer: "thread-memory-confirmed" },
-      }),
-    }]);
+      }))]);
     const messageSubmitted = await bounded(childReader.next(), "message submit_result output");
-    assert.deepEqual(JSON.parse(messageSubmitted.input[0].output), { accepted: true, status: "accepted" });
+    assert.deepEqual(codeResult(messageSubmitted.input[0].output), { accepted: true, status: "accepted" });
     sendFinal(childSocket, "direct-message-final", "submitted");
     const messageWait = await bounded(Subagents.wait(agent, {
       agentIds: [started.agent_id],
@@ -1110,4 +1067,15 @@ function sendCompleted(socket, responseId, output) {
       },
     },
   }));
+}
+
+function codeCall(callId, name, encodedArguments) {
+  return { type: "custom_tool_call", call_id: callId, name: "exec",
+    input: `text(await tools.${name}(${encodedArguments}));` };
+}
+
+function codeResult(output) {
+  const text = typeof output === "string" ? output : output.map(item => item.text ?? "").join("\n");
+  assert.match(text, /Script completed/);
+  return JSON.parse(text.slice(text.indexOf("Output:\n") + "Output:\n".length).trim());
 }

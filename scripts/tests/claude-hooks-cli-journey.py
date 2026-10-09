@@ -4,6 +4,7 @@
 Only the Anthropic Messages provider is synthetic. Evidence includes CLI output,
 HTTP requests, exact commands, hook stdin, settings and filesystem effects.
 """
+from claude_code_fixture import normalize_request, wrap_tool
 import argparse
 import json
 from pathlib import Path
@@ -63,10 +64,10 @@ elif event == 'PreToolUse':
     elif 'case-ask' in command:
         print(json.dumps({'hookSpecificOutput': {'hookEventName': event, 'permissionDecision': 'ask'}}))
     elif 'case-timeout' in command:
-        subprocess.Popen(['/bin/sh', '-c', 'sleep 0.7; printf leaked > timeout-leak.txt'])
+        subprocess.Popen(['/bin/sh', '-c', 'sleep 2; printf leaked > timeout-leak.txt'])
         os._exit(0)
     elif 'case-overflow' in command:
-        subprocess.Popen(['/bin/sh', '-c', 'sleep 0.7; printf leaked > overflow-leak.txt'])
+        subprocess.Popen(['/bin/sh', '-c', 'sleep 2; printf leaked > overflow-leak.txt'])
         print('x' * 100000, flush=True)
     elif 'case-malformed' in command:
         print(json.dumps({'continue': 'false'}))
@@ -80,7 +81,7 @@ elif event == 'PostToolUse' and 'case-postfail' in command:
 else:
     print('{}')
 ''')
-    command_hook = {'type': 'command', 'command': '/usr/bin/python3 ' + shlex.quote(str(hook)) + ' primary', 'timeout': 0.25}
+    command_hook = {'type': 'command', 'command': '/usr/bin/python3 ' + shlex.quote(str(hook)) + ' primary', 'timeout': 1}
     observer = dict(command_hook, command=command_hook['command'].replace(' primary', ' observer'), timeout=2)
     settings = {'hooks': {
         'PreToolUse': [
@@ -114,7 +115,7 @@ else:
             pass
 
         def do_POST(self):
-            request = json.loads(self.rfile.read(int(self.headers['content-length'])))
+            request = json.loads(self.rfile.read(int(self.headers['content-length']))); request = normalize_request(request, artifact)
             stage = len(requests) - phase['start']
             requests.append(request)
             try:
@@ -140,7 +141,7 @@ else:
                 errors.append(str(error))
                 block = {'type': 'text', 'text': 'fixture-assertion-failed'}
             (artifact / 'provider.json').write_text(json.dumps(requests, indent=2))
-            response = sse(block, request['model'])
+            response = sse(wrap_tool(block), request['model'])
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(response)))
@@ -176,13 +177,13 @@ else:
                 require(record.get(key) is not None and record[key] != '', f'missing hook identity {key}')
             require('instruction_revision' in record, 'instruction revision identity field absent')
             require(record['cwd'] == str(workspace), 'hook cwd mismatch')
-        rewrite = [r for r in records if r['tool_use_id'] == 'explicit_0']
+        rewrite = [r for r in records if r['tool_use_id'].split('/code-')[0] == 'explicit_0']
         require(len({(r['session_id'], r['turn_id'], r['tool_use_id']) for r in rewrite}) == 1, 'invocation identity changed across hooks')
         require(rewrite[0]['tool_input']['command'].endswith('case-rewrite'), 'original input missing')
         require('rewritten.txt' in rewrite[1]['tool_input']['command'], 'successive pre-hook did not observe updated input')
         require(all('rewritten.txt' in r['tool_input']['command'] for r in rewrite if r['hook_event_name'] == 'PostToolUse'), 'post-hook received stale input')
-        require(not any(r['hook_event_name'] != 'PreToolUse' and r['tool_use_id'] in {f'explicit_{i}' for i in range(1, 7)} for r in records), 'post hook ran after pre-hook denial')
-        require(not any(r['tool_use_id'] == 'explicit_9' for r in records), 'oversized hook stdin spawned command')
+        require(not any(r['hook_event_name'] != 'PreToolUse' and r['tool_use_id'].split('/code-')[0] in {f'explicit_{i}' for i in range(1, 7)} for r in records), 'post hook ran after pre-hook denial')
+        require(not any(r['tool_use_id'].split('/code-')[0] == 'explicit_9' for r in records), 'oversized hook stdin spawned command')
         require(any(r['hook_event_name'] == 'PostToolUseFailure' and r['tool_name'] == 'Read' and r['is_error'] is True and r['error'] for r in records), 'tool failure hook missing')
         require((workspace / 'rewritten.txt').read_text() == 'rewritten', 'rewrite not executed')
         require((workspace / 'post-effect.txt').read_text() == 'effect', 'post error lost effect')
@@ -201,7 +202,7 @@ else:
             path.write_text(invalid)
             run(label, command + ['--claude-hooks', str(path), 'Do not start.'], success=False)
             require(len(requests) == prior, 'invalid settings contacted provider')
-        time.sleep(0.9)
+        time.sleep(2.2)
         for name in ('original', 'denied', 'ask', 'timed', 'overflow', 'malformed', 'exit2', 'timeout-leak', 'overflow-leak', 'implicit-leak', 'matcher-leak', 'input-overflow', 'invalid'):
             require(not (workspace / f'{name}.txt').exists(), f'forbidden effect {name}.txt')
         outcome = {'success': True, 'provider_requests': len(requests), 'hook_invocations': len(records), 'replay_provider_requests': 0, 'replay_hook_invocations': 0, 'denied_effects': 6, 'descendant_leaks': 0, 'implicit_hooks': 0, 'invalid_settings_rejected': 3}
