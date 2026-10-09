@@ -2295,6 +2295,10 @@ impl RootNode {
                     if command.split_whitespace().next() == Some("/copy") => {}
                 // FEATURE-HOOK: wp2 the side thread collapses or splits from its own pane.
                 Some(ActionsEffect::Trigger(Action::LocalCommand("collapse" | "split"))) => {}
+                Some(ActionsEffect::Settings(SettingsCommand::Feature(
+                    crate::nanocodex2::tui::features::FeatureCommand::Collapse
+                    | crate::nanocodex2::tui::features::FeatureCommand::Split,
+                ))) => {}
                 Some(ActionsEffect::Submit(command))
                     if matches!(command.split_whitespace().next(), Some("/collapse" | "/split")) => {}
                 Some(_) => {
