@@ -1303,8 +1303,18 @@ async fn agent_socket(
     upgrade: WebSocketUpgrade,
 ) -> ApiResult<Response> {
     state.authorize(&headers)?;
-    let cursor = parse_cursor(query.cursor.as_deref().unwrap_or("0"))?;
     let mut ready = state.database.state(&agent, false, 0).await?;
+    // A cursorless or `latest` upgrade starts at the cursor its ready frame
+    // reports, as the hosted service does. Clients adopt such a socket only
+    // when nothing remains to replay, so replaying from zero here would
+    // deliver retained events behind the client's state fence.
+    let cursor = match query.cursor.as_deref() {
+        None | Some("latest") => ready["latest_event_cursor"]
+            .as_str()
+            .ok_or_else(|| ApiError::internal("agent state omitted its latest cursor"))
+            .and_then(parse_cursor)?,
+        Some(value) => parse_cursor(value)?,
+    };
     ready["type"] = json!("ready");
     ready["restored"] = ready["has_snapshot"].clone();
     // Retain the existing database counter for either durable-event transport.

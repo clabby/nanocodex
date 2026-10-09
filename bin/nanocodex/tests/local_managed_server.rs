@@ -218,6 +218,27 @@ async fn http_steer_withdrawal_removes_only_latest_unconsumed_input() -> Result<
     send_completed(&mut provider, "resp-http-final", "retained final answer").await?;
     wait_for_managed_turn_state(&sqlite, turn_id, "completed").await?;
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // nanocodex2 opens its live socket without a cursor beside the state read
+    // and adopts it only at the state cursor. Such a socket must begin live at
+    // its ready cursor rather than replaying retained turn events behind it.
+    let settled: Value = http
+        .get(&agent_url)
+        .bearer_auth(&bearer)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let (ready, first) = live_socket_first_frame(address, agent_id, &bearer, None).await?;
+    assert_eq!(ready["latest_event_cursor"], settled["latest_event_cursor"]);
+    assert_eq!(
+        first["type"], "pong",
+        "cursorless live socket replayed a retained event: {first}"
+    );
+    let (_, replayed) = live_socket_first_frame(address, agent_id, &bearer, Some("0")).await?;
+    assert_eq!(replayed["type"], "agent_created");
+    assert_eq!(replayed["cursor"], "1");
     send_signal(&server, "-TERM").await?;
     assert!(timeout(PROCESS_TIMEOUT, server.wait()).await??.success());
     Ok(())
@@ -1619,6 +1640,43 @@ fn spawn_managed_server_with_faults(
     command.spawn().wrap_err("failed to spawn managed-server")
 }
 
+/// Opens the public live socket and returns its ready frame plus the first
+/// frame received after an application ping.
+async fn live_socket_first_frame(
+    address: SocketAddr,
+    agent_id: &str,
+    bearer: &str,
+    cursor: Option<&str>,
+) -> Result<(Value, Value)> {
+    let mut url = format!("ws://{address}/v1/agents/{agent_id}/ws");
+    if let Some(cursor) = cursor {
+        url.push_str(&format!("?cursor={cursor}"));
+    }
+    let mut request = url.as_str().into_client_request()?;
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {bearer}").parse()?);
+    let (mut socket, _) = connect_async(request).await?;
+    let mut frames = Vec::with_capacity(2);
+    for _ in 0..2 {
+        let frame = timeout(STATE_TIMEOUT, socket.next())
+            .await
+            .map_err(|_| eyre!("live socket frame was not received"))?
+            .ok_or_else(|| eyre!("live socket closed early"))??;
+        frames.push(serde_json::from_str::<Value>(frame.to_text()?)?);
+        if frames.len() == 1 {
+            assert_eq!(frames[0]["type"], "ready");
+            socket
+                .send(Message::Text(json!({"type": "ping"}).to_string().into()))
+                .await?;
+        }
+    }
+    socket.close(None).await?;
+    let first = frames.pop().expect("two frames were received");
+    let ready = frames.pop().expect("two frames were received");
+    Ok((ready, first))
+}
+
 fn nanocodex2_binary() -> Result<PathBuf> {
     let path = env::var_os("NANOCODEX2_TEST_BINARY")
         .filter(|value| !value.is_empty())
@@ -2035,12 +2093,19 @@ async fn wait_for_reconnect_barriers(
     let deadline = Instant::now() + STATE_TIMEOUT;
     loop {
         let observed = managed_observations(sqlite, agent, turn)?;
-        if observed.0 > baseline.0 && observed.1 > baseline.1 && observed.2 > baseline.2 {
+        // Terminals reuse the account's persistent Hand; reconnecting a
+        // terminal must reopen its admission/event stream, not publish a new
+        // per-session tool host.
+        assert_eq!(
+            observed.2, baseline.2,
+            "terminal reconnect unexpectedly registered another tool host"
+        );
+        if observed.0 > baseline.0 && observed.1 > baseline.1 {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(eyre!(
-                "replacement client did not reopen the retained POST/SSE/tool-host boundaries; baseline={baseline:?}, observed={observed:?}"
+                "replacement client did not reopen the retained POST/event-stream boundaries; baseline={baseline:?}, observed={observed:?}"
             ));
         }
         sleep(Duration::from_millis(20)).await;
