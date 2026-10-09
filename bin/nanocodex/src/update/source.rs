@@ -209,6 +209,14 @@ pub(super) async fn build(
     command.args(["--features", "nanocodex-bin/tempo"]);
     if let Some(bundle) = &screen_bundle {
         command.env("NANOCODEX_LINUX_SCREEN_BUNDLE", bundle);
+        // Newer revisions embed the payload through a feature; older ones
+        // read the variable from their build script.
+        let manifest = tokio::fs::read_to_string(root.join("bin/nanocodex/Cargo.toml"))
+            .await
+            .unwrap_or_default();
+        if manifest.contains("\nembedded-screen-helpers = ") {
+            command.args(["--features", "nanocodex-bin/embedded-screen-helpers"]);
+        }
     }
     let status = command
         .status()

@@ -118,8 +118,8 @@ const SYSTEM_HOST_TOKEN_ENV: &str = "NANOCODEX_SYSTEM_HOST_TOKEN";
 #[derive(Parser)]
 #[command(
     name = "nanocodex",
-    version = version::SHORT_VERSION,
-    long_version = version::LONG_VERSION,
+    version = version::short(),
+    long_version = version::long(),
     about = "Nanocodex terminal client connected to the background machine Hand"
 )]
 struct Cli {
@@ -1429,7 +1429,7 @@ mod tests {
         assert!(
             output
                 .to_string()
-                .contains(concat!("Commit SHA: ", env!("VERGEN_GIT_SHA"),))
+                .contains(&format!("Commit SHA: {}", crate::version::TEST_GIT_SHA))
         );
         assert!(output.to_string().contains("Build Profile: "));
     }

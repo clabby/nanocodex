@@ -13,10 +13,6 @@ repository.workspace = true
 description = "Nanocodex CLI: managed client and Hand (nanocodex, nc) plus the local agent (ncl)"
 build = "build.rs"
 
-[package.metadata.cargo-machete]
-# cargo-machete does not resolve imports from the package build script.
-ignored = ["chrono", "sha2", "toml", "vergen"]
-
 [features]
 default = []
 # Keep paid-provider composition out of the direct-agent development graph.
@@ -25,6 +21,10 @@ tempo = [
     "dep:nanocodex-egress",
     "dep:nanousd",
 ]
+# Embed the Linux Wayland screen helpers named by NANOCODEX_LINUX_SCREEN_BUNDLE
+# (built by scripts/build-linux-screen-helpers.sh). Distributable Linux Hands
+# enable it; without it the Hand reports the missing payload at runtime.
+embedded-screen-helpers = []
 # Criterion cases over the production shared TUI renderer (benches/nanocodex2_tui.rs).
 tui-bench = ["dep:criterion"]
 
@@ -128,12 +128,6 @@ nanocodex-vm.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 kvm-ioctls = "0.24.0"
 nanocodex-vm = { workspace = true, features = ["desktop"] }
-
-[build-dependencies]
-chrono.workspace = true
-sha2.workspace = true
-toml.workspace = true
-vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 
 [dev-dependencies]
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }

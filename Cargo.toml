@@ -36,9 +36,9 @@ members = [
     "js/nanocodex",
     "py/bindings",
 ]
-# Root Cargo commands target the public library facade. Use `just run` or
-# `cargo run -p nanocodex-bin --bin nanocodex` for the executable consumer.
-default-members = ["crates/nanocodex"]
+# A plain `cargo build` produces both executables, nanocodex and nanocodex-hand.
+# Select library packages with -p (for example `cargo test -p nanocodex`).
+default-members = ["bin/nanocodex"]
 resolver = "2"
 
 [workspace.package]
@@ -190,7 +190,6 @@ unicode-width = "0.2"
 url = "2.5.7"
 uuid = { version = "1", features = ["js", "serde", "v4", "v5", "v7"] }
 v8-heap-parser = "1.1.0"
-vergen = { version = "8", default-features = false }
 wasm-bindgen = "0.2.105"
 wasm-bindgen-futures = "0.4.55"
 web-time = "1.1.0"

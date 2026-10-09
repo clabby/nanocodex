@@ -534,7 +534,7 @@ fn emit(value: &Value) {
 pub(crate) async fn serve(command: DeviceHand) -> Result<(), ManagedError> {
     if command.service_protocol {
         emit(
-            &json!({"serviceProtocol": 1, "version": env!("CARGO_PKG_VERSION"), "handIdentity": env!("NANOCODEX_HAND_IDENTITY")}),
+            &json!({"serviceProtocol": 1, "version": env!("CARGO_PKG_VERSION"), "handIdentity": crate::version::hand_identity()}),
         );
         return Ok(());
     }

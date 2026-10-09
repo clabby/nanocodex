@@ -57,6 +57,7 @@ mod subagents;
 mod tool_calls;
 mod update;
 mod version;
+pub use version::BuildInfo;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
@@ -102,8 +103,8 @@ impl RetryableProcessExit {
 #[derive(Parser)]
 #[command(
     name = "ncl",
-    version = version::SHORT_VERSION,
-    long_version = version::LONG_VERSION,
+    version = version::short(),
+    long_version = version::long(),
     about = "An interactive coding agent and headless JSONL runner",
     subcommand_negates_reqs = true
 )]
@@ -250,7 +251,8 @@ enum Tree {
 /// Entry point of the `nanocodex` CLI. Hand serving and daemon-side
 /// entrypoints are forwarded to the installed Hand executable; the CLI never
 /// runs them in-process.
-pub fn cli_main() -> ExitCode {
+pub fn cli_main(build: BuildInfo) -> ExitCode {
+    version::init(build);
     hand_executable::take_forwarded();
     let mut arguments: Vec<OsString> = std::env::args_os().collect();
     let tree = select_tree(&mut arguments);
@@ -287,7 +289,8 @@ pub fn cli_main() -> ExitCode {
 /// are not linked into the Hand. Older installations may point `bin/nanocodex2`
 /// at this file, so every other invocation, including a leading `--local`, is
 /// forwarded unchanged to the CLI installed beside it.
-pub fn hand_main() -> ExitCode {
+pub fn hand_main(build: BuildInfo) -> ExitCode {
+    version::init(build);
     hand_executable::set_hand_role();
     hand_executable::take_forwarded();
     let arguments: Vec<OsString> = std::env::args_os().collect();

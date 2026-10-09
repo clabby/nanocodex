@@ -50,18 +50,15 @@ try {
   run('git', ['init', '-b', 'topic'], { cwd: source });
   const workspace = members => `[workspace]\nresolver = "2"\nmembers = [${members.map(m => `"${m}"`).join(', ')}]\n[profile.nightly]\ninherits = "release"\nlto = false\n`;
   writeFileSync(join(source, 'Cargo.toml'), workspace(['cli', 'shared']));
-  // Use the shipped identity helper, including its real Git reference watches.
-  const identityHelper = readFileSync(new URL('../build_version.rs', import.meta.url), 'utf8');
-  const buildScript = (binary = false) => `${binary ? 'mod build_version;' : ''}
+  const buildScript = () => `
 fn main() {
     use std::io::Write;
-    ${binary ? 'build_version::emit().unwrap();\n    println!("cargo:rerun-if-changed=build_version.rs");' : ''}
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=STABLE_GIT_COMMIT");
     let mut log = std::fs::OpenOptions::new().create(true).append(true)
         .open(std::env::var("FIXTURE_BUILD_LOG").unwrap()).unwrap();
     writeln!(log, "{} {}", std::env::var("CARGO_PKG_NAME").unwrap(), std::env::var("STABLE_GIT_COMMIT").unwrap()).unwrap();
-    ${!binary && crossInit ? `
+    ${crossInit ? `
     // Match libkrun's nested Cargo build of a static guest init.
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let target = out.join("init-target");
@@ -109,13 +106,12 @@ fn main() {
   const writePackage = (dir, packageName, binaryName, features, extraBins = []) => {
     const path = join(source, dir);
     mkdirSync(join(path, 'src'), { recursive: true });
-    writeFileSync(join(path, 'Cargo.toml'), `[package]\nname = "${packageName}"\nversion = "0.1.0"\nedition = "2024"\n${[binaryName, ...extraBins].map(name => `[[bin]]\nname = "${name}"\npath = "src/main.rs"\n`).join('')}[features]\ntempo = []\n[dependencies]\nshared = { path = "../shared", features = [${features.map(f => `"${f}"`).join(', ')}] }\n[build-dependencies]\nchrono = "0.4"\nvergen = { version = "8", default-features = false, features = ["build", "git", "gitcl"] }\n`);
-    writeFileSync(join(path, 'build.rs'), buildScript(true));
-    writeFileSync(join(path, 'build_version.rs'), identityHelper);
+    writeFileSync(join(path, 'Cargo.toml'), `[package]\nname = "${packageName}"\nversion = "0.1.0"\nedition = "2024"\n${[binaryName, ...extraBins].map(name => `[[bin]]\nname = "${name}"\npath = "src/main.rs"\n`).join('')}[features]\ntempo = []\n[dependencies]\nshared = { path = "../shared", features = [${features.map(f => `"${f}"`).join(', ')}] }\n`);
     writeFileSync(join(path, 'src/main.rs'), `fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--version") {
-        println!("{} Version: 0.1.0-dev\\n{}", env!("CARGO_BIN_NAME"), env!("NANOCODEX_LONG_VERSION_1"));
+        // Like the shipped entry points: the source updater supplies the commit.
+        println!("{} Version: 0.1.0-dev\\nCommit SHA: {}", env!("CARGO_BIN_NAME"), option_env!("VERGEN_GIT_SHA").unwrap_or("unknown"));
         println!("Shared features: {:?}", shared::features());
     } else if args.get(1).map(String::as_str) == Some("__device-hand") {
         println!("{{\\"serviceProtocol\\":1}}");

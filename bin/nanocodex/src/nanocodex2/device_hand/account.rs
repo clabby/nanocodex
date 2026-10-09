@@ -48,7 +48,7 @@ fn diagnostic(status: Option<StatusCode>, headers: &HeaderMap, attempt: usize) -
         chrono::Utc::now().to_rfc3339(),
         status.map_or_else(|| "transport".into(), |s| s.as_u16().to_string()),
         env!("CARGO_PKG_VERSION"),
-        option_env!("VERGEN_GIT_SHA").unwrap_or("unknown")
+        crate::version::git_sha().unwrap_or("unknown")
     )
 }
 

@@ -18,11 +18,6 @@ use super::{
     vm_hand, vm_host,
 };
 
-/// Content identity of the Hand executable built from this tree, produced by
-/// the build script. Absent until the identity producer lands; the version
-/// then simply omits the line, so an updater falls back to byte comparison.
-pub(crate) const HAND_IDENTITY: Option<&str> = option_env!("NANOCODEX_HAND_IDENTITY");
-
 /// Version reported by the Hand: its package version and the content
 /// identity of its source and dependency closure. It deliberately carries no
 /// repository commit or build timestamp, which change with CLI-only commits.
@@ -30,7 +25,9 @@ fn hand_version() -> &'static str {
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
         let mut version = format!("Version: {}", env!("CARGO_PKG_VERSION"));
-        if let Some(identity) = HAND_IDENTITY.filter(|identity| !identity.is_empty()) {
+        // The release reuse identity, when the build recorded one; otherwise
+        // the line is omitted and an updater falls back to byte comparison.
+        if let Some(identity) = crate::version::hand_identity() {
             version.push_str(
                 "
 Hand Identity: ",

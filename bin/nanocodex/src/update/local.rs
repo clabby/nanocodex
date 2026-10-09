@@ -11,7 +11,7 @@ use std::{path::Path, time::Duration};
 use eyre::{Context, Result, bail, eyre};
 use tokio::process::Command;
 
-const REBUILD_PAIR: &str = "Rebuild nanocodex-bin (cargo build -p nanocodex-bin --bins) from one checkout and pass target/<profile>/nanocodex with --path; the nanocodex-hand beside it (or --hand-binary) must come from the same checkout. Use a release update to install historical release bundles.";
+const REBUILD_PAIR: &str = "Rebuild both executables from one checkout with their commit recorded (VERGEN_GIT_SHA=$(git rev-parse HEAD) cargo build) and pass target/<profile>/nanocodex with --path; the nanocodex-hand beside it (or --hand-binary) must come from the same checkout. Use a release update to install historical release bundles.";
 
 /// A CLI installed without a Hand only needs to execute its version probe.
 pub(super) async fn verify_single(binary: &Path) -> Result<()> {

@@ -13,7 +13,13 @@ use std::{
     process::Command,
 };
 
-const BUNDLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/linux-screen-helpers.tar.gz"));
+/// The verified Wayland helper bundle (scripts/build-linux-screen-helpers.sh)
+/// named by NANOCODEX_LINUX_SCREEN_BUNDLE. Distributable builds enable the
+/// feature; other builds report the missing payload when screen sharing starts.
+#[cfg(feature = "embedded-screen-helpers")]
+const BUNDLE: &[u8] = include_bytes!(env!("NANOCODEX_LINUX_SCREEN_BUNDLE"));
+#[cfg(not(feature = "embedded-screen-helpers"))]
+const BUNDLE: &[u8] = &[];
 const MAX_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILES: usize = 512;
 fn error(e: impl std::fmt::Display) -> ManagedError {
@@ -63,7 +69,7 @@ pub(crate) fn command(name: &str) -> Result<Command, ManagedError> {
     }
     if BUNDLE.is_empty() {
         return Err(error(
-            "this build lacks the embedded Wayland bundle; rebuild with scripts/build-linux-screen-helpers.sh and NANOCODEX_LINUX_SCREEN_BUNDLE",
+            "this build lacks the embedded Wayland bundle; rebuild with scripts/build-linux-screen-helpers.sh, NANOCODEX_LINUX_SCREEN_BUNDLE and --features nanocodex-bin/embedded-screen-helpers",
         ));
     }
     let uid = nix::unistd::geteuid().as_raw();
