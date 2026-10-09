@@ -1,7 +1,7 @@
 //! Self-contained review snapshots. Never resolve a finding against the live workspace.
 use super::diff::{self, DiffLine, DiffLineKind};
 use super::markdown::{sanitize, wrap_plain};
-use crate::nanocodex2::tui::theme::Theme;
+use crate::theme::Theme;
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -63,7 +63,7 @@ impl Finding {
 }
 
 /// None leaves malformed or oversized input in the ordinary, readable code renderer.
-pub(super) fn render(source: &str, width: u16, theme: &Theme) -> Option<Vec<Line<'static>>> {
+pub fn render(source: &str, width: u16, theme: &Theme) -> Option<Vec<Line<'static>>> {
     if source.len() > MAX_BLOCK {
         return None;
     }

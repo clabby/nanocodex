@@ -19,11 +19,11 @@ use syntect::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) struct Assets {
-    pub(super) syntaxes: SyntaxSet,
+pub struct Assets {
+    pub syntaxes: SyntaxSet,
 }
 
-pub(super) fn assets() -> &'static Assets {
+pub fn assets() -> &'static Assets {
     static ASSETS: OnceLock<Assets> = OnceLock::new();
     ASSETS.get_or_init(|| Assets {
         syntaxes: SyntaxSet::load_defaults_newlines(),
@@ -32,7 +32,7 @@ pub(super) fn assets() -> &'static Assets {
 
 /// Prepare the syntax tables and their common lazy regexes off the input loop.
 /// The first frame and the first Ctrl+O must not pay for loading the grammar set.
-pub(super) fn prewarm() {
+pub fn prewarm() {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
         let _ = std::thread::Builder::new()
@@ -56,7 +56,7 @@ pub(super) fn prewarm() {
     });
 }
 
-pub(super) fn theme() -> &'static SyntaxTheme {
+pub fn theme() -> &'static SyntaxTheme {
     static THEME: OnceLock<SyntaxTheme> = OnceLock::new();
     THEME.get_or_init(|| SyntaxTheme {
         name: Some("tact".to_owned()),
@@ -87,7 +87,7 @@ pub(super) fn theme() -> &'static SyntaxTheme {
     })
 }
 
-pub(super) fn syntax_for_token<'a>(syntaxes: &'a SyntaxSet, token: &str) -> &'a SyntaxReference {
+pub fn syntax_for_token<'a>(syntaxes: &'a SyntaxSet, token: &str) -> &'a SyntaxReference {
     let token = token.split_ascii_whitespace().next().unwrap_or_default();
     syntaxes
         .find_syntax_by_token(token)
@@ -96,7 +96,7 @@ pub(super) fn syntax_for_token<'a>(syntaxes: &'a SyntaxSet, token: &str) -> &'a 
         .unwrap_or_else(|| syntaxes.find_syntax_plain_text())
 }
 
-pub(super) fn syntax_for_path<'a>(syntaxes: &'a SyntaxSet, path: &str) -> &'a SyntaxReference {
+pub fn syntax_for_path<'a>(syntaxes: &'a SyntaxSet, path: &str) -> &'a SyntaxReference {
     let path = Path::new(path);
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -109,7 +109,7 @@ pub(super) fn syntax_for_path<'a>(syntaxes: &'a SyntaxSet, path: &str) -> &'a Sy
         .unwrap_or_else(|| syntaxes.find_syntax_plain_text())
 }
 
-pub(super) fn line(
+pub fn line(
     highlighter: &mut HighlightLines<'_>,
     text: &str,
     syntaxes: &SyntaxSet,
@@ -147,11 +147,11 @@ pub(super) fn line(
     spans
 }
 
-pub(super) fn code_style() -> Style {
+pub fn code_style() -> Style {
     Style::default().fg(Color::Reset)
 }
 
-pub(super) fn wrap(spans: Vec<Span<'static>>, width: u16) -> Vec<Vec<Span<'static>>> {
+pub fn wrap(spans: Vec<Span<'static>>, width: u16) -> Vec<Vec<Span<'static>>> {
     let mut lines = vec![Vec::<Span<'static>>::new()];
     let mut used = 0_u16;
     for span in spans {

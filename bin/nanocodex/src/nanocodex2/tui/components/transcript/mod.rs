@@ -3,15 +3,15 @@
 
 //! Scrollable rendering of the persisted agent session.
 
-mod diff;
 mod empty;
-mod highlight;
-pub(crate) mod image;
-mod markdown;
-pub(crate) mod math;
 mod message;
-mod review;
 mod tool;
+
+// Pure markdown, code, diff, image and math rendering lives in its own crate so
+// its compiled output stays cached across CLI and session edits.
+use crate::nanocodex2::tui::theme::ThemeExt as _;
+use nanocodex_tui_render::{diff, highlight, markdown, review};
+pub(crate) use nanocodex_tui_render::{image, math};
 
 use super::{
     node::{Component, ComponentUpdate, RenderRequest},

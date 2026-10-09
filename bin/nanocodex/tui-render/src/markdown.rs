@@ -1,7 +1,7 @@
 // Derived from clabby/tact; modified for Nanocodex2.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::nanocodex2::tui::{format::sanitize_terminal_text, theme::Theme};
+use crate::{format::sanitize_terminal_text, theme::Theme};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
@@ -13,56 +13,56 @@ use syntect::easy::HighlightLines;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) struct Layout {
-    pub(super) lines: Vec<Line<'static>>,
-    pub(super) images: Vec<ImagePlacement>,
-    pub(super) links: Vec<Vec<LinkSpan>>,
-    pub(super) selections: Vec<Vec<SourceSpan>>,
-    pub(super) envelopes: Vec<SourceEnvelope>,
-    pub(super) selection_source: Option<String>,
-    pub(super) image_state: ImageState,
+pub struct Layout {
+    pub lines: Vec<Line<'static>>,
+    pub images: Vec<ImagePlacement>,
+    pub links: Vec<Vec<LinkSpan>>,
+    pub selections: Vec<Vec<SourceSpan>>,
+    pub envelopes: Vec<SourceEnvelope>,
+    pub selection_source: Option<String>,
+    pub image_state: ImageState,
 }
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
-pub(super) enum ImageState {
+pub enum ImageState {
     #[default]
     None,
     Ready,
     Pending,
 }
 
-pub(super) struct ImagePlacement {
-    pub(super) line: usize,
-    pub(super) destination: Arc<str>,
-    pub(super) protocol: Arc<SlicedProtocol>,
-    pub(super) retransmit: bool,
+pub struct ImagePlacement {
+    pub line: usize,
+    pub destination: Arc<str>,
+    pub protocol: Arc<SlicedProtocol>,
+    pub retransmit: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct SourceSpan {
-    pub(super) columns: Range<u16>,
-    pub(super) source: Range<usize>,
+pub struct SourceSpan {
+    pub columns: Range<u16>,
+    pub source: Range<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct SourceEnvelope {
-    pub(super) content: Range<usize>,
-    pub(super) source: Range<usize>,
+pub struct SourceEnvelope {
+    pub content: Range<usize>,
+    pub source: Range<usize>,
 }
 
 #[derive(Clone)]
-pub(super) struct LinkSpan {
-    pub(super) destination: Arc<str>,
-    pub(super) start: u16,
-    pub(super) end: u16,
+pub struct LinkSpan {
+    pub destination: Arc<str>,
+    pub start: u16,
+    pub end: u16,
 }
 
-pub(super) fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
+pub fn render(markdown: &str, width: u16, theme: &Theme) -> Layout {
     let workspace = std::env::current_dir().unwrap_or_default();
     render_in(markdown, width, theme, &workspace)
 }
 
-pub(super) fn render_in(markdown: &str, width: u16, theme: &Theme, workspace: &Path) -> Layout {
+pub fn render_in(markdown: &str, width: u16, theme: &Theme, workspace: &Path) -> Layout {
     render_cached(
         markdown,
         width,
@@ -72,7 +72,7 @@ pub(super) fn render_in(markdown: &str, width: u16, theme: &Theme, workspace: &P
     )
 }
 
-pub(super) fn render_cached(
+pub fn render_cached(
     markdown: &str,
     width: u16,
     theme: &Theme,
@@ -167,11 +167,11 @@ pub(super) fn render_cached(
     layout
 }
 
-pub(super) fn plain_selection_spans(source: &str, lines: &[Line<'static>]) -> Vec<Vec<SourceSpan>> {
+pub fn plain_selection_spans(source: &str, lines: &[Line<'static>]) -> Vec<Vec<SourceSpan>> {
     plain_selection_spans_excluding(source, lines, &[])
 }
 
-pub(super) fn plain_selection_spans_excluding(
+pub fn plain_selection_spans_excluding(
     source: &str,
     lines: &[Line<'static>],
     exclusions: &[Vec<Range<u16>>],
@@ -180,11 +180,11 @@ pub(super) fn plain_selection_spans_excluding(
     align_source_graphemes(&graphemes, lines, exclusions)
 }
 
-pub(super) fn wrap_plain(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
+pub fn wrap_plain(text: &str, width: u16, style: Style) -> Vec<Line<'static>> {
     wrap_plain_with_whitespace(text, width, style, false)
 }
 
-pub(super) fn wrap_plain_preserving_whitespace(
+pub fn wrap_plain_preserving_whitespace(
     text: &str,
     width: u16,
     style: Style,
@@ -215,7 +215,7 @@ fn wrap_plain_with_whitespace(
     lines
 }
 
-pub(super) fn sanitize(text: &str) -> String {
+pub fn sanitize(text: &str) -> String {
     sanitize_terminal_text(text).into_owned()
 }
 
@@ -1252,7 +1252,7 @@ fn heading_style(level: HeadingLevel, theme: &Theme) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-pub(super) fn wrap_spans(
+pub fn wrap_spans(
     spans: &[Span<'static>],
     width: u16,
     prefer_words: bool,
@@ -1664,7 +1664,7 @@ mod tests {
         super::image::{Cache, MAX_IMAGE_HEIGHT},
         ImageState, Layout, render, render_cached,
     };
-    use crate::nanocodex2::tui::theme::Theme;
+    use crate::theme::Theme;
     use ratatui::style::{Color, Modifier};
     use std::{fs::File, path::Path, sync::Arc, time::Instant};
 

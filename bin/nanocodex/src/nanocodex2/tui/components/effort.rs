@@ -3,6 +3,7 @@
 
 //! Animated circular selector for reasoning effort.
 
+use crate::nanocodex2::tui::theme::ThemeExt as _;
 use super::{
     floating::Floating,
     node::{Component, ComponentUpdate, RenderRequest},

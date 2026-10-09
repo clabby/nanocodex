@@ -38,7 +38,7 @@ static UPDATES: AtomicU64 = AtomicU64::new(0);
 static PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Starts terminal detection and the renderer off the input loop. Idempotent.
-pub(crate) fn start() {
+pub fn start() {
     if STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -72,7 +72,7 @@ pub(crate) fn start() {
 }
 
 /// Stops renderer workers. A later [start] can initialize again.
-pub(crate) fn shutdown() {
+pub fn shutdown() {
     if let Some(renderer) = RENDERER
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -84,7 +84,7 @@ pub(crate) fn shutdown() {
 }
 
 /// Terminal uploads queued by the renderer, in order. Write before the frame.
-pub(crate) fn drain_commands(
+pub fn drain_commands(
     mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
 ) -> std::io::Result<u64> {
     let commands = match RENDERER
@@ -105,7 +105,7 @@ pub(crate) fn drain_commands(
 
 /// Re-sends every ready image after the terminal may have dropped them
 /// (focus return through tmux, or an external editor on the alternate screen).
-pub(crate) fn reupload_all() {
+pub fn reupload_all() {
     if let Some(renderer) = RENDERER
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -116,25 +116,25 @@ pub(crate) fn reupload_all() {
 }
 
 /// Monotonic counter that changes whenever a pending layout may now differ.
-pub(super) fn updates() -> u64 {
+pub fn updates() -> u64 {
     UPDATES.load(Ordering::Acquire)
 }
 
 /// A formula layout is waiting for the renderer.
-pub(super) fn pending() -> bool {
+pub fn pending() -> bool {
     PENDING.load(Ordering::Acquire)
 }
 
-pub(super) fn clear_pending() {
+pub fn clear_pending() {
     PENDING.store(false, Ordering::Release);
 }
 
 /// Poll cadence while a formula is rendering; idle terminals never wake for math.
-pub(super) fn deadline(now: Instant) -> Option<Instant> {
+pub fn deadline(now: Instant) -> Option<Instant> {
     pending().then(|| now + Duration::from_millis(33))
 }
 
-pub(super) enum Rendered {
+pub enum Rendered {
     /// One placeholder span per terminal row.
     Ready {
         rows: Vec<Span<'static>>,
@@ -144,7 +144,7 @@ pub(super) enum Rendered {
     Source { pending: bool },
 }
 
-pub(super) fn render(source: &str, max_columns: u16) -> Rendered {
+pub fn render(source: &str, max_columns: u16) -> Rendered {
     let state = {
         let guard = RENDERER.lock().unwrap_or_else(PoisonError::into_inner);
         match guard.as_ref() {
@@ -197,7 +197,7 @@ pub(super) fn render(source: &str, max_columns: u16) -> Rendered {
 /// Rewrites TeX delimiters that CommonMark does not parse into the dollar
 /// forms pulldown-cmark reports as math: \[..\], bare display environments,
 /// and \(..\). Code spans and fenced code are left alone.
-pub(super) fn prepare(source: &str) -> Cow<'_, str> {
+pub fn prepare(source: &str) -> Cow<'_, str> {
     if !(source.contains(r"\[") || source.contains(r"\(") || source.contains(r"\begin{")) {
         return Cow::Borrowed(source);
     }
