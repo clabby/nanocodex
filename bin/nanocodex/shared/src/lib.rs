@@ -7,6 +7,7 @@
 //! command definitions, startup timing, and small shared helpers.
 
 pub mod computer;
+pub mod ffmpeg;
 pub mod hand_args;
 pub mod hand_client;
 pub mod hand_executable;

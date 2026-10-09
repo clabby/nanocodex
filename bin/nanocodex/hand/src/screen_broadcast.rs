@@ -237,11 +237,13 @@ fn valid_url(value: &str) -> bool {
                 && !url.path().trim_matches('/').is_empty()
         })
 }
+/// `fps_mode` is the encoder's frame-timing option ([`nanocodex_bin_shared::ffmpeg::fps_mode_option`]).
 fn output(
     command: Command,
     sink: &Sink<'_>,
     preset: &str,
     audio: Option<&str>,
+    fps_mode: &str,
 ) -> Result<tokio::process::Command> {
     // Retain only native input options. Preview scaling/bitrate is never inherited.
     let args: Vec<_> = command.get_args().collect();
@@ -304,7 +306,7 @@ fn output(
     };
     // min(iw/ih, bound) prevents upscaling, including portrait displays.
     out.args(["-map","0:v:0","-vf", &format!("scale=w='min(iw,{width})':h='min(ih,{height})':force_original_aspect_ratio=decrease:force_divisible_by=2"),
-        "-r",fps,"-fps_mode","cfr","-pix_fmt","yuv420p","-profile:v","high",
+        "-r",fps,fps_mode,"cfr","-pix_fmt","yuv420p","-profile:v","high",
         "-b:v", &format!("{bitrate}k"),"-maxrate", &format!("{bitrate}k"),"-bufsize", &format!("{}k",bitrate*2),"-g",gop]);
     if hls {
         out.args(["-force_key_frames", "expr:gte(t,n_forced*2)"]);
@@ -542,7 +544,8 @@ pub(crate) async fn spawn_encoder(
             }
         })));
     }
-    let mut child = output(command, sink, preset, address.as_deref())?.spawn()?;
+    let fps_mode = nanocodex_bin_shared::ffmpeg::fps_mode_option(&command).await;
+    let mut child = output(command, sink, preset, address.as_deref(), fps_mode)?.spawn()?;
     let lines = BufReader::new(child.stdout.take().ok_or("progress unavailable")?).lines();
     Ok(Encoder {
         child,
@@ -604,6 +607,7 @@ mod tests {
             &Sink::Rtmp("rtmp://localhost/live/secret"),
             "source",
             None,
+            "-fps_mode",
         )
         .unwrap();
         let args: Vec<_> = out
@@ -620,6 +624,7 @@ mod tests {
             &Sink::Rtmp("rtmps://localhost/live/secret"),
             "x",
             Some("tcp://127.0.0.1:1"),
+            "-fps_mode",
         )
         .unwrap();
         let args: Vec<_> = out
