@@ -664,6 +664,7 @@ async fn run(cli: Cli) -> Result<()> {
                     vm: command.vm,
                     replaceable: false,
                     initial_prompt: command.prompt,
+                    initial_instruction: None,
                     resume: None,
                 }
             } else {
@@ -711,6 +712,7 @@ async fn run(cli: Cli) -> Result<()> {
                     vm: command.vm,
                     replaceable: false,
                     initial_prompt: command.prompt,
+                    initial_instruction: None,
                     resume: Some(sessions::Resume::Codex(thread_id)),
                 }
             };
@@ -730,6 +732,7 @@ async fn run(cli: Cli) -> Result<()> {
                 vm: cli.vm,
                 replaceable,
                 initial_prompt: cli.prompt,
+                initial_instruction: None,
                 resume: None,
             })
             .await

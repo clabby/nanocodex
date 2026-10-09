@@ -256,6 +256,7 @@ pub(crate) fn relaunch(base: &LocalLaunch, id: &str) -> Result<LocalLaunch> {
         vm: base.vm.clone(),
         replaceable: false,
         initial_prompt: None,
+        initial_instruction: None,
         resume,
     })
 }
@@ -270,6 +271,7 @@ pub(crate) fn codex_launch(base: &LocalLaunch, resume: Resume) -> LocalLaunch {
         vm: base.vm.clone(),
         replaceable: false,
         initial_prompt: None,
+        initial_instruction: None,
         resume: Some(resume),
     }
 }
@@ -283,6 +285,7 @@ pub(crate) fn fresh(base: &LocalLaunch) -> LocalLaunch {
         vm: base.vm.clone(),
         replaceable: true,
         initial_prompt: None,
+        initial_instruction: None,
         resume: None,
     }
 }
