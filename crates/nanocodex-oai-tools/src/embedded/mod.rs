@@ -272,6 +272,18 @@ pub trait CodeModeHost: Send + Sync + 'static {
         self.cancel(session_id)
     }
 
+    /// Cancels the current logical turn's cells and reports nested calls they
+    /// leave unfinished, including starts an earlier exec or wait delivered, to
+    /// `observer` before returning. Each update is delivered once. Hosts without
+    /// this keep the default, which cancels without reporting.
+    fn cancel_turn_with_updates<'a>(
+        &'a self,
+        session_id: &'a str,
+        _observer: &'a mut dyn CodeModeObserver,
+    ) -> HostFuture<'a, Result<(), CodeModeHostError>> {
+        self.cancel_turn(session_id)
+    }
+
     /// Cancels host-owned Code Mode and nested-tool work for one agent session.
     fn cancel<'a>(&'a self, _session_id: &'a str) -> HostFuture<'a, Result<(), CodeModeHostError>> {
         Box::pin(async { Ok(()) })

@@ -569,10 +569,14 @@ impl EmbeddedToolRuntimeControl {
         }
     }
 
-    /// Cancels the current logical turn. Embedding hosts settle their own
-    /// cells' nested receipts, so `observer` receives no updates.
-    pub async fn cancel_turn_with_updates(&self, _observer: &mut dyn CodeModeObserver) {
-        self.cancel_turn().await;
+    /// Cancels the current logical turn and reports nested calls its cells
+    /// leave unfinished when the host supports it.
+    pub async fn cancel_turn_with_updates(&self, observer: &mut dyn CodeModeObserver) {
+        if let (Some(host), Some(session_id)) = (&self.host, &self.session_id)
+            && let Err(error) = host.cancel_turn_with_updates(session_id, observer).await
+        {
+            tracing::warn!(target: "nanocodex_oai_tools", %error, "embedded Code Mode turn cancellation failed");
+        }
     }
 
     /// Cancels active work.
