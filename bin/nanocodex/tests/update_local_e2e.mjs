@@ -514,7 +514,11 @@ try {
     run(runner, ['hand', 'recover']);
     assert.equal(existsSync(journal), false);
     assert.equal(active(), oldActive);
-    writeFileSync(journal, JSON.stringify({ previous: oldActive, candidate: key, phase: 'committed', service: false }));
+    // Same-Hand updates can already have selected key. Use an explicitly
+    // different selection to model an ambiguous committed recovery record.
+    const staleCandidate = `unselected-${oldActive}`;
+    assert.notEqual(staleCandidate, active());
+    writeFileSync(journal, JSON.stringify({ previous: oldActive, candidate: staleCandidate, phase: 'committed', service: false }));
     const refused = run(runner, ['hand', 'recover'], 1);
     assert.match(refused.stderr, /no longer matches the active CLI/);
     assert.equal(existsSync(journal), true, 'ambiguous recovery evidence retained');
