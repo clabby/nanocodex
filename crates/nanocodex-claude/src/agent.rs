@@ -2157,7 +2157,7 @@ impl AgentFactory for ClaudeNativeFactory {
                 .map_err(|_| unsupported("Claude fork boundary lock poisoned"))?
                 .clone();
             let mut snapshot = if let Some(snapshot) = dispatch {
-                snapshot
+                Arc::unwrap_or_clone(snapshot)
             } else {
                 let conversation = state.conversation.lock().await;
                 if state.stopped.load(Ordering::SeqCst) {
@@ -2269,7 +2269,7 @@ impl AgentFactory for ClaudeNativeFactory {
 // The parent keeps its conversation lock throughout dispatch. Publishing a
 // separate immutable pre-batch boundary allows native callback forks without
 // admitting the still-running batch or inventing tool-result receipts.
-struct DispatchForkBoundary<'a>(&'a std::sync::RwLock<Option<Snapshot>>);
+struct DispatchForkBoundary<'a>(&'a std::sync::RwLock<Option<Arc<Snapshot>>>);
 impl Drop for DispatchForkBoundary<'_> {
     fn drop(&mut self) {
         *self.0.write().expect("fork boundary lock") = None;
@@ -2368,11 +2368,12 @@ struct State {
     parallel_safe_tools: HashSet<String>,
     conversation: Mutex<Conversation>,
     // Native context before the active tool batch; callbacks must not lock conversation.
-    dispatch_fork: std::sync::RwLock<Option<Snapshot>>,
+    dispatch_fork: std::sync::RwLock<Option<Arc<Snapshot>>>,
     // Latest committed boundary of the running turn: its start, then each tool
     // batch. Residency/durability checkpoints read it while the turn holds
     // `conversation`, so a child can resume without replaying finished rounds.
-    round_boundary: std::sync::RwLock<Option<Snapshot>>,
+    /// Shares one allocation with [`Self::dispatch_fork`] while tools run.
+    round_boundary: std::sync::RwLock<Option<Arc<Snapshot>>>,
     policy: Option<Arc<dyn ClaudeExecutionPolicy>>,
     admission: Mutex<()>,
     idle: Notify,
@@ -2668,7 +2669,7 @@ impl State {
     }
     async fn response(
         &self,
-        messages: Vec<Message>,
+        messages: &[Message],
         tools: Vec<ClaudeToolSpec>,
         cancel: &Cancellation,
         events: Option<&AgentEventPublisher>,
@@ -2722,8 +2723,17 @@ impl State {
             .template
             .cloned()
             .unwrap_or_else(|| self.request_template(self.speed()));
-        request.messages = messages;
-        separate_tool_references(&mut request.messages);
+        // The request owns a copy of the transcript only while it is encoded
+        // and sent. Streaming can last minutes; holding it for the whole round
+        // trip doubled each concurrently running agent's conversation memory.
+        let mut suffix: Vec<Message> = Vec::new();
+        let fill = |request: &mut MessagesRequest, suffix: &[Message]| {
+            request.messages = Vec::with_capacity(messages.len() + suffix.len());
+            request.messages.extend_from_slice(messages);
+            request.messages.extend_from_slice(suffix);
+            separate_tool_references(&mut request.messages);
+        };
+        fill(&mut request, &suffix);
         request.tools = tools;
         request.container = context.container.map(str::to_owned);
         if request.diagnostics.is_some() {
@@ -2743,7 +2753,7 @@ impl State {
         let admitted = match &context.effect {
             Some(effect) => {
                 effect
-                    .begin(
+                    .begin_encoded(
                         "model",
                         client.durable_request(&request).map_err(provider_error)?,
                     )
@@ -2790,6 +2800,7 @@ impl State {
             request
                 .messages
                 .push(Message::text(Role::User, &upgrade.notice));
+            suffix.push(Message::text(Role::User, &upgrade.notice));
             // Retain uncertainty from the retired request even if the strict
             // replacement fails or is cancelled before producing a response.
             recovery = Some(ServerRecovery {
@@ -2798,7 +2809,7 @@ impl State {
             });
             if let Some(effect) = &replacement_effect
                 && let Step::Replay(value) = effect
-                    .begin(
+                    .begin_encoded(
                         "model",
                         client.durable_request(&request).map_err(provider_error)?,
                     )
@@ -2818,6 +2829,7 @@ impl State {
         let max_attempts = if context.disable_tools { 3 } else { 5 };
         let mut attempt = 0;
         let mut dispatched: Option<u64> = None;
+        request.messages = Vec::new();
         loop {
             if cancel.flag.load(Ordering::SeqCst) {
                 return Err(ResponseFailure {
@@ -2838,12 +2850,16 @@ impl State {
             // Pre-send work (durable admission, output gate, request build)
             // is the part of time-to-first-event spent before the provider fetch.
             dispatched.get_or_insert_with(&elapsed_ns);
+            // Rebuild the identical admitted request; preparation already
+            // fixed its system blocks, and the transcript is unchanged.
+            fill(&mut request, &suffix);
             let opened = tokio::select! {
                 result = client.stream(&request) => result,
                 () = cancel.cancelled() => return Err(ResponseFailure {
                     error: NanocodexError::TurnCancelled, recovery,
                 }),
             };
+            request.messages = Vec::new();
             let result = match opened {
                 Err(error) => Err(error),
                 Ok(mut stream) => {
@@ -3017,7 +3033,7 @@ impl State {
         // Publish the pre-turn boundary before mutating; a checkpoint taken
         // during this turn must never wait for the turn to release its lock.
         if let Ok(boundary) = self.snapshot(&conversation).await {
-            *self.round_boundary.write().expect("round boundary lock") = Some(boundary);
+            *self.round_boundary.write().expect("round boundary lock") = Some(Arc::new(boundary));
         }
         let mut result = self
             .run_locked(&mut conversation, &request, speed, &cancel)
@@ -3282,7 +3298,7 @@ impl State {
         messages.push(Message::text(Role::User, COMPACTION_INSTRUCTIONS));
         let response = self
             .response(
-                messages,
+                &messages,
                 tools.clone(),
                 cancel,
                 None,
@@ -3928,7 +3944,7 @@ impl State {
             }
             let response = self
                 .response(
-                    pending.clone(),
+                    &pending,
                     cursor.template.tools.clone(),
                     cancel,
                     Some(&request.events),
@@ -4175,9 +4191,15 @@ impl State {
             }
             // Capture the fork boundary before reserving this unfinished batch's
             // call identities. The child receives completed history and its guards.
-            let mut fork_snapshot = self.snapshot(conversation).await?;
+            // Snapshot without cloning the superseded transcript first: the
+            // boundary's messages are the pending round.
+            let committed = std::mem::take(&mut conversation.messages);
+            let fork_snapshot = self.snapshot(conversation).await;
+            conversation.messages = committed;
+            let mut fork_snapshot = fork_snapshot?;
             fork_snapshot.conversation.messages = pending.clone();
             fork_snapshot.conversation.summary.clear();
+            let fork_snapshot = Arc::new(fork_snapshot);
             // Reserve identities before invoking any handler. Compaction may
             // discard their transcript, but must not make an old effect callable
             // again. This protection is session-local, not crash-durable.
@@ -4332,7 +4354,8 @@ impl State {
                 // This round is now committed history: expose it to checkpoints
                 // taken while the next provider call holds the conversation.
                 if let Ok(boundary) = self.snapshot(conversation).await {
-                    *self.round_boundary.write().expect("round boundary lock") = Some(boundary);
+                    *self.round_boundary.write().expect("round boundary lock") =
+                        Some(Arc::new(boundary));
                 }
                 if interrupted {
                     return Err(NanocodexError::TurnCancelled);
@@ -4701,7 +4724,8 @@ impl LifecycleBackend for Driver {
                                 .ok()
                                 .and_then(|boundary| boundary.clone())
                         });
-                    if let Some(mut snapshot) = boundary {
+                    if let Some(snapshot) = boundary {
+                        let mut snapshot = Arc::unwrap_or_clone(snapshot);
                         if state.stopped.load(Ordering::SeqCst) {
                             return Err(NanocodexError::AgentStopped);
                         }
@@ -4807,7 +4831,7 @@ impl LifecycleBackend for Driver {
                         let (id, admission) = policy.admit(candidate, input, automatic).await?;
                         request.request_id = Some(id.clone());
                         request.events = request.events.with_turn_id(id.clone());
-                        let terminal = match admission {
+                        let mut terminal = match admission {
                             Admission::Completed { output, .. } => {
                                 Some(durable::replay(id.clone(), output))
                             }
@@ -4817,6 +4841,23 @@ impl LifecycleBackend for Driver {
                             Admission::Cancelled => Some(Err(NanocodexError::TurnCancelled)),
                             Admission::Execute | Admission::Resume => None,
                         };
+                        if terminal.is_none()
+                            && let Err(error) = policy.begin_attempt(id.clone()).await
+                        {
+                            // A queued turn admitted behind an unfinished earlier
+                            // operation cannot start until that one settles. Its
+                            // cancellation must not wait for it: no attempt began,
+                            // so the durable state can retire it without a checkpoint.
+                            let cancelled = request.cancel_on_admission
+                                && error.execution_policy_disposition()
+                                    == Some(nanocodex_agent::ExecutionPolicyDisposition::Retry)
+                                && policy.cancel_unstarted(id.clone()).await.unwrap_or(false);
+                            if !cancelled {
+                                let _ = policy.release(id).await;
+                                return Err(error);
+                            }
+                            terminal = Some(Err(NanocodexError::TurnCancelled));
+                        }
                         if let Some(result) = terminal {
                             state.accepted_turns.fetch_add(1, Ordering::SeqCst);
                             let (status, kind) = match &result {
@@ -4845,10 +4886,6 @@ impl LifecycleBackend for Driver {
                                 request_id: Some(id),
                                 result: Box::pin(async move { result }),
                             });
-                        }
-                        if let Err(error) = policy.begin_attempt(id.clone()).await {
-                            let _ = policy.release(id).await;
-                            return Err(error);
                         }
                         request.prompt = match crate::prompt::freeze_admitted(request.prompt, policy.as_ref(), &id).await {
                             Ok(prompt) => prompt,
