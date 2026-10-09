@@ -1766,6 +1766,8 @@ impl Registry {
                 )
                 .await;
             settle(id);
+            // Waiters treat a pending automatic resume as still running.
+            self.changed();
             results.push((id, result));
         }
         results
@@ -2609,10 +2611,28 @@ impl Registry {
         let mut revision = self.revision.subscribe();
         let deadline = Instant::now() + duration;
         loop {
-            let snapshot = self.state.lock().await.wait_snapshot(session_id, ids)?;
+            let (snapshot, root) = {
+                let state = self.state.lock().await;
+                let root = state.root_session_id(session_id).to_owned();
+                (state.wait_snapshot(session_id, ids)?, root)
+            };
+            // A restored child whose automatic resume is not yet delivered is
+            // about to run. Reporting it as interrupted let a waiting parent
+            // conclude it stopped and re-delegate the same work.
+            let resuming = self
+                .pending_resume
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&root)
+                .cloned()
+                .unwrap_or_default();
             let terminal = snapshot
                 .iter()
-                .filter(|(summary, _)| summary.status.is_wait_terminal())
+                .filter(|(summary, _)| {
+                    summary.status.is_wait_terminal()
+                        && !(matches!(summary.status, AgentStatus::Interrupted)
+                            && resuming.contains(&summary.agent_id))
+                })
                 .map(|(summary, revision)| {
                     (summary.agent_id, wait_mark(&summary.status, *revision))
                 })

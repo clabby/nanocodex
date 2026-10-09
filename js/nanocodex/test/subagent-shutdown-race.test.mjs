@@ -317,6 +317,9 @@ test('restarts during a progressing child turn do not exhaust the consecutive re
     assert.equal(steps, 7, 'every resume committed new work before the next restart');
     finishing = true;
     await reopen();
+    // Waiting right after reconstruction must not report the child, whose
+    // automatic resume is still pending, as interrupted (lazy restore made
+    // that window wide enough for a parent to re-delegate the same work).
     completed = await Subagents.wait(root, { agentIds: [child.agent_id], timeoutMs: 10_000 });
     assert.deepEqual(completed.agents[0].status, { state: 'completed', output: 'PROGRESS_KEPT' });
     assert.deepEqual(errors, []);
