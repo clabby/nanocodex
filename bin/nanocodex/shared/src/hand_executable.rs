@@ -13,6 +13,15 @@ use std::{
     process::ExitCode,
 };
 
+/// Present in a Hand executable that serves the `hand` command when invoked as
+/// `nanocodex-hand` or `nc-hand`; the updater links those PATH names only to
+/// such a Hand. This is a capability hint for entrypoint links, not an integrity
+/// check.
+pub const HAND_COMMAND_ALIASES_MARKER: &[u8] = b"NANOCODEX_HAND_COMMAND_ALIASES_V1";
+
+/// Installed PATH names of the Hand executable (`bin/<alias>`).
+pub const HAND_COMMAND_ALIASES: [&str; 2] = ["nanocodex-hand", "nc-hand"];
+
 /// Explicit Hand executable for development and tests.
 pub const HAND_EXECUTABLE_ENV: &str = "NANOCODEX_HAND_EXECUTABLE";
 /// Selects the Linux Wayland screen-encoder helper role of the Hand executable.

@@ -142,6 +142,9 @@ pub fn hand_main(build: nanocodex_bin_shared::version::BuildInfo) -> ExitCode {
 /// Internal entrypoints, an explicit `hand`, and the bare `--version` keep
 /// their meaning, so service records and tooling naming the build output work.
 fn imply_hand_command(arguments: &mut Vec<OsString>) {
+    // Retained in stripped builds: the updater links the aliases only to a Hand
+    // that contains it.
+    std::hint::black_box(hand_executable::HAND_COMMAND_ALIASES_MARKER);
     let Some(name) = arguments
         .first()
         .and_then(|argv0| std::path::Path::new(argv0).file_stem())
@@ -149,7 +152,7 @@ fn imply_hand_command(arguments: &mut Vec<OsString>) {
     else {
         return;
     };
-    if !["nanocodex-hand", "nc-hand"]
+    if !hand_executable::HAND_COMMAND_ALIASES
         .iter()
         .any(|alias| name.eq_ignore_ascii_case(alias))
     {
