@@ -12,6 +12,10 @@ const CHECKSUM_FILE: &str = "nanocodex.sha256";
 const NANOCODEX2_CHECKSUM_FILE: &str = "nanocodex2.sha256";
 const VM_GUEST_BINARY_NAME: &str = "nanocodex-vm-guest";
 const VM_GUEST_CHECKSUM_FILE: &str = "nanocodex-vm-guest.sha256";
+/// Hands keyed by their deterministic identity, shared by every CLI version.
+const HAND_VERSIONS_DIR: &str = "hand-versions";
+/// The identity of the Hand a version links (absent for older bundles).
+const HAND_IDENTITY_FILE: &str = "hand-identity";
 /// Present in every CLI that contains both command trees and selects one from
 /// argv[0]: `nanocodex`/`nc`/`nanocodex2` managed, `ncl` (or `--local`) local.
 /// Older CLIs lack it; their managed tree was the separate nanocodex2 binary.
@@ -274,6 +278,21 @@ impl VersionStore {
         vm_guest: Option<&[u8]>,
         voice: Option<&[u8]>,
     ) -> Result<()> {
+        self.install_bundle_with_hand(key, binary, nanocodex2, None, vm_guest, voice)
+    }
+
+    /// Install a CLI with its Hand. A Hand that reports an identity is stored
+    /// once under `hand-versions/<identity>` and linked from the version, so
+    /// every CLI version with an unchanged Hand runs the same Hand file.
+    pub(super) fn install_bundle_with_hand(
+        &self,
+        key: &str,
+        binary: &[u8],
+        nanocodex2: &[u8],
+        hand_identity: Option<&str>,
+        vm_guest: Option<&[u8]>,
+        voice: Option<&[u8]>,
+    ) -> Result<()> {
         validate_key(key)?;
         fs::create_dir_all(self.versions_dir())
             .wrap_err("failed to create the Nanocodex version store")?;
@@ -293,7 +312,7 @@ impl VersionStore {
                 if let Some(voice) = voice {
                     super::voice::install(&directory, voice)?;
                 }
-                self.write_companion_files(&directory, nanocodex2, vm_guest)?;
+                self.write_companion_files(&directory, nanocodex2, hand_identity, vm_guest)?;
                 return Ok(());
             }
             bail!(
@@ -316,7 +335,7 @@ impl VersionStore {
             format!("{}\n", hex::encode(Sha256::digest(binary))).as_bytes(),
             false,
         )?;
-        self.write_companion_files(staging.path(), nanocodex2, vm_guest)?;
+        self.write_companion_files(staging.path(), nanocodex2, hand_identity, vm_guest)?;
         fs::rename(staging.path(), &directory)
             .wrap_err_with(|| format!("failed to install {}", directory.display()))?;
         Ok(())
@@ -326,12 +345,42 @@ impl VersionStore {
         &self,
         directory: &Path,
         nanocodex2: &[u8],
+        hand_identity: Option<&str>,
         vm_guest: Option<&[u8]>,
     ) -> Result<()> {
-        atomic_write(&directory.join(NANOCODEX2_BINARY_NAME), nanocodex2, true)?;
+        let hand = directory.join(NANOCODEX2_BINARY_NAME);
+        let identity_file = directory.join(HAND_IDENTITY_FILE);
+        let stored = match hand_identity {
+            #[cfg(unix)]
+            Some(identity) => {
+                let stored = self.store_hand(identity, nanocodex2)?;
+                // versions/<key>/nanocodex2 -> ../../hand-versions/<identity>/nanocodex2
+                atomic_symlink(
+                    &hand,
+                    &Path::new("../..")
+                        .join(HAND_VERSIONS_DIR)
+                        .join(identity)
+                        .join(NANOCODEX2_BINARY_NAME),
+                )?;
+                atomic_write(&identity_file, format!("{identity}\n").as_bytes(), false)?;
+                stored
+            }
+            _ => {
+                // Windows copies the Hand into each version (no links); the
+                // identity still records that the Hand is unchanged.
+                atomic_write(&hand, nanocodex2, true)?;
+                match hand_identity {
+                    Some(identity) => {
+                        atomic_write(&identity_file, format!("{identity}\n").as_bytes(), false)?;
+                    }
+                    None => remove_if_present(&identity_file)?,
+                }
+                nanocodex2.to_vec()
+            }
+        };
         atomic_write(
             &directory.join(NANOCODEX2_CHECKSUM_FILE),
-            format!("{}\n", hex::encode(Sha256::digest(nanocodex2))).as_bytes(),
+            format!("{}\n", hex::encode(Sha256::digest(&stored))).as_bytes(),
             false,
         )?;
         if let Some(vm_guest) = vm_guest {
@@ -343,6 +392,50 @@ impl VersionStore {
             )?;
         }
         Ok(())
+    }
+
+    /// The Hand identity recorded for an installed version.
+    pub(super) fn hand_identity_of(&self, key: &str) -> Option<String> {
+        let recorded = fs::read_to_string(self.version_dir(key).join(HAND_IDENTITY_FILE)).ok()?;
+        super::local::hand_identity(&format!("Hand Identity: {}", recorded.trim()))
+    }
+
+    /// Store a Hand under its identity. The first verified bytes stored for an
+    /// identity are kept, so an unchanged Hand keeps one executable path (and
+    /// on macOS one code signature) across CLI versions. Returns those bytes.
+    #[cfg(unix)]
+    fn store_hand(&self, identity: &str, bytes: &[u8]) -> Result<Vec<u8>> {
+        if super::local::hand_identity(&format!("Hand Identity: {identity}")).is_none() {
+            bail!("invalid Hand identity {identity}");
+        }
+        let hands = self.root.join(HAND_VERSIONS_DIR);
+        let directory = hands.join(identity);
+        let path = directory.join(NANOCODEX2_BINARY_NAME);
+        if file_matches_checksum(&path, &directory.join(NANOCODEX2_CHECKSUM_FILE))? {
+            return fs::read(&path).wrap_err_with(|| format!("failed to read {}", path.display()));
+        }
+        fs::create_dir_all(&hands).wrap_err("failed to create the Nanocodex Hand store")?;
+        let staging = tempfile::Builder::new()
+            .prefix(".hand-")
+            .tempdir_in(&hands)
+            .wrap_err("failed to stage the Nanocodex Hand")?;
+        atomic_write(&staging.path().join(NANOCODEX2_BINARY_NAME), bytes, true)?;
+        atomic_write(
+            &staging.path().join(NANOCODEX2_CHECKSUM_FILE),
+            format!("{}\n", hex::encode(Sha256::digest(bytes))).as_bytes(),
+            false,
+        )?;
+        if directory.exists() {
+            // Incomplete or corrupt: set it aside (a running Hand keeps its
+            // open file) instead of deleting it.
+            let aside = hands.join(format!(".corrupt-{identity}-{}", std::process::id()));
+            fs::rename(&directory, &aside)
+                .wrap_err_with(|| format!("failed to set aside {}", directory.display()))?;
+        }
+        let staged = staging.keep();
+        fs::rename(&staged, &directory)
+            .wrap_err_with(|| format!("failed to install {}", directory.display()))?;
+        Ok(bytes.to_vec())
     }
 
     pub(super) fn voice_repair_directory(
@@ -876,6 +969,14 @@ exec "$install_root/current/nanocodex2" "$@"
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error).wrap_err_with(|| format!("failed to read {}", path.display())),
         }
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).wrap_err_with(|| format!("failed to remove {}", path.display())),
     }
 }
 
