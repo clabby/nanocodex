@@ -285,7 +285,7 @@ fn inline_collapse_btw_prompt(exchanges: &[(bool, String)]) -> String {
         }
         display.push_str(&first_question[..end]);
         if end < first_question.len() {
-            display.push('â¦');
+            display.push('…');
         }
     }
     // Keep the newest exchanges when the side thread exceeds the budget.
@@ -306,7 +306,7 @@ fn inline_collapse_btw_prompt(exchanges: &[(bool, String)]) -> String {
                     end -= 1;
                 }
                 block.truncate(end);
-                block.push_str("â¦\n\n");
+                block.push_str("…\n\n");
                 kept.push(block);
             }
             break;

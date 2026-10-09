@@ -383,7 +383,7 @@ impl Replay<'_> {
 
     fn agent(&mut self, kind: &str, payload: Value) {
         let event = json!({
-            "protocol_version": nanocodex::agent::events::AGENT_EVENT_PROTOCOL_VERSION,
+            "protocol_version": 1,
             "request_id": self.request_id,
             "seq": self.events.len() + 1,
             "type": kind,
@@ -406,9 +406,10 @@ impl Replay<'_> {
 
     fn finish_turn(&mut self) {
         if let Some(id) = self.turn.clone() {
+            let final_message = std::mem::take(&mut self.final_message);
             self.push(ManagedEventData::TurnCompleted {
                 id,
-                final_message: std::mem::take(&mut self.final_message),
+                final_message,
                 usage: None,
                 citations: Vec::new(),
                 usage_error: None,
@@ -527,10 +528,10 @@ fn render(frame: &mut Frame<'_>, sessions: &[LocalSession], picker: &mut Picker,
     frame.render_widget(List::new(items), list);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("  â/â", Style::default().fg(Color::Cyan)),
-            Span::raw(" select Â· "),
+            Span::styled("  ↑/↓", Style::default().fg(Color::Cyan)),
+            Span::raw(" select · "),
             Span::styled("enter", Style::default().fg(Color::Cyan)),
-            Span::raw(" resume Â· "),
+            Span::raw(" resume · "),
             Span::styled("esc", Style::default().fg(Color::Cyan)),
             Span::raw(" cancel"),
         ])),
@@ -539,7 +540,7 @@ fn render(frame: &mut Frame<'_>, sessions: &[LocalSession], picker: &mut Picker,
 }
 
 fn session_item(session: &LocalSession, selected: bool, now: SystemTime) -> ListItem<'static> {
-    let marker = if selected { "âº" } else { " " };
+    let marker = if selected { "›" } else { " " };
     let style = if selected {
         Style::default().fg(Color::Cyan)
     } else {
@@ -556,12 +557,12 @@ fn session_item(session: &LocalSession, selected: bool, now: SystemTime) -> List
     let preview = sanitized(session.preview.as_deref().unwrap_or("(prompt unavailable)")).into_owned();
     ListItem::new(vec![
         Line::styled(
-            format!("{marker} {} Â· {preview}", format_age(session.updated, now)),
+            format!("{marker} {} · {preview}", format_age(session.updated, now)),
             style,
         ),
         Line::styled(
             format!(
-                "  {workspace} Â· {} Â· {location} Â· {}",
+                "  {workspace} · {} · {location} · {}",
                 session.harness.label(),
                 session.id
             ),

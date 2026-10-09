@@ -12,7 +12,6 @@ mod external_editor;
 pub(crate) mod interaction;
 mod markdown;
 mod notification;
-mod resume_picker;
 mod scheduler;
 mod selection;
 mod slash_commands;
@@ -76,7 +75,6 @@ use crate::{
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 pub(crate) use eval_attach::attach_evaluation;
-pub(crate) use resume_picker::select_resume_session;
 
 pub(crate) use crate::nanocodex2::tui::tool_calls::ToolCalls;
 
