@@ -84,7 +84,8 @@
     "test:openrouter-video": "node --test test/openrouter-video-journey.test.mjs",
     "test:hand-paths": "node --test test/hand-paths-journey.test.mjs",
     "test:hand-reconnect-agent": "node --test test/hand-reconnect-agent-journey.test.mjs",
-    "test:company-teams": "node --test test/company-teams-journey.test.mjs test/company-context-journey.test.mjs"
+    "test:company-teams": "node --test test/company-teams-journey.test.mjs test/company-context-journey.test.mjs",
+    "benchmark:api:live": "node scripts/curl-api-latency.mjs"
   },
   "dependencies": {
     "nanocodex-computer": "workspace:*",
