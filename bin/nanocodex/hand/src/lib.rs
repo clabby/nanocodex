@@ -21,9 +21,9 @@ mod hand_recording_control;
 ))]
 mod hand_workspace;
 mod isolated;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 mod linux_hand_install;
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", all(test, unix)))]
 mod linux_hand_update;
 mod native_hand;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
