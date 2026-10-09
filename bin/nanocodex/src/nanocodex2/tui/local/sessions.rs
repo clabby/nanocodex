@@ -300,7 +300,13 @@ pub(crate) struct Built {
 /// (branch copies, rollout materialization) runs on the blocking pool.
 pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
     let thread = match &launch.resume {
-        Some(Resume::Codex(thread) | Resume::Branch { thread: Some(thread), .. }) => Some(thread.clone()),
+        Some(
+            Resume::Codex(thread)
+            | Resume::Branch {
+                thread: Some(thread),
+                ..
+            },
+        ) => Some(thread.clone()),
         Some(Resume::Branch {
             thread: None,
             fork: Some(fork),

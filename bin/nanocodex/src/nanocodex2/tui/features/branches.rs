@@ -76,9 +76,10 @@ impl Feature for Branches {
 
     fn attach(&mut self, _parts: &mut LocalParts, cx: &FeatureContext<'_>) {
         if let Some(agent) = cx.agent {
-            let thread = agent
-                .rollout()
-                .map_or_else(|| agent.session_id().to_owned(), |rollout| rollout.thread_id().to_owned());
+            let thread = agent.rollout().map_or_else(
+                || agent.session_id().to_owned(),
+                |rollout| rollout.thread_id().to_owned(),
+            );
             self.registry
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -95,7 +96,10 @@ impl Feature for Branches {
     }
 
     fn key(&mut self, key: &KeyEvent, cx: &FeatureContext<'_>) -> KeyOutcome {
-        if !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if !key
+            .modifiers
+            .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
             return KeyOutcome::Ignored;
         }
         match key.code {
@@ -141,9 +145,11 @@ impl Branches {
         // Reading the transcript touches the disk; keep it off the input loop.
         tokio::spawn(async move {
             let thread = rollout.as_ref().map(|(thread, _)| thread.clone());
-            let prompts = tokio::task::spawn_blocking(move || thread.map(|thread| prompts(&thread)).unwrap_or_default())
-                .await
-                .unwrap_or_default();
+            let prompts = tokio::task::spawn_blocking(move || {
+                thread.map(|thread| prompts(&thread)).unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
             let navigator = BranchNavigator::new(
                 registry,
                 host.clone(),
@@ -161,15 +167,26 @@ impl Branches {
             let registry = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
             let count = registry.branches.len();
             if count < 2 {
-                cx.host.error(None, "This conversation has no other branch; edit an earlier prompt with Ctrl+Alt+B");
+                cx.host.error(
+                    None,
+                    "This conversation has no other branch; edit an earlier prompt with Ctrl+Alt+B",
+                );
                 return;
             }
             let position = registry
                 .current
                 .as_ref()
-                .and_then(|current| registry.branches.iter().position(|branch| &branch.thread == current))
+                .and_then(|current| {
+                    registry
+                        .branches
+                        .iter()
+                        .position(|branch| &branch.thread == current)
+                })
                 .unwrap_or(0);
-            let next = position.cast_signed().saturating_add(direction).rem_euclid(count.cast_signed());
+            let next = position
+                .cast_signed()
+                .saturating_add(direction)
+                .rem_euclid(count.cast_signed());
             registry.branches[next.cast_unsigned()].thread.clone()
         };
         match ready(cx) {
@@ -190,7 +207,8 @@ fn ready<'a>(cx: &'a FeatureContext<'_>) -> Result<&'a LocalLaunch, String> {
     if btw_local::active().is_some() {
         return Err("close /btw before editing history or switching branches".to_owned());
     }
-    cx.launch.ok_or_else(|| "branches need a local agent (run ncl)".to_owned())
+    cx.launch
+        .ok_or_else(|| "branches need a local agent (run ncl)".to_owned())
 }
 
 /// User prompts of a saved Codex thread, oldest first.
@@ -283,7 +301,12 @@ impl HostCell {
     }
 
     fn with_host(&self, send: impl FnOnce(&super::FeatureHost)) {
-        if let Some(host) = self.0.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
+        if let Some(host) = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
             send(host);
         }
     }

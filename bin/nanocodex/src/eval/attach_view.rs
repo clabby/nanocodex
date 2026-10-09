@@ -1,8 +1,9 @@
 use std::{io, path::Path, time::Duration};
 
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use eyre::{Result, WrapErr as _};
 use futures_util::StreamExt as _;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use nanocodex_eval::{EvaluationFamilyStatus, EvaluationObserver, EvaluationStatus};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
@@ -10,7 +11,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
 };
-use nanocodex_eval::{EvaluationFamilyStatus, EvaluationObserver, EvaluationStatus};
 use tokio::time::{MissedTickBehavior, interval};
 
 const SQLITE_PROBE_INTERVAL: Duration = Duration::from_millis(250);
@@ -291,9 +291,9 @@ fn model_label(family: &EvaluationFamilyStatus) -> String {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
-    use ratatui::{Terminal, backend::TestBackend};
     use nanocodex::{Model, Thinking};
     use nanocodex_eval::{EvaluationCounts, EvaluationTreatment};
+    use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
 
