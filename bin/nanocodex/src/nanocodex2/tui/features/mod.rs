@@ -23,7 +23,7 @@ use std::{path::PathBuf, sync::Arc};
 use crossterm::event::KeyEvent;
 use nanocodex::Nanocodex;
 use ratatui::{Frame, layout::Rect};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
     backend::Capabilities,
@@ -103,6 +103,18 @@ pub(crate) struct SidePane {
     pub(crate) prompt: Option<String>,
 }
 
+/// A prompt a feature submits on the user's behalf (scheduler fire, /benchmark).
+pub(crate) struct FeaturePrompt {
+    pub(crate) pane: Option<PaneId>,
+    /// Shown in the transcript as the user turn.
+    pub(crate) display: String,
+    /// Sent to the agent instead of display when present (private workflow text).
+    pub(crate) instruction: Option<String>,
+    /// Resolved true when the turn completes, false when it fails or is
+    /// cancelled; dropped when the submission is rejected.
+    pub(crate) completion: Option<oneshot::Sender<bool>>,
+}
+
 /// A request from a feature task to the driver.
 pub(crate) enum FeatureUpdate {
     /// Informational footer/transcript notice.
@@ -125,6 +137,13 @@ pub(crate) enum FeatureUpdate {
     ClosePane(PaneId),
     /// Re-read capabilities (a feature became available or unavailable).
     Capabilities(Capabilities),
+    /// Submit a prompt with an optional private instruction and completion receipt.
+    SubmitPrompt(FeaturePrompt),
+    /// Rebuild the local agent from new launch arguments (harness/model switch
+    /// before the first prompt); on failure the current agent stays.
+    Relaunch(Box<LocalLaunch>),
+    /// Footer voice status of local Realtime voice; None hides it.
+    VoiceStatus(Option<crate::nanocodex2::voice_state::Status>),
 }
 
 /// The channel features report through. Cheap to clone into tasks.
@@ -183,6 +202,18 @@ pub(crate) trait Feature: Send {
     fn turn_state(&mut self, _busy: bool, _cx: &FeatureContext<'_>) {}
     /// A feature overlay is open (true) or closed (false); schedulers pause.
     fn overlay_state(&mut self, _open: bool) {}
+    /// Called at most once per second while the main agent is idle, no feature
+    /// overlay is open, the composer is empty and nothing is pending.
+    fn idle_tick(&mut self, _cx: &FeatureContext<'_>) {}
+    /// A prompt the user typed is about to be submitted to the local agent.
+    /// A returned sender is resolved with that turn's outcome; Err rejects it.
+    fn user_prompt(
+        &mut self,
+        _text: &str,
+        _cx: &FeatureContext<'_>,
+    ) -> Result<Option<oneshot::Sender<bool>>, String> {
+        Ok(None)
+    }
     /// Stop tasks before the agent is dropped or replaced.
     fn shutdown(&mut self) {}
 }
@@ -265,6 +296,25 @@ impl Features {
         for feature in &mut self.features {
             feature.turn_state(busy, cx);
         }
+    }
+
+    pub(crate) fn idle_tick(&mut self, cx: &FeatureContext<'_>) {
+        for feature in &mut self.features {
+            feature.idle_tick(cx);
+        }
+    }
+
+    /// Completion receipts of every feature tracking this typed prompt.
+    pub(crate) fn user_prompt(
+        &mut self,
+        text: &str,
+        cx: &FeatureContext<'_>,
+    ) -> Result<Vec<oneshot::Sender<bool>>, String> {
+        let mut completions = Vec::new();
+        for feature in &mut self.features {
+            completions.extend(feature.user_prompt(text, cx)?);
+        }
+        Ok(completions)
     }
 
     pub(crate) fn overlay_state(&mut self, open: bool) {

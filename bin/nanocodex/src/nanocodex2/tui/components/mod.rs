@@ -11,6 +11,7 @@ mod context_diagnostics;
 mod effort;
 mod file_finder;
 mod floating;
+mod interaction;
 mod keybindings;
 mod model_selector;
 mod node;
@@ -29,6 +30,7 @@ mod transcript;
 mod waved_text;
 
 pub(crate) use app::{AppEffect, AppEvent, AppNode};
+pub(crate) use interaction::{InteractionOutcome, InteractionOverlay};
 pub(crate) use node::{ComponentUpdate, RenderRequest};
 pub(crate) use queue::QueueId;
 pub(crate) use root::{
