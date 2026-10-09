@@ -2,3 +2,5 @@
 
 pub(crate) mod agent;
 pub(crate) mod events;
+pub(crate) mod control;
+pub(crate) mod sessions;
