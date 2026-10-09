@@ -42,8 +42,15 @@ class Session:
             time.sleep(.03)
         raise AssertionError(f'{self.label}: {message}')
     def enter(self, text): os.write(self.master, text.encode() + b'\r')
+    def composer_visible(self):
+        # The composer box: a top border carrying the context gauge and a bottom
+        # border below it. Its footer hint is optional; a long workspace path
+        # can fill the bottom border and hide it.
+        lines = [line.strip() for line in self.screen.text().splitlines()]
+        tops = [i for i, line in enumerate(lines) if line.startswith('╭─') and '%/' in line]
+        return bool(tops) and any(line.startswith('╰─') for line in lines[tops[-1] + 1:])
     def ready(self):
-        self.wait(lambda: 'Enter send' in self.screen.text(), 'composer absent'); time.sleep(1.5)
+        self.wait(self.composer_visible, 'composer absent'); time.sleep(1.5)
     def quit(self):
         os.write(self.master, b'\x03\x03'); self.wait(lambda: self.process.poll() is not None, 'ncl did not exit', 15)
     def close(self):
