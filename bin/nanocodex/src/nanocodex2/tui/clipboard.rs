@@ -4,9 +4,7 @@ use arboard::Clipboard;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use png::{BitDepth, ColorType, Encoder, EncodingError};
 
-#[path = "../../clipboard.rs"]
-mod text;
-pub(crate) use text::copy_to_clipboard as copy_text;
+pub(crate) use crate::clipboard::copy_to_clipboard as copy_text;
 
 pub(crate) fn image_data_url() -> Option<String> {
     let mut clipboard = Clipboard::new().ok()?;

@@ -182,7 +182,7 @@ pub fn emit() -> Result<(), Box<dyn Error>> {
             hasher.record("env", *name, value);
         }
     }
-    if let Some(target) = std::env::var("TARGET").ok() {
+    if let Ok(target) = std::env::var("TARGET") {
         let triple = target.replace(['-', '.'], "_");
         for name in [
             format!("CARGO_TARGET_{}_LINKER", triple.to_ascii_uppercase()),
@@ -336,17 +336,15 @@ fn path_package_directories(root: &Path) -> Result<BTreeMap<String, PathBuf>, Bo
             .get("package")
             .and_then(|package| package.get("name"))
             .and_then(toml::Value::as_str)
+            && let Some(previous) = packages.insert(name.to_owned(), directory.clone())
+            && previous != directory
         {
-            if let Some(previous) = packages.insert(name.to_owned(), directory.clone())
-                && previous != directory
-            {
-                return Err(format!(
-                    "path package {name} found at {} and {}",
-                    previous.display(),
-                    directory.display()
-                )
-                .into());
-            }
+            return Err(format!(
+                "path package {name} found at {} and {}",
+                previous.display(),
+                directory.display()
+            )
+            .into());
         }
         if let Some(members) = manifest
             .get("workspace")

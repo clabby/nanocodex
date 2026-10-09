@@ -118,8 +118,8 @@ pub(super) fn render(source: &str, width: u16, theme: &Theme) -> Option<Vec<Line
                 } else {
                     prose(&mut out, &hunk.label, inner, bordered, theme, false);
                 }
-                let mut old = HighlightLines::new(syntax, &syntax_theme);
-                let mut new = HighlightLines::new(syntax, &syntax_theme);
+                let mut old = HighlightLines::new(syntax, syntax_theme);
+                let mut new = HighlightLines::new(syntax, syntax_theme);
                 for line in hunk.lines {
                     let marked = finding.anchored(&line);
                     let spans =

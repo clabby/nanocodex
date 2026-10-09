@@ -270,6 +270,7 @@ impl VersionStore {
         )
     }
 
+    #[cfg(any(test, target_os = "windows"))]
     pub(super) fn install_bundle(
         &self,
         key: &str,

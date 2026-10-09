@@ -170,7 +170,7 @@ mod tests {
             if self
                 .0
                 .failures
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
             {
                 Err("display unavailable")

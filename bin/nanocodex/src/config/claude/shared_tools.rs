@@ -65,10 +65,10 @@ pub(super) fn install(
             let leases = leases.clone();
             async move {
                 let (cwd, lease) = workspace.pin_current();
-                if name == "exec_command" {
-                    if let Some(object) = input.as_object_mut() {
-                        object.entry("workdir").or_insert_with(|| json!(cwd));
-                    }
+                if name == "exec_command"
+                    && let Some(object) = input.as_object_mut()
+                {
+                    object.entry("workdir").or_insert_with(|| json!(cwd));
                 }
                 let context = ToolContext::new(
                     &invocation.model,
@@ -109,10 +109,11 @@ pub(super) fn install(
                         if let Some(id) = result.get("session_id").and_then(Value::as_i64) {
                             leases.insert(id, lease);
                         }
-                    } else if name == "write_stdin" && result.get("exit_code").is_some() {
-                        if let Some(id) = input.get("session_id").and_then(Value::as_i64) {
-                            leases.remove(&id);
-                        }
+                    } else if name == "write_stdin"
+                        && result.get("exit_code").is_some()
+                        && let Some(id) = input.get("session_id").and_then(Value::as_i64)
+                    {
+                        leases.remove(&id);
                     }
                 }
                 Ok(reply)

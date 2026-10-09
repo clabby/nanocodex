@@ -6,6 +6,7 @@ mod auth;
 mod benchmark;
 mod browser;
 mod browser_cookie_sync;
+mod clipboard;
 mod computer;
 mod config;
 #[cfg(feature = "tempo")]
@@ -49,6 +50,7 @@ mod run;
 mod setup;
 mod startup_timing;
 mod subagents;
+mod tool_calls;
 mod tui;
 mod update;
 mod version;
