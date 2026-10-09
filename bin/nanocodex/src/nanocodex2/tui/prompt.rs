@@ -267,6 +267,8 @@ mod tests {
         assert!(
             matches!(&managed[1], ManagedPromptContent::Image { image_url, .. } if image_url.ends_with(",a"))
         );
-        assert!(matches!(&managed[2], ManagedPromptContent::Text { text } if text == "\n\nPRIVATE"));
+        assert!(
+            matches!(&managed[2], ManagedPromptContent::Text { text } if text == "\n\nPRIVATE")
+        );
     }
 }
