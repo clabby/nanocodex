@@ -79,6 +79,44 @@ Run the provider-mocked real Code Mode/SQLite and Workers SQLite/R2 journeys wit
 `pnpm --dir js/managed test:images:node`; it reopens real disk SQLite but does not
 claim to emulate Cloudflare or R2.
 
+## Session control tool
+
+`session_control` lets a direct account root agent inspect and drive another
+session owned by the same account through the public `/v1/agents` routes and
+the production managed turn lifecycle. No CLI or Hand is involved.
+
+- `list` pages owned sessions, newest first, with titles, status and active
+  turn IDs (`limit`, `cursor`).
+- `status` reads one session's active turns, turn counts and latest event cursor.
+- `submit` admits a turn with a caller-chosen stable `turn_id` and text `input`.
+  It returns once accepted (`created: false` on an identical replay) and never
+  waits for completion. A different input under an existing ID is a conflict.
+- `turn` reads a turn's state and terminal result, or a steering receipt when
+  `message_id` is supplied.
+- `steer` adds text to an active turn under a stable `message_id`; identical
+  replays are idempotent.
+- `events` pages event history with `after`/`before` cursors; oversized events
+  are truncated to a bounded preview.
+
+```js
+const turn_id = crypto.randomUUID();
+text(await tools.session_control({ operation: "submit", session_id: "SESSION_UUID", turn_id, input: "Restart the design subagents." }));
+text(await tools.session_control({ operation: "turn", session_id: "SESSION_UUID", turn_id }));
+```
+
+Reads require `agents:read` and `tools:use`; `submit` and `steer` also require
+`agents:write`. The call forwards only the current root turn's capabilities as
+an owner principal for this session's organization, team and authorization
+epoch; each target session revalidates them, so another context returns 404.
+Connect grants, shared guests, subagents and multiplayer rooms cannot use it.
+Submitting to or steering the current session is rejected to avoid queuing
+behind itself. Transport failures and 5xx responses report an unknown outcome:
+inspect with `turn` and reuse the identical IDs and input, never a new ID.
+Results redact share bearer tokens and are untrusted session content.
+
+Run `pnpm --filter nanocodex-managed-service run test:session-control`; it
+writes its HTTP/WebSocket trace under `output/session-control-journey/`.
+
 ## Thread sharing tool
 
 `thread_sharing` exposes `list`, `create`, `revoke`, and `revoke_all`. Omit

@@ -312,7 +312,7 @@ const SEARCHES = new Set(["ToolSearch", "MCPToolSearch", "tool_search", "web_sea
 const IMAGES = new Set(["view_image", "image_gen__imagegen", "imagegen", "generate_image"]);
 const PREVIEWS = new Set(["preview", "sandbox_preview"]);
 const SUBAGENTS = new Set(["spawn_agent", "wait_agent", "send_agent_message", "interrupt_agent", "close_agent", "list_agents", "submit_result", "Task", "TaskOutput", "TaskStop"]);
-const ACCOUNT = new Set(["accountInfo", "requestAccountConnection", "account_connectors", "environment", "runtimeInfo", "request_vault_intake", "vault_request", "vault_store", "request_secure_input", "request_permissions", "provider_card", "request_native_secure_input", "mount", "server_hand", "thread_sharing"]);
+const ACCOUNT = new Set(["accountInfo", "requestAccountConnection", "account_connectors", "environment", "runtimeInfo", "request_vault_intake", "vault_request", "vault_store", "request_secure_input", "request_permissions", "provider_card", "request_native_secure_input", "mount", "server_hand", "thread_sharing", "session_control"]);
 const MESSAGES = new Set(["email", "phone", "phone_numbers", "send_message", "whatsapp"]);
 
 export function toolKind(tool: ToolActivity): ToolKind {

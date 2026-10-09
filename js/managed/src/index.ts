@@ -72,6 +72,7 @@ import { accountToolsEnabled, normalizeToolNames, parseConfiguration, type Agent
 import { createHash } from "node:crypto";
 import { ThreadShareLinks, type SharePermission } from "./thread-share-links";
 import { threadSharingTools, redactSharedLinkTokens, sharedTextStream } from "./thread-sharing-tool";
+import { sessionControlTool } from "./session-control-tool";
 import { initializeTurnInputs, inputChunks, lazyTurnInput, readTurnInput, storeTurnInput } from "./managed-turn-input";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ArchiveMaintenance } from "./archive-maintenance";
@@ -11062,6 +11063,26 @@ export class DurableAgentSession extends DurableComputerObject {
         request: (request, principal) => managedFetch(request, this.env, this.ctx, principal,
           this.#routingOrigin().clientIngressColo),
       })),
+      ...(multiplayer ? [] : [sessionControlTool({
+        sessionId: session.session_id, ownerId: session.owner_id,
+        authorizationEpoch: session.authorization_epoch, origin: session.public_origin,
+        authorization: context => {
+          // Forward exactly this root turn's capabilities; the target session
+          // revalidates owner, context, epoch and membership itself.
+          const current = this.#session();
+          const authorization = this.#authorizationForToolContext(context);
+          if (!current || this.#deleting || this.#deleted || this.#durabilityExported || !authorization
+            || authorization.connectGrant !== undefined || authorization.guestShareLinkId !== undefined
+            || current.owner_id !== session.owner_id || current.authorization_epoch !== session.authorization_epoch) return undefined;
+          return { kind: "account_session", userId: current.owner_id,
+            organizationId: current.organization_id, teamId: current.team_id,
+            authorizationEpoch: current.authorization_epoch, role: "writer",
+            subjectId: `user:${current.owner_id}`, credentialId: `session-control-tool:${context.callId}`,
+            capabilities: authorization.capabilities };
+        },
+        request: (request, principal) => managedFetch(request, this.env, this.ctx, principal,
+          this.#routingOrigin().clientIngressColo),
+      })]),
       ...(multiplayer ? [] : workspacePushTools({
         sessionId: session.session_id, ownerId: session.owner_id,
         authorizationEpoch: session.authorization_epoch, origin: session.public_origin,
