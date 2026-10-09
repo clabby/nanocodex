@@ -705,10 +705,20 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
     let recorded = generations.clone();
     let released = Arc::new(Mutex::new(None::<String>));
     let release_record = released.clone();
+    // Every connection and frame, so a silent stall shows whether the agent
+    // dialed the provider, warmed up, or never generated.
+    let observed = Arc::new(Mutex::new(json!({"connections":0,"warmups":0,"frames":[]})));
+    let observe = observed.clone();
     let provider = tokio::spawn(async move {
         while let Ok((stream, _)) = responses.accept().await {
             let recorded = recorded.clone();
             let release_record = release_record.clone();
+            let observe = observe.clone();
+            {
+                let mut observed = observe.lock().unwrap();
+                let connections = observed["connections"].as_u64().unwrap_or(0) + 1;
+                observed["connections"] = connections.into();
+            }
             tokio::spawn(async move {
                 let Ok(mut socket) = tokio_tungstenite::accept_async(stream).await else {
                     return;
@@ -726,6 +736,15 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
                         continue;
                     };
                     let request: Value = serde_json::from_str(text.as_str()).unwrap();
+                    {
+                        let mut observed = observe.lock().unwrap();
+                        if request["generate"] == false {
+                            let warmups = observed["warmups"].as_u64().unwrap_or(0) + 1;
+                            observed["warmups"] = warmups.into();
+                        }
+                        observed["frames"].as_array_mut().unwrap().push(json!({
+                            "type":request["type"],"generate":request["generate"],"model":request["model"]}));
+                    }
                     let generation = (request["generate"] != false).then(|| {
                         let mut recorded = recorded.lock().unwrap();
                         recorded.push(request.clone());
@@ -846,6 +865,20 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
             serde_json::to_vec_pretty(&*generations.lock().unwrap()).unwrap(),
         )
         .unwrap();
+        std::fs::write(
+            artifact.join("provider-connections.json"),
+            serde_json::to_vec_pretty(&*observed.lock().unwrap()).unwrap(),
+        )
+        .unwrap();
+        // The CLI's own TUI logs live under the temporary HOME, which is
+        // removed with the terminal; keep them beside the screen evidence.
+        if let Ok(entries) = std::fs::read_dir(workspace.join(".local/state/nanocodex/logs")) {
+            let logs = artifact.join("logs");
+            std::fs::create_dir_all(&logs).unwrap();
+            for entry in entries.flatten() {
+                let _ = std::fs::copy(entry.path(), logs.join(entry.file_name()));
+            }
+        }
         std::fs::write(
             artifact.join("held-release.json"),
             serde_json::to_vec_pretty(&*released.lock().unwrap()).unwrap(),
