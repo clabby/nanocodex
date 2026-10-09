@@ -189,11 +189,11 @@ def main():
   require(ids['owner-job'] not in json.loads(jp.read_text())['tasks'],'new owner one-shot not consumed');finish(old_proc,old_fd,old_drain);finish(proc,fd,drain);checks.append('two live CLI processes: resume fences older scheduler before due fixture claim; newer owner fires exactly once')
   # Headless catalogs omit the timer and Monitor tools entirely.
   phase('headless',[('exec',{'code':'''if (ALL_TOOLS.some(tool => ['Monitor','CronCreate','CronList','CronDelete','ScheduleWakeup'].includes(tool.name))) throw Error('headless advertised idle tools'); text('headless-catalog-verified');'''},False,None)]);r=subprocess.run([str(binary),'run']+common+['Inspect headless catalog.'],cwd=workspace,env=env,capture_output=True,timeout=30);require(r.returncode==0 and state['done'] and not errors and 'headless-catalog-verified' in json.dumps(requests[-1]),'headless catalog inspection failed');checks.append('headless omits idle-only tools')
-  rules=artifact/'monitor-deny.json';rules.write_text(json.dumps({'permissions':{'defaultMode':'full-access','allow':['Monitor'],'deny':['Bash(touch *)']}}))
+  rules=artifact/'monitor-deny.json';rules.write_text(json.dumps({'permissions':{'defaultMode':'full-access','allow':['Monitor'],'deny':['exec_command(touch *)']}}))
   for label,flags in [('monitor-plan',['--permission-mode','plan']),('monitor-deny',['--claude-permissions',str(rules)])]:
    phase(label,[('Monitor',{'command':'touch monitor-must-not-exist','description':'Denied effect'},True,None)])
    proc,fd,drain=start(label,[str(binary)]+common+flags+['--prompt','Verify Monitor admission.']);wait(lambda:visible(label,label+'-complete'),drain,'Monitor admission final absent');finish(proc,fd,drain);require(not(workspace/'monitor-must-not-exist').exists(),'Monitor bypassed admission')
-  checks.append('plan blocks Monitor and Bash deny overrides Monitor allow before process spawn')
+  checks.append('plan blocks Monitor and exec_command deny overrides Monitor allow before process spawn')
   outcome={'success':True,'checks':checks,'elapsed_seconds':round(time.time()-started,2),'binary_sha256':binary_sha256}
  finally:
   for proc in processes:

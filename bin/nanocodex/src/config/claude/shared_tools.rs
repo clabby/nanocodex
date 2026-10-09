@@ -1,8 +1,16 @@
-//! The same discovered Computer Use handlers and schemas used by Codex.
+//! Shared shell and Computer Use handlers and schemas used by Codex.
 use super::*;
 use nanocodex::tools::ToolDefinition as RuntimeDefinition;
 
-pub(super) fn install(mut native: ClaudeTools, runtime: Arc<RetainedHost>) -> ClaudeTools {
+pub(super) fn install(
+    mut native: ClaudeTools,
+    runtime: Arc<RetainedHost>,
+    workspace: Arc<worktree::Workspace>,
+) -> ClaudeTools {
+    let leases = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+        i64,
+        worktree::WorkspaceLease,
+    >::new()));
     // The Responses presentation groups namespaced functions. Restore their
     // canonical dispatch names without changing provider schemas or instructions.
     let mut definitions = Vec::new();
@@ -34,7 +42,9 @@ pub(super) fn install(mut native: ClaudeTools, runtime: Arc<RetainedHost>) -> Cl
         else {
             continue;
         };
-        if !name.starts_with("mcp__cua_repl__") {
+        if !name.starts_with("mcp__cua_repl__")
+            && !matches!(name.as_ref(), "exec_command" | "write_stdin")
+        {
             continue;
         }
         let name = name.to_string();
@@ -46,10 +56,20 @@ pub(super) fn install(mut native: ClaudeTools, runtime: Arc<RetainedHost>) -> Cl
             defer_loading: false,
         };
         let runtime = runtime.clone();
-        native = native.tool_with_context(definition, move |input, invocation| {
+        let workspace = workspace.clone();
+        let leases = leases.clone();
+        native = native.tool_with_context(definition, move |mut input, invocation| {
             let runtime = runtime.clone();
             let name = name.clone();
+            let workspace = workspace.clone();
+            let leases = leases.clone();
             async move {
+                let (cwd, lease) = workspace.pin_current();
+                if name == "exec_command" {
+                    if let Some(object) = input.as_object_mut() {
+                        object.entry("workdir").or_insert_with(|| json!(cwd));
+                    }
+                }
                 let context = ToolContext::new(
                     &invocation.model,
                     &invocation.session_id,
@@ -83,6 +103,18 @@ pub(super) fn install(mut native: ClaudeTools, runtime: Arc<RetainedHost>) -> Cl
                     .map(|value| serde_json::from_str(value.get()))
                     .transpose()
                     .map_err(|error| error.to_string())?;
+                if let Some(result) = &reply.structured_result {
+                    let mut leases = leases.lock().expect("shell workspace leases");
+                    if name == "exec_command" {
+                        if let Some(id) = result.get("session_id").and_then(Value::as_i64) {
+                            leases.insert(id, lease);
+                        }
+                    } else if name == "write_stdin" && result.get("exit_code").is_some() {
+                        if let Some(id) = input.get("session_id").and_then(Value::as_i64) {
+                            leases.remove(&id);
+                        }
+                    }
+                }
                 Ok(reply)
             }
         });
