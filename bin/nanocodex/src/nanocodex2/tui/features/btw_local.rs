@@ -244,9 +244,8 @@ impl Feature for LocalBtw {
                     // Legacy delivers the collapse into the running main turn as a steer.
                     cx.host.send(FeatureUpdate::Steer {
                         pane: Some(PaneId::Main),
-                        text: format!("{display}
-
-{instruction}"),
+                        display,
+                        instruction: Some(instruction),
                     });
                 } else {
                     cx.host.send(FeatureUpdate::SubmitPrompt(FeaturePrompt {

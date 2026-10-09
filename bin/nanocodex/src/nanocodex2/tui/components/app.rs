@@ -141,7 +141,7 @@ pub(crate) enum AppEvent {
     ForkReady {
         pane: PaneId,
     },
-    /// FEATURE-HOOK: wp2 a feature steers the pane's running turn.
+    /// A feature steers the pane's running turn.
     FeatureSteer {
         pane: PaneId,
         prompt: crate::nanocodex2::tui::prompt::Submission,

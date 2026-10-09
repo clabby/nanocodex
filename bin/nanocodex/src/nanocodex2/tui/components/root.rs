@@ -184,7 +184,7 @@ pub(crate) enum RootEvent {
     ShellFinished,
     TurnsCancelled,
     ForkReady,
-    /// FEATURE-HOOK: wp2 queue a steer for the running turn as if typed.
+    /// Queue a steer for the running turn as if typed.
     FeatureSteer(Submission),
     NewSessionFailed(String),
     ReviewBranchesLoaded {

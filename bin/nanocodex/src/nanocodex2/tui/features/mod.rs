@@ -140,7 +140,13 @@ pub(crate) enum FeatureUpdate {
     ClosePane(PaneId),
     /// Steer text into the running main turn exactly as a typed steer would be
     /// (local /collapse while main is busy).
-    Steer { pane: Option<PaneId>, text: String },
+    Steer {
+        pane: Option<PaneId>,
+        /// Shown in the steer queue and transcript.
+        display: String,
+        /// Sent to the agent instead of display when present (private workflow text).
+        instruction: Option<String>,
+    },
     /// Re-read capabilities (a feature became available or unavailable).
     Capabilities(Capabilities),
     /// Submit a prompt with an optional private instruction and completion receipt.

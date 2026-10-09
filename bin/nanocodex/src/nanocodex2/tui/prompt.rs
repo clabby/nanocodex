@@ -11,6 +11,8 @@ use std::{fmt, ops::Range, sync::Arc};
 pub(crate) struct Submission {
     text: String,
     images: Vec<SubmissionImage>,
+    /// Model-facing text replacing the displayed label (private workflow prompts).
+    agent_text: Option<String>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -24,6 +26,16 @@ impl Submission {
         Self {
             text,
             images: Vec::new(),
+            agent_text: None,
+        }
+    }
+
+    /// A short visible label whose agent input is a separate instruction.
+    pub(crate) fn labelled(label: String, instruction: String) -> Self {
+        Self {
+            text: label,
+            images: Vec::new(),
+            agent_text: Some(instruction),
         }
     }
 
@@ -38,7 +50,11 @@ impl Submission {
                 data_url: data_url.into(),
             })
             .collect();
-        Self { text, images }
+        Self {
+            text,
+            images,
+            agent_text: None,
+        }
     }
 
     pub(crate) fn into_parts(self) -> (String, impl Iterator<Item = (Range<usize>, Arc<str>)>) {
@@ -53,6 +69,17 @@ impl Submission {
     pub(crate) fn join(submissions: Vec<Self>) -> Self {
         let mut text = String::new();
         let mut images = Vec::new();
+        // Joined steers keep each private instruction in place of its label.
+        let agent_text = submissions
+            .iter()
+            .any(|submission| submission.agent_text.is_some())
+            .then(|| {
+                submissions
+                    .iter()
+                    .map(|submission| submission.agent_text.as_deref().unwrap_or(&submission.text))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            });
         for (index, submission) in submissions.into_iter().enumerate() {
             if index > 0 {
                 text.push_str("\n\n");
@@ -65,7 +92,11 @@ impl Submission {
                 image
             }));
         }
-        Self { text, images }
+        Self {
+            text,
+            images,
+            agent_text,
+        }
     }
 
     pub(crate) fn prepend_text(mut self, prefix: String) -> Self {
@@ -75,6 +106,9 @@ impl Submission {
         let separator = if self.text.is_empty() { "" } else { "\n\n" };
         let offset = prefix.len() + separator.len();
         self.text = format!("{prefix}{separator}{}", self.text);
+        if let Some(agent_text) = &mut self.agent_text {
+            *agent_text = format!("{prefix}\n\n{agent_text}");
+        }
         for image in &mut self.images {
             image.range.start += offset;
             image.range.end += offset;
@@ -91,6 +125,9 @@ impl Submission {
     }
 
     pub(crate) fn agent_prompt(&self) -> Prompt {
+        if let Some(text) = &self.agent_text {
+            return Prompt::content(vec![UserInput::Text { text: text.clone() }]);
+        }
         let mut content = Vec::new();
         let mut cursor = 0;
         for image in &self.images {
@@ -114,6 +151,9 @@ impl Submission {
     }
 
     pub(crate) fn managed_prompt(&self) -> ManagedPromptInput {
+        if let Some(text) = &self.agent_text {
+            return ManagedPromptInput::Text(text.clone());
+        }
         let mut content = Vec::new();
         let mut cursor = 0;
         for image in &self.images {
