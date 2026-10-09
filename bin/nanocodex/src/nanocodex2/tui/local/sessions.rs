@@ -56,6 +56,13 @@ pub(crate) struct Fork {
     pub(crate) workspace: PathBuf,
 }
 
+/// The harness that owns a saved session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Harness {
+    Codex,
+    Claude,
+}
+
 impl Harness {
     const fn label(self) -> &'static str {
         match self {
