@@ -183,6 +183,14 @@ after a yield without calling `wait`). The Codex harness then relays that
 cell's nested tool starts and completions as they happen, so every started call
 still reaches a terminal `tool.result`, possibly after `run.completed`. A later
 `wait` takes over the cell and does not repeat updates the relay delivered.
+A turn whose next model request fails after a yield leaves its cells running
+the same way. Cancelling a turn, or a tool-dispatch failure, terminates the
+turn's cells instead: nested calls an earlier `exec` or `wait` started receive a
+failed `tool.result` with code `CODE_MODE_CALL_INTERRUPTED` and outcome
+`unknown`, while nested calls of the interrupted call itself are reported as
+cancelled. Headless `nanocodex run` writes the receipts emitted while shutdown
+terminates remaining cells, so its JSONL can contain `tool.result` records after
+the last terminal run event.
 The Claude harness instead drains its cells at every turn end.
 
 `wait(terminate: true)`, cancellation, turn teardown and host shutdown remain
