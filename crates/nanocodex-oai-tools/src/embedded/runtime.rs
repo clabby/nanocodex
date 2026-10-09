@@ -558,6 +558,21 @@ impl EmbeddedToolRuntimeControl {
         }
     }
 
+    /// Embedding hosts own their cells and have no relay contract, so a cell
+    /// the turn left running reports its nested updates to the next wait.
+    /// Matches the native runtime's API; the observer factory is not called.
+    pub async fn detach_turn_with_updates(
+        &self,
+        _observer: &mut (dyn FnMut(&str) -> Box<dyn CodeModeObserver> + Send),
+    ) {
+    }
+
+    /// Cancels the current logical turn. Embedding hosts settle their own
+    /// cells' nested receipts, so `observer` receives no updates.
+    pub async fn cancel_turn_with_updates(&self, _observer: &mut dyn CodeModeObserver) {
+        self.cancel_turn().await;
+    }
+
     /// Cancels active work.
     pub async fn cancel(&self) {
         if let (Some(host), Some(session_id)) = (&self.host, &self.session_id)
