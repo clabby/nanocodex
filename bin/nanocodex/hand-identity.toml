@@ -1,0 +1,37 @@
+# Inputs of the standalone Hand identity (see build_hand_identity.rs).
+#
+# Every file of every path package in nanocodex-bin's Cargo.lock closure is
+# hashed by workspace-relative path and content. "exclude" removes only paths
+# proven unreachable from nanocodex-hand: scripts/check-hand-identity-exclusions.sh
+# builds the Hand and fails if any excluded Rust module contributes a symbol.
+# Unlisted files are always included, so a new file can only change the
+# identity. Paths are workspace-relative; directories match recursively.
+exclude = [
+    # The CLI executable root; nanocodex-hand is built from src/hand_main.rs.
+    "bin/nanocodex/src/main.rs",
+    # Integration tests, benchmarks and documentation are not compiled into
+    # either executable.
+    "bin/nanocodex/tests",
+    "bin/nanocodex/benches",
+    "bin/nanocodex/README.md",
+]
+
+# Workspace files outside the closure's package directories that change the
+# Hand: workspace manifest (profiles, features, versions), Cargo config
+# (linkers, rustflags), signing entitlements, payload verifier and helper
+# sources compiled by build.rs, and the cross linker wrappers.
+inputs = [
+    "Cargo.toml",
+    ".cargo/config.toml",
+    "nanocodex-vm.entitlements",
+    "scripts/tests/linux-screen-helpers-bundle.py",
+    "macos/HandMenuBar",
+    "scripts/aarch64-unknown-linux-musl-linker",
+    "scripts/aarch64-unknown-linux-musl-ar",
+]
+
+# Hashed when present.
+optional_inputs = [
+    "rust-toolchain.toml",
+    "rust-toolchain",
+]

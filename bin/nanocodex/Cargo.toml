@@ -15,7 +15,7 @@ build = "build.rs"
 
 [package.metadata.cargo-machete]
 # cargo-machete does not resolve imports from the package build script.
-ignored = ["chrono", "vergen"]
+ignored = ["chrono", "sha2", "toml", "vergen"]
 
 [features]
 default = []
@@ -130,6 +130,8 @@ nanocodex-vm = { workspace = true, features = ["desktop"] }
 
 [build-dependencies]
 chrono.workspace = true
+sha2.workspace = true
+toml.workspace = true
 vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 
 [dev-dependencies]
