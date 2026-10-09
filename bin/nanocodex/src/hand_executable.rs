@@ -93,6 +93,11 @@ pub(crate) fn hand_binary() -> io::Result<PathBuf> {
         // A build directory or bundle holds nanocodex-hand; an installed
         // version holds the Hand as nanocodex2 beside the CLI.
         candidates.push(running.with_file_name(file_name("nanocodex-hand")));
+        // An installed macOS version runs its Hand from the signed bundle
+        // beside the CLI, so privacy grants attach to the bundle identity.
+        if cfg!(target_os = "macos") {
+            candidates.push(running.with_file_name("Nanocodex.app/Contents/MacOS/nanocodex2"));
+        }
         candidates.push(running.with_file_name(file_name("nanocodex2")));
     }
     if let Some(root) = crate::launcher::running_install_root()
