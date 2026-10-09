@@ -220,7 +220,15 @@ impl SettingsCommand {
                         argument
                             .parse::<nanocodex::Model>()
                             .map(Model::from)
-                            .map_err(|_| "Unsupported managed model ID")
+                            // Harness aliases (sonnet, haiku, sol, luna) as accepted by --model.
+                            .or_else(|_| {
+                                argument
+                                    .parse::<nanocodex::HarnessModel>()
+                                    .ok()
+                                    .and_then(|model| model.to_string().parse::<Model>().ok())
+                                    .ok_or(())
+                            })
+                            .map_err(|()| "Unsupported managed model ID")
                     }) {
                         Ok(model) => Self::SetModel(model),
                         Err(error) => Self::Invalid(error.to_owned()),

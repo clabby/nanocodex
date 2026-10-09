@@ -1633,6 +1633,15 @@ impl DriverRuntime {
                 agent_prompt = Submission::text(instruction).agent_prompt();
             } else if !self.feature_turns.contains(&id) {
                 let text = prompt.display_text().to_owned();
+                // Typed Claude slash prompts (/loop, user skills) expand at the
+                // user submission boundary, as the legacy local TUI did.
+                match crate::config::expand_session_user_skill(&agent, &text) {
+                    Ok(Some(instruction)) => {
+                        agent_prompt = Submission::text(instruction).agent_prompt();
+                    }
+                    Ok(None) => {}
+                    Err(error) => rejection = Some(error),
+                }
                 match local.with_features(|features, cx| features.user_prompt(&text, cx)) {
                     Ok(completions) if !completions.is_empty() => {
                         self.feature_completions
