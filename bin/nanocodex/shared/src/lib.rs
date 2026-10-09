@@ -20,6 +20,19 @@ pub mod startup_timing;
 pub mod version;
 pub mod voice_recording;
 
+// Opus (through nanocodex-remote) is built with GCC stack protection on
+// windows-gnu. Link its runtime statically into every executable that uses this
+// crate, so neither the CLI nor the standalone Hand needs an extra libssp DLL.
+// The empty block only carries the link directive; -bundle defers it to the
+// final link exactly like a build-script `rustc-link-lib`.
+#[cfg(all(target_os = "windows", target_env = "gnu"))]
+#[allow(
+    unsafe_code,
+    reason = "an empty extern block declares only a native link"
+)]
+#[link(name = "ssp", kind = "static", modifiers = "+whole-archive,-bundle")]
+unsafe extern "C" {}
+
 use nanocodex_managed::ManagedError;
 
 /// Run a command future on a multi-threaded Tokio runtime and return without
