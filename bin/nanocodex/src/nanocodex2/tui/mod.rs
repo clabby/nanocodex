@@ -4298,6 +4298,17 @@ async fn apply_feature_update(
             }
             update
         }
+        // FEATURE-HOOK: wp2 branch switch/edit reopens another session in place.
+        FeatureUpdate::Relaunch(launch) if launch.resume.is_some() => {
+            match runtime.local_switch(ConnectionPurpose::Resume(PaneId::Main), *launch) {
+                Ok(task) => runtime.pending_resume = Some((task, PaneId::Main)),
+                Err(error) => {
+                    request_render(app.update(AppEvent::NotifyError { pane: PaneId::Main, error }), scheduler);
+                }
+            }
+            scheduler.request_immediate(Instant::now());
+            return Ok(false);
+        }
         FeatureUpdate::Relaunch(launch) => {
             let Some(local) = &mut runtime.local else {
                 return Ok(false);
