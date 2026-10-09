@@ -4498,6 +4498,10 @@ async fn apply_feature_update(
             scheduler.request_immediate(Instant::now());
             return Ok(false);
         }
+        FeatureUpdate::Subagent(update) => app.update(AppEvent::Subagent {
+            pane: PaneId::Main,
+            update,
+        }),
         FeatureUpdate::VoiceStatus(status) => {
             runtime.local_voice_status = status;
             app.update(AppEvent::VoiceStatus(runtime.voice_status()))
@@ -5850,6 +5854,30 @@ async fn apply_update(
                             continue;
                         }
                         runtime.queue_settings(pane, SettingsMutation::FastMode(enabled));
+                    }
+                    RootEffect::SetMaxSubagents(limit)
+                        if runtime.local.as_ref().is_some_and(|local| {
+                            local.backend.as_ref().is_some_and(|backend| backend.parts.child_agents.is_some())
+                        }) =>
+                    {
+                        // FEATURE-HOOK: local child-agent concurrency limit (legacy ChildAgents).
+                        if let Some(child_agents) = runtime.local.as_ref()
+                            .and_then(|local| local.backend.as_ref())
+                            .and_then(|backend| backend.parts.child_agents.as_ref())
+                        {
+                            child_agents.set_max_concurrency(limit);
+                        }
+                        if let Some(root) = app.root_mut(pane) {
+                            root.set_max_subagents(limit);
+                        }
+                        absorb(
+                            app.update(AppEvent::NotifySuccess {
+                                pane,
+                                message: format!("Subagent limit set to {limit}"),
+                            }),
+                            &mut effects,
+                            scheduler,
+                        );
                     }
                     RootEffect::SetMaxSubagents(_) => {
                         absorb(

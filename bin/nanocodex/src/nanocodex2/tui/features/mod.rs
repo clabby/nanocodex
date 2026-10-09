@@ -42,6 +42,7 @@ pub(crate) mod harness;
 pub(crate) mod mcp;
 pub(crate) mod realtime_voice;
 pub(crate) mod split;
+pub(crate) mod subagents;
 // Terminal detection and launch commands for /split.
 mod split_launch;
 
@@ -146,6 +147,8 @@ pub(crate) enum FeatureUpdate {
     Relaunch(Box<LocalLaunch>),
     /// Footer voice status of local Realtime voice; None hides it.
     VoiceStatus(Option<crate::nanocodex2::voice_state::Status>),
+    /// A local child-agent update for the shared subagent tree.
+    Subagent(nanocodex_subagents::AgentUpdate),
 }
 
 /// The channel features report through. Cheap to clone into tasks.
@@ -248,6 +251,7 @@ impl Features {
                 Box::new(mcp::Mcp::default()),
                 Box::new(realtime_voice::RealtimeVoice::default()),
                 Box::new(benchmark::Benchmark),
+                Box::new(subagents::Subagents::default()),
             ],
         }
     }
