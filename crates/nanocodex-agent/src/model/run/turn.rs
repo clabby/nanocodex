@@ -288,21 +288,7 @@ where
         self.restore_runtime(configured, logical_turn)?;
         match outcome {
             Ok(ModelTaskOutcome::Completed(message)) => {
-                if let Some(tools) = &self.active_tools {
-                    // A yielded cell may still run nested tools the model never
-                    // waited for. Keep reporting them so their calls terminate.
-                    let events = self.events.clone();
-                    let indices = self.tool_call_indices.clone();
-                    tools
-                        .detach_turn_with_updates(&mut |origin| {
-                            Box::new(DetachedNestedToolEvents::new(
-                                events.clone(),
-                                indices.clone(),
-                                origin,
-                            ))
-                        })
-                        .await;
-                }
+                self.detach_turn_cells().await;
                 self.record_transport();
                 let usage = self.stats.turn_usage();
                 record_turn_usage(&tracing::Span::current(), &usage);
@@ -314,9 +300,7 @@ where
                 }))
             }
             Ok(ModelTaskOutcome::Cancelled) => {
-                if let Some(tools) = &self.active_tools {
-                    tools.cancel_turn().await;
-                }
+                self.terminate_turn_cells().await;
                 let checkpoint = self.commit_cancelled_checkpoint().await?;
                 let error = NanocodexError::TurnCancelled;
                 let message = error.to_string();
@@ -349,6 +333,9 @@ where
                     self.force_compaction = true;
                 }
                 let checkpoint = if self.active_tool_calls.is_empty() {
+                    // The failed model request may follow a yielded cell. Keep
+                    // it running, as after a completed turn, and report it.
+                    self.detach_turn_cells().await;
                     self.finish_active_tool_batch_wall();
                     // Retain client-authored state at its safe boundary, but
                     // drop the transport checkpoint: the provider may have
@@ -374,9 +361,7 @@ where
                     // flight. Stop their retained runtime work, preserve every
                     // completed slot, and synthesize outputs for only the
                     // unfinished calls before committing the failure boundary.
-                    if let Some(tools) = &self.active_tools {
-                        tools.cancel_turn().await;
-                    }
+                    self.terminate_turn_cells().await;
                     Some(self.commit_interrupted_checkpoint()?)
                 };
                 let message = error.to_string();
@@ -391,6 +376,40 @@ where
                 }
             }
         }
+    }
+
+    /// Leaves cells this turn did not finish running and relays their nested
+    /// starts and completions, so every started call reaches a terminal result
+    /// after the turn ends. A later wait takes over without repeating updates.
+    async fn detach_turn_cells(&mut self) {
+        let Some(tools) = &self.active_tools else {
+            return;
+        };
+        let events = self.events.clone();
+        let indices = self.tool_call_indices.clone();
+        tools
+            .detach_turn_with_updates(&mut |origin| {
+                Box::new(DetachedNestedToolEvents::new(
+                    events.clone(),
+                    indices.clone(),
+                    origin,
+                ))
+            })
+            .await;
+    }
+
+    /// Terminates this turn's cells and reports nested calls they leave
+    /// unfinished, including starts emitted before an earlier yield.
+    async fn terminate_turn_cells(&mut self) {
+        let Some(tools) = &self.active_tools else {
+            return;
+        };
+        let mut observer = TurnTeardownEvents::new(
+            &self.events,
+            &self.tool_call_indices,
+            &self.active_tool_calls,
+        );
+        tools.cancel_turn_with_updates(&mut observer).await;
     }
 
     pub(crate) fn emit_terminal(&self, status: &'static str) -> Result<()> {

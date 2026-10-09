@@ -142,6 +142,10 @@ impl Run {
         }
         let agent_shutdown = handle.shutdown().await;
         drop(handle);
+        // Shutdown terminates Code Mode cells a turn left running. Their nested
+        // calls report terminal results after the turn's terminal event; write
+        // them so every started call in the JSONL is closed.
+        let late_events = write_settled_jsonl(&mut events, &mut stdout).await;
         drop(events);
         let browser_shutdown_result = if let Some(browser) = configured.browser {
             browser.shutdown().await
@@ -160,6 +164,7 @@ impl Run {
         };
         run_result?;
         agent_shutdown?;
+        late_events?;
         browser_shutdown_result?;
         vm_shutdown_result?;
         shutdown_result
@@ -232,6 +237,20 @@ async fn write_turn_jsonl(
     Err(eyre!(
         "agent event stream closed before the turn emitted a terminal event"
     ))
+}
+
+/// Writes events already emitted after the last turn without waiting for more.
+async fn write_settled_jsonl(
+    events: &mut AgentEvents,
+    output: &mut (impl AsyncWrite + Unpin),
+) -> Result<()> {
+    while let Some(event) = events.try_recv_timed() {
+        let mut record = serde_json::to_vec(&event.event)?;
+        record.push(b'\n');
+        output.write_all(&record).await?;
+    }
+    output.flush().await?;
+    Ok(())
 }
 
 #[cfg(test)]
