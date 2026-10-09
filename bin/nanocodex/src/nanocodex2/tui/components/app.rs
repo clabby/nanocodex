@@ -141,6 +141,11 @@ pub(crate) enum AppEvent {
     ForkReady {
         pane: PaneId,
     },
+    /// A feature steers the pane's running turn.
+    FeatureSteer {
+        pane: PaneId,
+        prompt: crate::nanocodex2::tui::prompt::Submission,
+    },
     ForkFailed {
         pane: PaneId,
         error: String,
@@ -462,6 +467,9 @@ impl AppNode {
             }
             AppEvent::SteerFailed { pane, id } => {
                 self.update_root(pane, RootEvent::SteerFailed { id })
+            }
+            AppEvent::FeatureSteer { pane, prompt } => {
+                self.update_root(pane, RootEvent::FeatureSteer(prompt))
             }
             AppEvent::ForkReady { pane } => {
                 let ready = self.update_root(pane, RootEvent::ForkReady);

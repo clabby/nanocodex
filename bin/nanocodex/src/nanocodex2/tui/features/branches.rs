@@ -141,11 +141,18 @@ impl Branches {
         let registry = Arc::clone(&self.registry);
         let host = cx.host.clone();
         let workspace = cx.workspace.to_path_buf();
+        // Claude sessions have no Codex rollout; their prompts come from the journal.
+        let claude = rollout
+            .is_none()
+            .then(|| cx.agent.map(|agent| agent.session_id().to_owned()))
+            .flatten();
         // Reading the transcript touches the disk; keep it off the input loop.
         tokio::spawn(async move {
             let thread = rollout.as_ref().map(|(thread, _)| thread.clone());
-            let prompts = tokio::task::spawn_blocking(move || {
-                thread.map(|thread| prompts(&thread)).unwrap_or_default()
+            let prompts = tokio::task::spawn_blocking(move || match (thread, claude) {
+                (Some(thread), _) => prompts(&thread),
+                (None, Some(session)) => claude_prompts(&session),
+                (None, None) => Vec::new(),
             })
             .await
             .unwrap_or_default();
@@ -210,6 +217,25 @@ fn ready<'a>(cx: &'a FeatureContext<'_>) -> Result<&'a LocalLaunch, String> {
         .ok_or_else(|| "branches need a local agent (run ncl)".to_owned())
 }
 
+/// User prompts of a Claude session journal, oldest first.
+fn claude_prompts(session: &str) -> Vec<String> {
+    let Ok(home) = crate::config::default_codex_home() else {
+        return Vec::new();
+    };
+    crate::native_sessions::load(&home, session)
+        .map(|session| {
+            session
+                .transcript
+                .iter()
+                .filter_map(|item| match item {
+                    RolloutTranscriptItem::User(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// User prompts of a saved Codex thread, oldest first.
 fn prompts(thread: &str) -> Vec<String> {
     let Ok(home) = crate::config::default_codex_home() else {
@@ -230,10 +256,12 @@ fn prompts(thread: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Reopens the branch `thread` in place. Branch threads are known Codex threads,
-/// so the relaunch needs no disk access here; the connection task loads it.
+/// Reopens the branch `thread` in place without disk access here; the connection
+/// task finds the Codex thread or Claude session and loads it.
 pub(crate) fn switch(launch: &LocalLaunch, thread: &str) {
-    let launch = sessions::codex_launch(launch, sessions::Resume::Codex(thread.to_owned()));
+    // Branches of a Claude conversation are Claude sessions; resolve the harness
+    // in the connection task.
+    let launch = sessions::codex_launch(launch, sessions::Resume::Session(thread.to_owned()));
     BRANCH_HOST.with_host(|host| host.send(FeatureUpdate::Relaunch(Box::new(launch))));
 }
 
