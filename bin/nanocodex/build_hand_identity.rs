@@ -88,10 +88,12 @@ impl Hasher {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(64), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 fn env(name: &str) -> Option<String> {
@@ -102,13 +104,16 @@ fn env(name: &str) -> Option<String> {
 /// Computes the identity and exports it as NANOCODEX_HAND_IDENTITY. Call after
 /// the embedded payloads have been staged in OUT_DIR.
 pub fn emit() -> Result<(), Box<dyn Error>> {
-    let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR missing")?);
+    let manifest_dir =
+        PathBuf::from(env("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR missing")?);
     let out_dir = PathBuf::from(env("OUT_DIR").ok_or("OUT_DIR missing")?);
     let root = manifest_dir
         .join("../..")
         .canonicalize()
         .map_err(|error| format!("cannot resolve the workspace root: {error}"))?;
-    let mut hasher = Hasher { records: BTreeMap::new() };
+    let mut hasher = Hasher {
+        records: BTreeMap::new(),
+    };
     hasher.record("schema", SCHEMA, SCHEMA);
 
     let manifest_path = manifest_dir.join(MANIFEST);
@@ -119,7 +124,9 @@ pub fn emit() -> Result<(), Box<dyn Error>> {
     let optional_inputs = string_list(&manifest, "optional_inputs")?;
     for path in &excluded {
         if !root.join(path).exists() {
-            return Err(format!("{MANIFEST} excludes missing path {path}; update the manifest").into());
+            return Err(
+                format!("{MANIFEST} excludes missing path {path}; update the manifest").into(),
+            );
         }
     }
 
@@ -153,7 +160,13 @@ pub fn emit() -> Result<(), Box<dyn Error>> {
         let path = root.join(input);
         println!("cargo:rerun-if-changed={}", path.display());
         if path.is_dir() {
-            hash_tree(&root, Path::new(input), &BTreeSet::new(), &excluded, &mut hasher)?;
+            hash_tree(
+                &root,
+                Path::new(input),
+                &BTreeSet::new(),
+                &excluded,
+                &mut hasher,
+            )?;
         } else if path.is_file() {
             hasher.record("file", input.clone(), fs::read(&path)?);
         } else if inputs.contains(input) {
@@ -187,7 +200,11 @@ pub fn emit() -> Result<(), Box<dyn Error>> {
     }
     // build_version.rs derives the nightly channel (IS_NIGHTLY) from TAG_NAME.
     let nightly = env("TAG_NAME").is_some_and(|tag| tag.contains("nightly"));
-    hasher.record("env", "release channel", if nightly { "nightly" } else { "other" });
+    hasher.record(
+        "env",
+        "release channel",
+        if nightly { "nightly" } else { "other" },
+    );
     for (name, value) in std::env::vars() {
         if name.starts_with("CARGO_CFG_") || name.starts_with("CARGO_FEATURE_") {
             hasher.record("env", name, value);
@@ -201,7 +218,11 @@ pub fn emit() -> Result<(), Box<dyn Error>> {
         fs::read(out_dir.join("linux-screen-helpers.tar.gz"))?,
     );
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        hasher.record("tool", "xcrun swiftc --version", command_output("xcrun", &["swiftc", "--version"])?);
+        hasher.record(
+            "tool",
+            "xcrun swiftc --version",
+            command_output("xcrun", &["swiftc", "--version"])?,
+        );
     }
 
     let identity = hasher.finish(&out_dir.join("hand-identity-inputs.tsv"))?;
@@ -243,22 +264,35 @@ fn lock_closure(lock: &toml::Table) -> Result<BTreeMap<String, toml::Value>, Box
         .and_then(toml::Value::as_array)
         .ok_or("Cargo.lock has no packages")?;
     let field = |package: &toml::Value, key: &str| {
-        package.get(key).and_then(toml::Value::as_str).unwrap_or("").to_owned()
+        package
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .unwrap_or("")
+            .to_owned()
     };
     let key = |package: &toml::Value| {
-        format!("{} {} {}", field(package, "name"), field(package, "version"), field(package, "source"))
+        format!(
+            "{} {} {}",
+            field(package, "name"),
+            field(package, "version"),
+            field(package, "source")
+        )
     };
     let resolve = |reference: &str| -> Result<&toml::Value, Box<dyn Error>> {
         let mut parts = reference.splitn(3, ' ');
         let name = parts.next().unwrap_or("");
         let version = parts.next();
-        let source = parts.next().map(|source| source.trim_start_matches('(').trim_end_matches(')'));
+        let source = parts
+            .next()
+            .map(|source| source.trim_start_matches('(').trim_end_matches(')'));
         let mut matches = packages.iter().filter(|package| {
             field(package, "name") == name
                 && version.is_none_or(|version| field(package, "version") == version)
                 && source.is_none_or(|source| field(package, "source") == source)
         });
-        let found = matches.next().ok_or_else(|| format!("Cargo.lock dependency {reference} is unresolved"))?;
+        let found = matches
+            .next()
+            .ok_or_else(|| format!("Cargo.lock dependency {reference} is unresolved"))?;
         if matches.next().is_some() {
             return Err(format!("Cargo.lock dependency {reference} is ambiguous").into());
         }
@@ -272,7 +306,9 @@ fn lock_closure(lock: &toml::Table) -> Result<BTreeMap<String, toml::Value>, Box
         }
         if let Some(dependencies) = package.get("dependencies").and_then(toml::Value::as_array) {
             for dependency in dependencies {
-                let reference = dependency.as_str().ok_or("Cargo.lock dependency is not a string")?;
+                let reference = dependency
+                    .as_str()
+                    .ok_or("Cargo.lock dependency is not a string")?;
                 pending.push(resolve(reference)?);
             }
         }
@@ -292,13 +328,24 @@ fn path_package_directories(root: &Path) -> Result<BTreeMap<String, PathBuf>, Bo
             continue;
         }
         let manifest_path = root.join(&directory).join("Cargo.toml");
-        let manifest: toml::Table = toml::from_str(&fs::read_to_string(&manifest_path)
-            .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?)?;
-        if let Some(name) = manifest.get("package").and_then(|package| package.get("name")).and_then(toml::Value::as_str) {
+        let manifest: toml::Table = toml::from_str(
+            &fs::read_to_string(&manifest_path)
+                .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?,
+        )?;
+        if let Some(name) = manifest
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+        {
             if let Some(previous) = packages.insert(name.to_owned(), directory.clone())
                 && previous != directory
             {
-                return Err(format!("path package {name} found at {} and {}", previous.display(), directory.display()).into());
+                return Err(format!(
+                    "path package {name} found at {} and {}",
+                    previous.display(),
+                    directory.display()
+                )
+                .into());
             }
         }
         if let Some(members) = manifest
@@ -308,7 +355,10 @@ fn path_package_directories(root: &Path) -> Result<BTreeMap<String, PathBuf>, Bo
         {
             for member in members.iter().filter_map(toml::Value::as_str) {
                 if member.contains(['*', '?', '[']) {
-                    return Err(format!("workspace member glob {member} is unsupported by the Hand identity").into());
+                    return Err(format!(
+                        "workspace member glob {member} is unsupported by the Hand identity"
+                    )
+                    .into());
                 }
                 pending.push(directory.join(member));
             }
@@ -375,13 +425,15 @@ fn hash_tree(
 ) -> Result<(), Box<dyn Error>> {
     let mut pending = vec![directory.to_path_buf()];
     while let Some(current) = pending.pop() {
-        let mut entries = fs::read_dir(root.join(&current))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut entries = fs::read_dir(root.join(&current))?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let relative = current.join(entry.file_name());
             let name = relative_name(&relative);
-            if excluded.iter().any(|path| name == *path || name.starts_with(&format!("{path}/"))) {
+            if excluded
+                .iter()
+                .any(|path| name == *path || name.starts_with(&format!("{path}/")))
+            {
                 continue;
             }
             let kind = entry.file_type()?;
@@ -400,7 +452,11 @@ fn hash_tree(
                     return Err(format!("Hand identity source symlink {name} must resolve to a file inside the workspace").into());
                 }
                 println!("cargo:rerun-if-changed={}", target.display());
-                hasher.record("symlink-target", name.clone(), relative_name(target.strip_prefix(root)?));
+                hasher.record(
+                    "symlink-target",
+                    name.clone(),
+                    relative_name(target.strip_prefix(root)?),
+                );
                 hasher.record("file", name, fs::read(target)?);
             } else {
                 hasher.record("file", name, fs::read(entry.path())?);

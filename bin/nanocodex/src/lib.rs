@@ -253,7 +253,9 @@ pub fn cli_main() -> ExitCode {
         if hand_executable::forwarded() {
             // The Hand forwarded this here, so it does not serve it either;
             // never bounce it back.
-            eprintln!("Error: this command is served by the Nanocodex Hand executable, which did not accept it");
+            eprintln!(
+                "Error: this command is served by the Nanocodex Hand executable, which did not accept it"
+            );
             return ExitCode::FAILURE;
         }
         return match hand_executable::hand_binary() {

@@ -454,7 +454,9 @@ impl Composer {
                 self.history.detach();
                 // Only resolve image paths after routing to the composer:
                 // pasted paths in search dialogs must remain ordinary text.
-                if let Some((data, caption)) = crate::nanocodex2::tui::clipboard::pasted_image_data_url(&text) {
+                if let Some((data, caption)) =
+                    crate::nanocodex2::tui::clipboard::pasted_image_data_url(&text)
+                {
                     self.insert_image(data);
                     self.insert(caption);
                 } else {
