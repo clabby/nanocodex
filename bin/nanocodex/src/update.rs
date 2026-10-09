@@ -596,6 +596,7 @@ pub(crate) fn lock_service_operation() -> Result<fs::File> {
 
 /// Prefer the verified companion from the active Windows update bundle. A
 /// freshly installed CLI has no managed bundle yet and uses its signed sibling.
+#[cfg(target_os = "windows")]
 pub(crate) fn active_windows_hand_binary() -> Result<Option<PathBuf>> {
     if !cfg!(target_os = "windows") {
         return Ok(None);
