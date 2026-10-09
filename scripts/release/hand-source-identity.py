@@ -191,8 +191,10 @@ def compute(args):
         records.add("payload", name, path.read_bytes())
         payloads[name] = str(path)
     identity = records.digest()
+    # Cargo.lock is covered by the closure's lock records rather than its bytes,
+    # so lockfile changes outside the Hand closure keep the identity.
     report = {"schema": SCHEMA, "identity": identity, "root": str(root), "package": hands[0]["name"],
-              "files": sorted(files), "payloads": payloads,
+              "files": sorted(files | {"Cargo.lock"}), "payloads": payloads,
               "records": [[k, n, hashlib.sha256(v).hexdigest()] for (k, n), v in sorted(records.items.items())]}
     Path(args.report).write_text(json.dumps(report, indent=1) + "\n")
     print(identity)
