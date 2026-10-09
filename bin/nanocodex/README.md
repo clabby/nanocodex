@@ -749,12 +749,18 @@ problems. Repeating `hand install` leaves a connected service running.
 `nanocodex update --nightly --restart-hand` stages a complete verified release, switches the
 installed Hand service, waits for that exact executable to publish a connected
 catalog, and then activates the CLI. A failed Hand startup restores the previous
-service and leaves the CLI unchanged. An explicit update restarts the Hand and
-its VM host; finish active work first. For a matching local build, use
-`nanocodex update --path PATH_TO_NANOCODEX --hand-binary PATH_TO_NANOCODEX2`.
-Both local binaries must report the same full `Commit SHA` in `--version`.
-Build both packages from the same checkout; a missing or mismatched revision
-stops installation before candidate files are written.
+service and leaves the CLI unchanged. When the Hand changes, an explicit update
+restarts it and its VM host; finish active work first. A release whose Hand
+bytes or reported `Hand Identity` match the running Hand (or that carries no
+Hand) activates only the CLI and leaves the Hand service untouched.
+
+For a local build, run `cargo build -p nanocodex-bin --bins` and use
+`nanocodex update --path target/<profile>/nanocodex`; the `nanocodex-hand` built
+beside it is used automatically, or pass `--hand-binary PATH`. The CLI and Hand
+must report the same `Hand Identity` in `--version` (builds that predate Hand
+identities must report the same full `Commit SHA`); a mismatch stops
+installation before candidate files are written. A CLI without a Hand beside
+it keeps the installed Hand.
 
 Set `NANOCODEX_STARTUP_TIMING=1` on either CLI to emit content-free JSON phase
 timings on stderr. These distinguish the first frame, local computer discovery,
@@ -768,12 +774,14 @@ nanocodex update --apply --restart-hand
 nanocodex update --auto disable
 ```
 
-Automatic checks run hourly. When a Hand service is installed, they download and verify
-a pending release without starting or restarting the Hand or switching the active
-CLI. `hand start` applies a pending update while starting a stopped service, and
+Automatic checks run hourly. A release whose Hand is unchanged activates the new
+CLI without touching the Hand service. When the installed Hand would change, they
+download and verify the release and stage it without starting or restarting the
+Hand or switching the active CLI. `hand start` applies a pending update while starting a stopped service, and
 keeps the candidate running only after account reconnection succeeds. To update a running
 Hand, explicitly use `nanocodex update --apply --restart-hand`; this restarts its
-VM host as well. Ordinary updates defer activation when a Hand service is installed. Automatic
+VM host as well. Ordinary updates defer activation only when they would change an
+installed Hand. Automatic
 checks use the stable channel unless enabled with `--nightly`. Interrupted
 activation retains a recovery record; `nanocodex hand recover` restores the
 previous service and CLI, or finishes cleanup of an already committed update.
