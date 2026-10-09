@@ -37,19 +37,23 @@ use crate::nanocodex2::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Resume {
     Codex(String),
-    /// A branch started by editing an earlier prompt: reopen `thread` (None: a
-    /// fresh session) and submit `prompt` once it connects.
+    /// A branch started by editing an earlier prompt: reopen `thread`, or copy
+    /// `fork` into a new thread first (None for both: a fresh session), and submit
+    /// `prompt` once it connects.
     Branch {
         thread: Option<String>,
+        fork: Option<Fork>,
         prompt: String,
     },
 }
 
-/// The harness that owns a saved session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Harness {
-    Codex,
-    Claude,
+/// Where a branch copies its history from: the source rollout through
+/// `turns` completed turns, rooted at `workspace`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Fork {
+    pub(crate) source: PathBuf,
+    pub(crate) turns: usize,
+    pub(crate) workspace: PathBuf,
 }
 
 impl Harness {
@@ -250,6 +254,20 @@ pub(crate) fn relaunch(base: &LocalLaunch, id: &str) -> Result<LocalLaunch> {
     })
 }
 
+/// `base` relaunched against a known Codex thread or branch without touching the
+/// disk; the connection task loads (and validates) it.
+pub(crate) fn codex_launch(base: &LocalLaunch, resume: Resume) -> LocalLaunch {
+    let mut args = base.args.clone().for_session_switch();
+    args.resume_with_harness(nanocodex::HarnessFamily::Codex);
+    LocalLaunch {
+        args,
+        vm: base.vm.clone(),
+        replaceable: false,
+        initial_prompt: None,
+        resume: Some(resume),
+    }
+}
+
 /// Returns `base` relaunched as a fresh session (/clear).
 pub(crate) fn fresh(base: &LocalLaunch) -> LocalLaunch {
     let mut args = base.args.clone();
@@ -271,52 +289,77 @@ pub(crate) struct Built {
     pub(crate) transcript: Vec<RolloutTranscriptItem>,
 }
 
-/// Builds the local agent for `launch`, reopening its saved session if any.
+/// Builds the local agent for `launch`, reopening its saved session if any. File work
+/// (branch copies, rollout materialization) runs on the blocking pool.
 pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
-    match &launch.resume {
-        Some(Resume::Codex(thread_id) | Resume::Branch { thread: Some(thread_id), .. }) => {
+    let thread = match &launch.resume {
+        Some(Resume::Codex(thread) | Resume::Branch { thread: Some(thread), .. }) => Some(thread.clone()),
+        Some(Resume::Branch {
+            thread: None,
+            fork: Some(fork),
+            ..
+        }) => {
+            let fork = fork.clone();
+            let thread = tokio::task::spawn_blocking(move || -> Result<String> {
+                let home = crate::config::default_codex_home()?;
+                crate::rollout_fork::fork(
+                    &fork.source,
+                    &crate::rollout_fork::Point::Count(fork.turns),
+                    &home,
+                    &fork.workspace,
+                )
+            })
+            .await
+            .wrap_err("branch copy task failed")?
+            .wrap_err("could not start a branch")?;
+            Some(thread)
+        }
+        _ => None,
+    };
+    if let Some(thread_id) = thread {
+        let session = tokio::task::spawn_blocking(move || -> Result<_> {
             let home = crate::config::default_codex_home()?;
-            let session = RolloutConfig::new(&home)
-                .load_session(thread_id)
-                .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?;
-            let workspace = PathBuf::from(session.workspace());
-            let transcript = session.transcript().to_vec();
-            let model = nanocodex::HarnessModel::from(session.model());
-            let mut agent = launch
-                .args
-                .clone()
-                .build_resumed_tui(session, launch.vm.clone())
-                .await
-                .wrap_err("could not resume the local agent")?;
-            // The resumed thread keeps its model; the footer and picker show it.
-            agent.model = model;
-            Ok(Built {
-                agent,
-                workspace,
-                transcript,
-            })
-        }
-        None | Some(Resume::Branch { thread: None, .. }) => {
-            let workspace = launch.args.cwd().to_path_buf();
-            let transcript = launch
-                .args
-                .claude_resume
-                .as_ref()
-                .map(|session| session.transcript.clone())
-                .unwrap_or_default();
-            let agent = launch
-                .args
-                .clone()
-                .build_tui(launch.vm.clone())
-                .await
-                .wrap_err("could not start the local agent")?;
-            Ok(Built {
-                agent,
-                workspace,
-                transcript,
-            })
-        }
+            RolloutConfig::new(&home)
+                .load_session(&thread_id)
+                .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))
+        })
+        .await
+        .wrap_err("thread load task failed")??;
+        let workspace = PathBuf::from(session.workspace());
+        let transcript = session.transcript().to_vec();
+        let model = nanocodex::HarnessModel::from(session.model());
+        let mut agent = launch
+            .args
+            .clone()
+            .build_resumed_tui(session, launch.vm.clone())
+            .await
+            .wrap_err("could not resume the local agent")?;
+        // The resumed thread keeps its model; the footer and picker show it.
+        agent.model = model;
+        return Ok(Built {
+            agent,
+            workspace,
+            transcript,
+        });
     }
+    let workspace = launch.args.cwd().to_path_buf();
+    let transcript = launch
+        .args
+        .claude_resume
+        .as_ref()
+        .map(|session| session.transcript.clone())
+        .unwrap_or_default();
+    let agent = launch
+        .args
+        .clone()
+        .build_tui(launch.vm.clone())
+        .await
+        .wrap_err("could not start the local agent")?;
+    Ok(Built {
+        agent,
+        workspace,
+        transcript,
+    })
 }
 
 /// The visible history of a resumed session as managed history events, so the

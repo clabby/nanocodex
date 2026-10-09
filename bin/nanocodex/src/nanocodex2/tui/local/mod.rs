@@ -79,11 +79,34 @@ impl super::DriverRuntime {
         let Some(local) = self.local.as_mut() else {
             return Err("no local session".to_owned());
         };
-        let launch = match session {
-            Some(id) => sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?,
-            None => sessions::fresh(&local.launch),
+        let Some(id) = session.map(str::to_owned) else {
+            let launch = sessions::fresh(&local.launch);
+            return self.local_switch(purpose, launch);
         };
-        self.local_switch(purpose, launch)
+        // Finding and validating the saved session reads the disk: do it in the task.
+        let connecting = local.connect_with(move |base| {
+            sessions::relaunch(&base, &id).map_err(|error| format!("{error:#}"))
+        });
+        Ok(self.spawn_local_connection(purpose, connecting))
+    }
+
+    fn spawn_local_connection(
+        &mut self,
+        purpose: super::ConnectionPurpose,
+        connecting: impl std::future::Future<Output = Result<LocalConnection, String>> + Send + 'static,
+    ) -> tokio::task::AbortHandle {
+        self.connection.spawn(async move {
+            super::ConnectionResult::Agent {
+                purpose,
+                result: connecting
+                    .await
+                    .map(LocalConnection::into_connected)
+                    .map_err(|error| super::ConnectionFailure {
+                        error: nanocodex_managed::ManagedError::Configuration(error),
+                        retry: super::RetryTarget::Default,
+                    }),
+            }
+        })
     }
 
     /// Replaces the local agent with one built from `launch` (branch switch/edit).
@@ -97,18 +120,7 @@ impl super::DriverRuntime {
         };
         local.launch = launch;
         let connecting = local.connect();
-        Ok(self.connection.spawn(async move {
-            super::ConnectionResult::Agent {
-                purpose,
-                result: connecting
-                    .await
-                    .map(LocalConnection::into_connected)
-                    .map_err(|error| super::ConnectionFailure {
-                        error: nanocodex_managed::ManagedError::Configuration(error),
-                        retry: super::RetryTarget::Default,
-                    }),
-            }
-        }))
+        Ok(self.spawn_local_connection(purpose, connecting))
     }
 }
 
@@ -130,10 +142,23 @@ impl LocalState {
     pub(crate) fn connect(
         &self,
     ) -> impl std::future::Future<Output = Result<LocalConnection, String>> + Send + 'static {
-        let launch = self.launch.clone();
+        self.connect_with(Ok)
+    }
+
+    /// Like [`Self::connect`], but first derives the launch from the current one with
+    /// `prepare` on the blocking pool (session lookups read the disk). The adopted
+    /// backend's launch becomes the current one.
+    pub(crate) fn connect_with(
+        &self,
+        prepare: impl FnOnce(LocalLaunch) -> Result<LocalLaunch, String> + Send + 'static,
+    ) -> impl std::future::Future<Output = Result<LocalConnection, String>> + Send + 'static {
+        let base = self.launch.clone();
         let slot = Arc::clone(&self.slot);
         let submissions = self.submissions.clone();
         async move {
+            let launch = tokio::task::spawn_blocking(move || prepare(base))
+                .await
+                .map_err(|error| format!("session lookup failed: {error}"))??;
             let (backend, agent_events) = LocalBackend::build(launch)
                 .await
                 .map_err(|error| format!("{error:#}"))?;
