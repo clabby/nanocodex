@@ -690,8 +690,13 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
     const HELD_PARTIAL: &str = "HELD_PARTIAL_OUTPUT";
     const AFTER_PROMPT: &str = "prompt after cancelling";
     const AFTER_REPLY: &str = "AFTER_CANCEL_REPLY";
-    // Generation 2 is held open until the client cancels or sends again.
-    const HELD_GENERATION: usize = 2;
+    const STEER_KEYS: &str = "steer typed while the reply is held";
+    const STEER_CONTROL: &str = "steer sent over native control";
+    const STEER_REPLY: &str = "STEERED_FOLLOWUP_REPLY";
+    // Generation 2 is held until steering arrives and the fixture releases it;
+    // generation 4 is held until the client cancels or sends again.
+    const STEER_HELD: usize = 2;
+    const CANCEL_HELD: usize = 4;
     let artifact = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../output/local-tui-journey")
         .join(uuid::Uuid::new_v4().to_string());
@@ -703,8 +708,10 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
     let endpoint = format!("ws://{}", responses.local_addr().unwrap());
     let generations = Arc::new(Mutex::new(Vec::<Value>::new()));
     let recorded = generations.clone();
-    let released = Arc::new(Mutex::new(None::<String>));
+    let released = Arc::new(Mutex::new(Vec::<Value>::new()));
     let release_record = released.clone();
+    let release_steer = Arc::new(tokio::sync::Notify::new());
+    let steer_release = release_steer.clone();
     // Every connection and frame, so a silent stall shows whether the agent
     // dialed the provider, warmed up, or never generated.
     let observed = Arc::new(Mutex::new(json!({"connections":0,"warmups":0,"frames":[]})));
@@ -713,6 +720,7 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
         while let Ok((stream, _)) = responses.accept().await {
             let recorded = recorded.clone();
             let release_record = release_record.clone();
+            let steer_release = steer_release.clone();
             let observe = observe.clone();
             {
                 let mut observed = observe.lock().unwrap();
@@ -750,7 +758,7 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
                         recorded.push(request.clone());
                         recorded.len() - 1
                     });
-                    if generation == Some(HELD_GENERATION) {
+                    if let Some(held @ (STEER_HELD | CANCEL_HELD)) = generation {
                         for event in [
                             json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_held","role":"assistant","content":[]}}),
                             json!({"type":"response.output_text.delta","output_index":0,"delta":HELD_PARTIAL}),
@@ -763,11 +771,41 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
                                 return;
                             }
                         }
-                        // Never complete: record how the client released the stream.
-                        let next = socket.next().await;
+                        // Only the test releases the steering hold; otherwise
+                        // record how the client released the stream.
+                        let next = tokio::select! {
+                            () = steer_release.notified(), if held == STEER_HELD => None,
+                            next = socket.next() => Some(next),
+                        };
+                        let Some(next) = next else {
+                            release_record
+                                .lock()
+                                .unwrap()
+                                .push(json!({"generation":held,"released":"fixture"}));
+                            let item = json!({"type":"message","id":"msg_held","role":"assistant","status":"completed",
+                                "content":[{"type":"output_text","text":HELD_PARTIAL,"annotations":[]}]});
+                            for event in [
+                                json!({"type":"response.output_item.done","output_index":0,"item":item}),
+                                json!({"type":"response.completed","response":{"id":"resp_held","status":"completed","output":[item],
+                                    "usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,
+                                        "output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}}),
+                            ] {
+                                if socket
+                                    .send(Frame::Text(event.to_string().into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            continue;
+                        };
                         let closed = !matches!(next, Some(Ok(Frame::Text(_))));
-                        *release_record.lock().unwrap() =
-                            Some(if closed { "closed" } else { "next_request" }.to_owned());
+                        release_record
+                            .lock()
+                            .unwrap()
+                            .push(json!({"generation":held,
+                            "released":if closed { "closed" } else { "next_request" }}));
                         if closed {
                             return;
                         }
@@ -777,6 +815,7 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
                     let reply = match generation {
                         Some(0) => REPLY,
                         Some(1) => SETTINGS_REPLY,
+                        Some(3) => STEER_REPLY,
                         _ => AFTER_REPLY,
                     };
                     let (head, tail) = reply.split_at(reply.len() / 2);
@@ -822,9 +861,6 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
 
     let mut terminal = Terminal::start_with_command(&managed_origin, false, None, |command| {
         command.env_remove("NANOCODEX_API_KEY");
-        // Content-free startup stage timings go to the PTY transcript, so a
-        // stall before admission shows which stage never finished.
-        command.env("NANOCODEX_STARTUP_TIMING", "1");
         command.args([
             "--local",
             "--prompt",
@@ -910,7 +946,7 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
         serde_json::to_vec_pretty(&json!({
             "reproduce":"cargo test --locked -p nanocodex-bin --test nanocodex2_tui_lifecycle terminal_local_prompt_replies_once_and_rejects_account_commands_without_http -- --nocapture",
             "command":["nanocodex","--local","--prompt",PROMPT,"--websocket-url",&endpoint],
-            "expected":["one generation containing the --prompt text","streamed reply visible","native control session idle","/share rejected as needing an account","no model input or managed HTTP for /share","/thinking high and /fast on reach control state and the next Responses request","Esc Esc cancels a held generation and returns to idle","a later prompt completes","Ctrl+C Ctrl+C exits successfully"],
+            "expected":["one generation containing the --prompt text","streamed reply visible","native control session idle","/share rejected as needing an account","no model input or managed HTTP for /share","/thinking high and /fast on reach control state and the next Responses request","Enter and native control steer a held generation; its follow-up request carries both","Esc Esc cancels a held generation and returns to idle","a later prompt completes","Ctrl+C Ctrl+C exits successfully"],
             "boundary":"shipped nanocodex executable in a 160x32 PTY without an account; only the external Responses websocket is a loopback fixture"
         }))
         .unwrap(),
@@ -1095,10 +1131,10 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
             generations[1]
         );
         assert_eq!(
-            generations[1]["reasoning"]["effort"],
+            effective_effort(&generations[1]),
             "high",
             "/thinking high must reach Responses (control state already reported high; first request {}); evidence {}",
-            generations[0]["reasoning"]["effort"],
+            effective_effort(&generations[0]),
             artifact.display()
         );
         assert_eq!(
@@ -1112,7 +1148,8 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
         );
     }
 
-    // Cancel an active generation the provider never completes.
+    // Steer a held generation from the keyboard and over native control; once
+    // the provider completes it, the follow-up request carries both inputs.
     let deadline = std::time::Instant::now() + LIMIT;
     while control_state(&mut lines, &mut write, &mut requests).await["state"]["execution"] != "idle"
     {
@@ -1126,6 +1163,122 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
     terminal.prompt(HELD_PROMPT, "\r");
     let deadline = std::time::Instant::now() + LIMIT;
     while !screen(&terminal).contains(HELD_PARTIAL) {
+        if std::time::Instant::now() > deadline {
+            evidence(&terminal, "steer-held-timeout");
+            panic!(
+                "held generation for steering never streamed; evidence {}",
+                artifact.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let held = control_state(&mut lines, &mut write, &mut requests).await;
+    evidence(&terminal, "steer-held");
+    assert_ne!(
+        held["state"]["execution"], "idle",
+        "held generation must be active: {held}"
+    );
+    terminal.prompt(STEER_KEYS, "\r");
+    let deadline = std::time::Instant::now() + LIMIT;
+    while !screen(&terminal).contains(STEER_KEYS) {
+        if std::time::Instant::now() > deadline {
+            evidence(&terminal, "steer-keys-timeout");
+            panic!(
+                "Enter did not record the typed steer; evidence {}",
+                artifact.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let turn = held["state"]["active_turn_ids"][0].clone();
+    assert!(
+        turn.is_string(),
+        "active turn missing from native control: {held}"
+    );
+    let steered = control_request(
+        &mut lines,
+        &mut write,
+        &mut requests,
+        "steer",
+        json!({"expected_instance_id":registration["instance_id"],"expected_session_id":held["active_session_id"],
+            "expected_active_generation":held["active_generation"],"expected_turn_id":turn,
+            "input":{"text":STEER_CONTROL}}),
+    )
+    .await;
+    std::fs::write(
+        artifact.join("control-steer.json"),
+        serde_json::to_vec_pretty(&steered).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        steered["status"],
+        "accepted",
+        "native control steer: {steered}; evidence {}",
+        artifact.display()
+    );
+    assert_eq!(
+        generations.lock().unwrap().len(),
+        3,
+        "steering must wait for the held generation; evidence {}",
+        artifact.display()
+    );
+    release_steer.notify_one();
+    let deadline = std::time::Instant::now() + LIMIT;
+    while !screen(&terminal).contains(STEER_REPLY) {
+        if std::time::Instant::now() > deadline {
+            evidence(&terminal, "steer-reply-timeout");
+            panic!(
+                "steered follow-up never answered; evidence {}",
+                artifact.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    evidence(&terminal, "steer-reply");
+    {
+        let generations = generations.lock().unwrap();
+        assert_eq!(
+            generations.len(),
+            4,
+            "steering must produce one follow-up request; evidence {}",
+            artifact.display()
+        );
+        let followup = generations[3].to_string();
+        assert!(
+            followup.contains(STEER_KEYS),
+            "typed steer missing from follow-up: {followup}"
+        );
+        assert!(
+            followup.contains(STEER_CONTROL),
+            "native control steer missing from follow-up: {followup}"
+        );
+        assert_eq!(
+            followup.matches(STEER_KEYS).count(),
+            1,
+            "typed steer duplicated: {followup}"
+        );
+        assert_eq!(
+            followup.matches(STEER_CONTROL).count(),
+            1,
+            "control steer duplicated: {followup}"
+        );
+    }
+
+    // Cancel an active generation the provider never completes.
+    let deadline = std::time::Instant::now() + LIMIT;
+    while control_state(&mut lines, &mut write, &mut requests).await["state"]["execution"] != "idle"
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "steered turn never settled; evidence {}",
+            artifact.display()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    terminal.prompt(HELD_PROMPT, "\r");
+    let deadline = std::time::Instant::now() + LIMIT;
+    while generations.lock().unwrap().len() < CANCEL_HELD + 1 {
         if std::time::Instant::now() > deadline {
             evidence(&terminal, "held-timeout");
             panic!(
@@ -1167,7 +1320,7 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
     evidence(&terminal, "cancelled");
     assert_eq!(
         generations.lock().unwrap().len(),
-        3,
+        5,
         "cancel must not resubmit; evidence {}",
         artifact.display()
     );
@@ -1189,16 +1342,21 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
     evidence(&terminal, "after-cancel");
     {
         let generations = generations.lock().unwrap();
-        assert_eq!(generations.len(), 4, "evidence {}", artifact.display());
+        assert_eq!(generations.len(), 6, "evidence {}", artifact.display());
         assert!(
-            generations[3].to_string().contains(AFTER_PROMPT),
+            generations[5].to_string().contains(AFTER_PROMPT),
             "{}",
-            generations[3]
+            generations[5]
         );
     }
     assert!(
-        released.lock().unwrap().is_some(),
-        "the held provider stream was never released"
+        released
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|release| release["generation"] == CANCEL_HELD),
+        "the cancelled provider stream was never released: {:?}",
+        released.lock().unwrap()
     );
     assert!(
         matches!(managed.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
@@ -1237,10 +1395,21 @@ async fn control_state(
     write: &mut tokio::net::unix::OwnedWriteHalf,
     requests: &mut u32,
 ) -> Value {
+    control_request(lines, write, requests, "state.get", json!({})).await
+}
+
+/// Sends one native tui-control request and returns its result.
+async fn control_request(
+    lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    requests: &mut u32,
+    method: &str,
+    params: Value,
+) -> Value {
     use tokio::io::AsyncWriteExt as _;
     *requests += 1;
-    let id = format!("local-journey-state-{requests}");
-    let request = json!({"id":id,"method":"state.get","params":{}});
+    let id = format!("local-journey-{requests}");
+    let request = json!({"id":id,"method":method,"params":params});
     write
         .write_all(format!("{request}\n").as_bytes())
         .await
@@ -1256,6 +1425,24 @@ async fn control_state(
             return frame["result"].clone();
         }
     }
+}
+
+/// The reasoning effort a Responses request asks for. A cache-pinned request
+/// keeps its top-level reasoning and appends a newer configuration_update input
+/// item instead, so the latest update wins.
+fn effective_effort(request: &Value) -> Value {
+    request["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|item| {
+            item["type"] == "configuration_update" && !item["reasoning"]["effort"].is_null()
+        })
+        .map_or_else(
+            || request["reasoning"]["effort"].clone(),
+            |item| item["reasoning"]["effort"].clone(),
+        )
 }
 
 fn prompt_text(input: &Value) -> String {
