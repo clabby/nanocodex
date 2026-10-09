@@ -1,4 +1,4 @@
-//! Harness and model switch before the first prompt (WP1).
+//! Harness and model switch before the first prompt.
 //!
 //! Port of the legacy worker's change_model/ReplaceBackend path: until the
 //! first prompt of a fresh (non-resumed) local session, any /model selection

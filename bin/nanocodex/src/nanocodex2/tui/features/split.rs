@@ -1,6 +1,6 @@
 //! Local /split: hand the open /btw thread to a sibling terminal pane running
 //! `nanocodex resume <thread>` (tmux, Zellij, WezTerm, iTerm, or the platform
-//! terminal). Ported from the legacy TUI's `split_btw`; the terminal detection and
+//! terminal). The terminal detection and
 //! launch commands live in [`super::split_launch`].
 
 use super::{

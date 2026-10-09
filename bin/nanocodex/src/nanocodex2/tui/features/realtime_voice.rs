@@ -1,4 +1,4 @@
-//! Local OpenAI Realtime voice (WP4): /voice [on|off|stop|mute|list|<voice>],
+//! Local OpenAI Realtime voice: /voice [on|off|stop|mute|list|<voice>],
 //! the configurable --voice-mute-key and live captions.
 //!
 //! Port of the legacy worker's control_voice/forward_voice_events. The voice
@@ -97,7 +97,7 @@ impl Feature for RealtimeVoice {
             return KeyOutcome::Consumed;
         }
         if key.code == KeyCode::Esc && self.control.has_active_turn() {
-            // Esc interrupts the coding turn voice started, as in the legacy TUI.
+            // Esc interrupts the coding turn voice started.
             let control = self.control.clone();
             let host = cx.host.clone();
             tokio::spawn(async move {

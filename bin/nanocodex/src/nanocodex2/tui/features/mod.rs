@@ -1,6 +1,6 @@
 //! Feature extension points of the unified TUI.
 //!
-//! Every feature ported from the legacy TUI lives in exactly one file under
+//! Every local feature lives in exactly one file under
 //! this directory and implements [`Feature`]. The driver (`super::run_inner`)
 //! owns one [`Features`] set and calls it at four fixed points:
 //!
@@ -42,7 +42,7 @@ pub(crate) mod harness;
 pub(crate) mod mcp;
 pub(crate) mod realtime_voice;
 pub(crate) mod split;
-// FEATURE-HOOK: wp2 terminal launcher shared with the legacy TUI until WP5.
+// Terminal detection and launch commands for /split.
 mod split_launch;
 
 /// Slash commands whose behaviour belongs to a feature module.

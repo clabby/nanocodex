@@ -1,8 +1,7 @@
-//! Claude host interactions (WP1): AskUserQuestion, ExitPlanMode plan approval
+//! Claude host interactions: AskUserQuestion, ExitPlanMode plan approval
 //! and tool permission asks, shown as a modal [InteractionOverlay].
 //!
-//! Port of the legacy TUI receive/respond loop (legacy tui/mod.rs receive arm and
-//! submit()). One request is shown at a time; the next is received only after
+//! One request is shown at a time; the next is received only after
 //! the current one is answered, cancelled or withdrawn by its producer. While
 //! the overlay is open the Claude scheduler does not fire (overlay_state).
 

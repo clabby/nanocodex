@@ -2,8 +2,7 @@
 //! saved Codex and Claude sessions (`ncl resume [ID] [--from ROLLOUT --at N]`), the
 //! in-TUI /attach picker and the replay of a resumed session's history.
 //!
-//! Ported from the legacy TUI (`tui/resume_picker.rs`, `run_observed`'s
-//! transcript restore) so the unified driver can show and continue local sessions.
+//! The unified driver uses this to show and continue local sessions.
 
 use std::{
     borrow::Cow,
