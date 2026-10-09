@@ -62,7 +62,7 @@ mod service;
 #[allow(dead_code)]
 mod skill;
 #[allow(dead_code, unused_imports)]
-mod tui;
+pub(crate) mod tui;
 mod vault;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),

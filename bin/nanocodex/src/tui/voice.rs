@@ -213,13 +213,7 @@ pub(super) fn parse_key(value: &str) -> Option<(KeyCode, KeyModifiers)> {
         .then_some((KeyCode::Char(character), modifier))
 }
 
-pub(crate) fn validate_key(value: &str) -> Result<String, String> {
-    if value == "none" || parse_key(value).is_some() {
-        Ok(value.to_owned())
-    } else {
-        Err("use ctrl+<character>, alt+<character>, or none".into())
-    }
-}
+pub(crate) use crate::nanocodex2::tui::voice_keys::validate_key;
 
 fn meter(peak: u16) -> String {
     let count = if peak < 512 {

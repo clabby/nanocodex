@@ -154,7 +154,7 @@ pub(crate) struct AgentArgs {
     pub(crate) claude_resume: Option<crate::native_sessions::ResumeSession>,
 
     /// Voice microphone shortcut, or none to use /voice mute only.
-    #[arg(long, env = "NANOCODEX_VOICE_MUTE_KEY", default_value = "ctrl+x", value_parser = crate::tui::voice::validate_key)]
+    #[arg(long, env = "NANOCODEX_VOICE_MUTE_KEY", default_value = "ctrl+x", value_parser = crate::nanocodex2::tui::voice_keys::validate_key)]
     pub(crate) voice_mute_key: String,
 
     /// Animate live voice captions; set false for reduced motion.
@@ -166,7 +166,7 @@ pub(crate) struct AgentArgs {
     /// Ctrl+O cycles through the modes. Hidden keeps only the conversation;
     /// the footer still shows the turn as Working until it ends.
     #[arg(long, env = "NANOCODEX_TOOL_CALLS", value_enum, default_value_t)]
-    pub(crate) tool_calls: crate::tui::ToolCalls,
+    pub(crate) tool_calls: crate::nanocodex2::tui::tool_calls::ToolCalls,
 
     #[command(flatten)]
     auth: AuthArgs,

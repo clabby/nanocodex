@@ -1,0 +1,230 @@
+//! The unified TUI's backend axis.
+//!
+//! One driver (`run_inner`) serves both the managed account session
+//! (`nanocodex`, `nc`, `nanocodex2`) and the local, non-durable agent
+//! (`ncl`, `nanocodex --local`). Every backend difference that users can see is
+//! decided here through [`Capabilities`], so menus, completion, help and command
+//! dispatch hide or reject the same features consistently.
+
+use nanocodex_managed::ManagedClient;
+
+use super::local::agent::LocalBackend;
+
+/// A user-visible feature that exists only on some backends.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum Capability {
+    /// Available on every backend.
+    Always,
+    Share,
+    Sites,
+    Vault,
+    SecureInput,
+    Screen,
+    AutoRoute,
+    Done,
+    Connectors,
+    Bug,
+    /// Managed session list, search and resume (/attach, Ctrl+R picker source).
+    ManagedSessions,
+    /// Managed /btw fork through the account service.
+    ManagedBtw,
+    /// Local /btw fork through the agent handle (WP2).
+    LocalBtw,
+    Reload,
+    Handoff,
+    ReviewDownload,
+    Routing,
+    /// ElevenLabs/managed voice protocol.
+    VoiceManaged,
+    /// OpenAI Realtime voice from the local agent configuration (WP4).
+    VoiceRealtime,
+    Mcp,
+    Branches,
+    CollapseSplit,
+    ClaudeHost,
+    Eval,
+    /// Local session source for the resume picker (WP2).
+    LocalSessions,
+}
+
+/// The feature set of one running backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools, reason = "independent capability flags")]
+pub(crate) struct Capabilities {
+    pub(crate) local: bool,
+    pub(crate) share: bool,
+    pub(crate) sites: bool,
+    pub(crate) vault: bool,
+    pub(crate) secure_input: bool,
+    pub(crate) screen: bool,
+    pub(crate) autoroute: bool,
+    pub(crate) done: bool,
+    pub(crate) connectors: bool,
+    pub(crate) bug: bool,
+    pub(crate) managed_sessions: bool,
+    pub(crate) managed_btw: bool,
+    pub(crate) local_btw: bool,
+    pub(crate) reload: bool,
+    pub(crate) handoff: bool,
+    pub(crate) review_download: bool,
+    pub(crate) routing: bool,
+    pub(crate) voice_managed: bool,
+    pub(crate) voice_realtime: bool,
+    pub(crate) mcp: bool,
+    pub(crate) branches: bool,
+    pub(crate) collapse_split: bool,
+    pub(crate) claude_host: bool,
+    pub(crate) eval: bool,
+    pub(crate) local_sessions: bool,
+}
+
+impl Capabilities {
+    /// The account-managed TUI. Local-only features stay hidden until a
+    /// managed implementation exists.
+    pub(crate) const MANAGED: Self = Self {
+        local: false,
+        share: true,
+        sites: true,
+        vault: true,
+        secure_input: true,
+        screen: true,
+        autoroute: true,
+        done: true,
+        connectors: true,
+        bug: true,
+        managed_sessions: true,
+        managed_btw: true,
+        local_btw: false,
+        reload: true,
+        handoff: true,
+        review_download: true,
+        routing: true,
+        voice_managed: true,
+        voice_realtime: false,
+        mcp: false,
+        branches: false,
+        collapse_split: false,
+        claude_host: false,
+        eval: false,
+        local_sessions: false,
+    };
+
+    /// The local agent TUI before its optional runtime pieces are known.
+    pub(crate) const LOCAL: Self = Self {
+        local: true,
+        share: false,
+        sites: false,
+        vault: false,
+        secure_input: false,
+        screen: false,
+        autoroute: false,
+        done: false,
+        connectors: false,
+        bug: false,
+        managed_sessions: false,
+        managed_btw: false,
+        local_btw: true,
+        reload: false,
+        handoff: false,
+        review_download: false,
+        routing: false,
+        voice_managed: false,
+        voice_realtime: true,
+        mcp: true,
+        branches: true,
+        collapse_split: true,
+        claude_host: true,
+        eval: cfg!(any(
+            all(target_os = "linux", not(target_env = "musl")),
+            all(target_os = "macos", target_arch = "aarch64")
+        )),
+        local_sessions: true,
+    };
+
+    pub(crate) const fn has(self, capability: Capability) -> bool {
+        match capability {
+            Capability::Always => true,
+            Capability::Share => self.share,
+            Capability::Sites => self.sites,
+            Capability::Vault => self.vault,
+            Capability::SecureInput => self.secure_input,
+            Capability::Screen => self.screen,
+            Capability::AutoRoute => self.autoroute,
+            Capability::Done => self.done,
+            Capability::Connectors => self.connectors,
+            Capability::Bug => self.bug,
+            Capability::ManagedSessions => self.managed_sessions,
+            Capability::ManagedBtw => self.managed_btw,
+            Capability::LocalBtw => self.local_btw,
+            Capability::Reload => self.reload,
+            Capability::Handoff => self.handoff,
+            Capability::ReviewDownload => self.review_download,
+            Capability::Routing => self.routing,
+            Capability::VoiceManaged => self.voice_managed,
+            Capability::VoiceRealtime => self.voice_realtime,
+            Capability::Mcp => self.mcp,
+            Capability::Branches => self.branches,
+            Capability::CollapseSplit => self.collapse_split,
+            Capability::ClaudeHost => self.claude_host,
+            Capability::Eval => self.eval,
+            Capability::LocalSessions => self.local_sessions,
+        }
+    }
+
+    /// The error shown when a hidden command is typed anyway.
+    pub(crate) fn unavailable(self, what: &str) -> String {
+        if self.local {
+            format!("{what} needs a Nanocodex account session (run nanocodex)")
+        } else {
+            format!("{what} is available only in the local agent (run ncl)")
+        }
+    }
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self::MANAGED
+    }
+}
+
+/// The agent service behind the unified driver.
+pub(crate) enum Backend {
+    /// A durable account-managed agent reached through the managed API.
+    Managed(ManagedClient),
+    /// A local, in-process agent built from `ncl` flags.
+    Local(Box<LocalBackend>),
+}
+
+impl Backend {
+    pub(crate) fn managed(&self) -> Option<&ManagedClient> {
+        match self {
+            Self::Managed(client) => Some(client),
+            Self::Local(_) => None,
+        }
+    }
+
+    pub(crate) fn local(&self) -> Option<&LocalBackend> {
+        match self {
+            Self::Managed(_) => None,
+            Self::Local(local) => Some(local),
+        }
+    }
+
+    pub(crate) fn local_mut(&mut self) -> Option<&mut LocalBackend> {
+        match self {
+            Self::Managed(_) => None,
+            Self::Local(local) => Some(local),
+        }
+    }
+
+    pub(crate) const fn is_local(&self) -> bool {
+        matches!(self, Self::Local(_))
+    }
+
+    pub(crate) fn capabilities(&self) -> Capabilities {
+        match self {
+            Self::Managed(_) => Capabilities::MANAGED,
+            Self::Local(local) => local.capabilities(),
+        }
+    }
+}
