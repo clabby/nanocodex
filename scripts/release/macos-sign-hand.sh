@@ -41,7 +41,12 @@ bundle_version=${bundle_version%%+*}
 
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/nanocodex-hand-sign.XXXXXX")"
 keychain=""
+existing=()
+search_list_changed=false
 cleanup() {
+  if [[ "$search_list_changed" == true ]]; then
+    security list-keychains -d user -s "${existing[@]}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$keychain" ]]; then
     security delete-keychain "$keychain" >/dev/null 2>&1 || true
   fi
@@ -56,6 +61,14 @@ if [[ -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" ]]; then
   : "${MACOS_DEVELOPER_ID_TEAM_ID:?MACOS_DEVELOPER_ID_TEAM_ID is required with a certificate}"
   team=$MACOS_DEVELOPER_ID_TEAM_ID
   [[ "$team" =~ ^[A-Z0-9]{10}$ ]] || { echo "MACOS_DEVELOPER_ID_TEAM_ID is not a team identifier" >&2; exit 1; }
+  # codesign resolves the certificate chain through the user search list.
+  while IFS= read -r entry; do
+    entry=${entry#"${entry%%[![:space:]]*}"}
+    entry=${entry#\"}
+    entry=${entry%\"}
+    [[ -n "$entry" ]] && existing+=("$entry")
+  done < <(security list-keychains -d user)
+  search_list_changed=true
   keychain="$work/signing.keychain-db"
   keychain_password="$(openssl rand -hex 24)"
   printf '%s' "$MACOS_DEVELOPER_ID_P12_BASE64" | base64 --decode > "$work/identity.p12"
@@ -66,14 +79,6 @@ if [[ -n "${MACOS_DEVELOPER_ID_P12_BASE64:-}" ]]; then
     -P "$MACOS_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
   rm -f "$work/identity.p12"
   security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
-  # codesign resolves the certificate chain through the user search list.
-  existing=()
-  while IFS= read -r entry; do
-    entry=${entry#"${entry%%[![:space:]]*}"}
-    entry=${entry#\"}
-    entry=${entry%\"}
-    [[ -n "$entry" ]] && existing+=("$entry")
-  done < <(security list-keychains -d user)
   security list-keychains -d user -s "$keychain" "${existing[@]}"
   identity="$(security find-identity -v -p codesigning "$keychain" \
     | awk -v team="($team)" 'index($0, "Developer ID Application") && index($0, team) { print $2; exit }')"
