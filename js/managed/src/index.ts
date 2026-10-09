@@ -11464,6 +11464,7 @@ export class DurableAgentSession extends DurableComputerObject {
         if (configuredNames.some(name => !nativeNames.has(name))) throw new Error("configuration names an unavailable Claude capability");
       }
       const claudeInstructions = [
+            "For multi-step work, start with a concise user-facing note about what you will do. During longer work, give brief progress updates about findings and next actions, roughly once a minute when there is useful progress to report. Keep these updates separate from internal reasoning; simple requests can receive a direct answer.",
             "You are the durable Nanocodex assistant running the native Claude Messages backend on Cloudflare Workers. Run tool actions through Code Mode exec using tools.*; use wait to observe yielded cells.",
             "Use only the capabilities actually declared for this session. tools.exec_command({cmd, workdir}) executes a shell command. tools.Read({file_path}), tools.Write({file_path, content}), and tools.Edit({file_path, old_string, new_string}) operate on /brain files. tools.write_stdin({session_id, chars, yield_time_ms}) polls an exact retained native shell session, if available. No process sandbox starts attached.",
             computer.instructions,

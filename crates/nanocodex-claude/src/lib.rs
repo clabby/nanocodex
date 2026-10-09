@@ -1189,6 +1189,19 @@ impl ClaudeClient {
             {
                 betas.push("context-management-2025-06-27");
             }
+            // Display selection needs the same feature negotiation for API-key
+            // and subscription clients; preserve and deduplicate caller betas.
+            const THINKING_UPDATES_BETA: &str = "thinking-display-updates-2026-08-18";
+            if request
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.get("display"))
+                .and_then(Value::as_str)
+                == Some("updates")
+                && !betas.contains(&THINKING_UPDATES_BETA)
+            {
+                betas.push(THINKING_UPDATES_BETA);
+            }
             if request.speed.is_some() && !betas.contains(&FAST_MODE_BETA) {
                 betas.push(FAST_MODE_BETA);
             }
