@@ -11,7 +11,7 @@ import type { VaultFieldResolution } from "./browser-vault-injection";
 import { routeNativeInputDiscovery } from "./native-input-discovery";
 import { receiveManagedPreview, type PreviewBridgeEnv } from "./preview-bridge.ts";
 import { cleanupGmailInbox } from "./gmail-firehose-cleanup";
-import { observeClaudeRelease } from "./claude-lifecycle.mjs";
+import { engineMemoryBytes, observeClaudeRelease } from "./claude-lifecycle.mjs";
 import { mcpPayment } from "nanocodex/tempo";
 import { Claude } from 'nanocodex/worker';
 import { createManagedClaudeTools } from './claude-tools';
@@ -1709,13 +1709,22 @@ function isConnectorConnectionSelection(
   ));
 }
 
+/** Isolate-wide WASM linear memory; absent before the engine initializes. */
+function memoryDimensions(): { wasm_memory_bytes?: number } {
+  try {
+    const bytes = engineMemoryBytes();
+    return bytes === undefined ? {} : { wasm_memory_bytes: bytes };
+  } catch { return {}; }
+}
+
 function isUniqueStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string")
     && new Set(value).size === value.length;
 }
 
 const SAFE_OBSERVATION_FIELDS = new Set([
-  "request_id", "turn_id", "failure_phase", "replay_mode", "replayed", "next_attempt", "max_attempts",
+  "request_id", "turn_id", "failed_turn_id", "interrupted_turns", "retry_source", "reopen_agent",
+  "interrupted", "blocked", "turns", "wasm_memory_bytes", "failure_phase", "replay_mode", "replayed", "next_attempt", "max_attempts",
   "connection_generation", "runtime_generation", "model_call_index", "status_code", "retry_delay_ms", "duration_ms",
   "time_to_first_event_ms", "time_to_first_output_ms", "response_id",
   "opens_new_socket", "server_requested_delay",
@@ -4266,6 +4275,9 @@ export class DurableAgentSession extends DurableComputerObject {
   readonly #turns = new Map<string, Turn>();
   readonly #deliveredCancellationTurnIds = new Set<string>();
   readonly #reopenInterruptedTurnIds = new Set<string>();
+  // Runtime constructions by this object instance. 1 means the first runtime
+  // after the object (re)started; larger values are in-process rebuilds.
+  #agentConstructionCount = 0;
   readonly #eventTurnQueue: string[] = [];
   #eventTurnId?: string;
   readonly #pendingTurnIds = new Set<string>();
@@ -6284,6 +6296,10 @@ export class DurableAgentSession extends DurableComputerObject {
         await this.#scheduleCleanupRetry();
       }
       return;
+    }
+    // A periodic sample precedes any isolate memory reset of owned work.
+    if (this.#agent && this.#turns.size > 0) {
+      this.#observe("managed.memory", { state: "alarm", turns: this.#turns.size, ...memoryDimensions() });
     }
     if (presentationPending(this.ctx.storage)) await this.#sidebarPresentation().flush();
     if (this.#operations.nextAlarm() !== undefined) await this.#operations.drain();
@@ -11711,6 +11727,9 @@ export class DurableAgentSession extends DurableComputerObject {
       throw error;
     }
     this.#logCapacity("agent_constructed", {
+      object_agent_construction: ++this.#agentConstructionCount,
+      object_age_ms: Math.max(0, Date.now() - this.#constructorEnteredAtMs),
+      ...memoryDimensions(),
       account_mcp_refresh_ms: accountMcpRefreshMs,
       discovery_join_ms: roundMilliseconds(discoveryJoinMs),
       credential_binding_ms: roundMilliseconds(credentialBindingMs),
@@ -13131,6 +13150,12 @@ A direct subagent completed after the previous turn ended. Continue the current 
     if (resolution.kind === "retry" && resolution.blockedBy !== undefined) {
       this.#reconcilePendingOperation(resolution.blockedBy);
     }
+    // Retries are otherwise visible only in the durable event log; keep the
+    // reason next to runtime construction and reopen logs.
+    // Retry messages can carry tool or upstream text; log only classified flags.
+    if (resolution.kind === "retry") this.#observe("managed.turn_retry", { turn_id: id, retry_source: source,
+      reopen_agent: resolution.reopenAgent, interrupted: resolution.interrupted === true,
+      blocked: resolution.blockedBy !== undefined, ...memoryDimensions() }, "warn");
     const row = this.#managedTurn(id);
     return this.#commitManagedMessage(id, managedControlTransitionForResolution(
       id,
@@ -14002,6 +14027,9 @@ A direct subagent completed after the previous turn ended. Continue the current 
   }
 
   async #reopenAgent(failedId: string): Promise<void> {
+    // Retiring the runtime interrupts every sibling turn and live Code Mode cell.
+    this.#observe("managed.agent_reopen", { failed_turn_id: failedId, interrupted_turns: Math.max(0, this.#turns.size - 1),
+      ...memoryDimensions() }, "warn");
     for (const siblingId of this.#turns.keys()) {
       if (siblingId !== failedId) this.#reopenInterruptedTurnIds.add(siblingId);
     }

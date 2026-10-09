@@ -2751,6 +2751,10 @@ impl From<NanocodexError> for ResponseFailure {
 struct ResponseOutcome {
     message: crate::MessageResponse,
     upgrade: Option<durable::CodeOnlyUpgrade>,
+    /// The response came from a settled durable receipt. Its tool calls may
+    /// have been dispatched before an owner loss; a fresh response's calls
+    /// cannot have been.
+    replayed: bool,
 }
 struct ResponseContext<'a> {
     disable_tools: bool,
@@ -3090,6 +3094,7 @@ impl State {
                 return Ok(ResponseOutcome {
                     message: response,
                     upgrade: None,
+                    replayed: true,
                 });
             }
             Step::Execute if needs_upgrade => {
@@ -3138,6 +3143,7 @@ impl State {
                 return Ok(ResponseOutcome {
                     message: response,
                     upgrade: Some(upgrade.clone()),
+                    replayed: true,
                 });
             }
         }
@@ -3259,6 +3265,7 @@ impl State {
                     return Ok(ResponseOutcome {
                         message: response,
                         upgrade,
+                        replayed: false,
                     });
                 }
                 Err(error) => error,
@@ -4340,6 +4347,12 @@ impl State {
                     return Err(failure.error);
                 }
             };
+            // Only a replayed response can carry Code Mode calls admitted by a
+            // lost owner. A response generated in this execution starts a
+            // fresh round whose exec cells have never run anywhere.
+            if !response.replayed && cursor.recovered_code_index == Some(index) {
+                cursor.recovered_code_index = None;
+            }
             if let Some(upgrade) = response.upgrade {
                 cursor.template.tools = upgrade.code_only_tools;
                 self.classify_code_only_tools(&mut cursor);

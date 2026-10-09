@@ -224,11 +224,14 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
         if (disposed) throw new Error('Claude tool host is disposed');
         if (!sessionId || !turnId || !callId) throw new Error('Claude tools require session, turn and call identities');
         beginCodeTurn(sessionId, turnId);
-        if (name === 'exec') {
-          const input = JSON.parse(encodedInput);
-          value = JSON.parse(await code.executeCodeObserved(input.code, sessionId, callId, model, turnId, localDefinitions, executeLocalTool));
-        } else if (name === 'wait') value = JSON.parse(await code.waitCodeObserved(encodedInput, sessionId, callId));
-        else value = failed('Claude tool is unavailable in Code Mode');
+        // Results arrive whole; this host never drains the per-call update stream.
+        try {
+          if (name === 'exec') {
+            const input = JSON.parse(encodedInput);
+            value = JSON.parse(await code.executeCodeObserved(input.code, sessionId, callId, model, turnId, localDefinitions, executeLocalTool));
+          } else if (name === 'wait') value = JSON.parse(await code.waitCodeObserved(encodedInput, sessionId, callId));
+          else value = failed('Claude tool is unavailable in Code Mode');
+        } finally { if (name === 'exec' || name === 'wait') code.discardCodeUpdates(sessionId, callId); }
         if (value && typeof value === 'object' && Object.hasOwn(value, 'content')) {
           if (typeof value.content !== 'string' && !Array.isArray(value.content)) throw new TypeError('invalid Claude native tool content');
           if (value.isError !== undefined && typeof value.isError !== 'boolean') throw new TypeError('invalid Claude tool error flag');
