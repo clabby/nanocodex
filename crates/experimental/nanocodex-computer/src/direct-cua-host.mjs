@@ -4,7 +4,7 @@
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstat, stat, mkdir, mkdtemp, rm, access } from 'node:fs/promises';
-import { constants, readFileSync } from 'node:fs';
+import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -143,7 +143,6 @@ function environment(config, socket) {
     NANOCODEX_CUA_APP_CONSENT: config.allowApps ? 'allow' : 'deny' };
   for (const key of ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL']) if (config.env[key]) env[key] = config.env[key];
   env.NODE_REPL_UNTRUSTED_ENV_ALLOWLIST = 'SKY_CUA_SERVICE_PATH,SKY_CUA_SERVICE_NATIVE_PIPE_PATH';
-  env.NODE_REPL_JS_BANNER = readFileSync(new URL('./cua-banner.mjs', import.meta.url), 'utf8');
   return env;
 }
 

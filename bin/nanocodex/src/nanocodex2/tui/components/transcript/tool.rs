@@ -4,6 +4,7 @@
 mod account;
 mod browser;
 mod code;
+pub(super) mod computer;
 mod mcp;
 mod media;
 mod patch;
@@ -155,6 +156,9 @@ pub(super) fn render_live_summary(
 fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
     if tool.name == "__tool_activity" {
         return Presentation::new("Tools", "");
+    }
+    if tool.is_computer() {
+        return computer::present(tool, width, theme, expanded);
     }
     if matches!(
         tool.family(),
@@ -373,6 +377,13 @@ fn summary_lines(
             .iter()
             .filter_map(Value::as_u64)
             .fold(0_u64, u64::saturating_add);
+        if let Some(previews) = tool
+            .arguments
+            .get("computer_previews")
+            .and_then(Value::as_array)
+        {
+            return computer::group_lines(tool, total as usize, previews, width, theme);
+        }
         let mut text = format!(
             "  ▶ {} {}",
             status_symbol(tool.state),

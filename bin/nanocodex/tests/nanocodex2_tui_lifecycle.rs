@@ -4410,6 +4410,95 @@ async fn terminal_tool_activity_keeps_wrapper_failures_visible() {
 }
 
 #[tokio::test]
+async fn terminal_computer_activity_keeps_observations_in_disclosed_details() {
+    let mut fixture = Fixture::start_with_active(true).await;
+    let name = "mcp__cua_repl__js";
+    let tree =
+        "The following is a diff from the previous accessibility tree\n42 button SNAPSHOT_CONTROL";
+    fixture.nested(
+        REMOTE_TURN,
+        "tool.call",
+        json!({"call_id":"computer", "tool":"exec", "arguments":"await inspectComputer()"}),
+    );
+    for (index, title, result) in [
+        (
+            0,
+            "Observe native app",
+            json!({"content":[{"type":"text","text":tree}],"isError":false}),
+        ),
+        (
+            1,
+            "Read current controls",
+            json!({"content":[{"type":"text","text":"SECOND_RAW_OBSERVATION"}],"isError":false}),
+        ),
+        (
+            2,
+            "Capture native view",
+            json!({"content":[{"type":"image","mimeType":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS6kAAAAASUVORK5CYII="}],"isError":false}),
+        ),
+        (
+            3,
+            "Click observed control",
+            json!({"content":[{"type":"text","text":"Script error:\nCONTROL_DISAPPEARED\nLONG_PROVIDER_MANUAL"}],"isError":true}),
+        ),
+    ] {
+        let id = format!("computer/code-{index}");
+        fixture.nested(REMOTE_TURN, "tool.call", json!({"call_id":id,"tool":name,"arguments":{"title":title,"code":"await fixture.getAXState()"}}));
+        fixture.terminal.wait_text("Using computer").await;
+        fixture.nested(REMOTE_TURN, "tool.result", json!({"call_id":id,"tool":name,"status":"completed","duration_ns":1,"structured_result":result}));
+    }
+    let echo = json!({"content":[{"type":"text","text":tree}],"isError":false}).to_string();
+    fixture.nested(REMOTE_TURN, "tool.result", json!({"call_id":"computer","tool":"exec","status":"completed","duration_ns":5,"result":[{"type":"input_text","text":echo},{"type":"input_text","text":"INDEPENDENT_COMPUTER_NOTE"}]}));
+    fixture.complete(REMOTE_TURN);
+    fixture
+        .terminal
+        .wait_text("Used computer · 4 actions · 1 failed")
+        .await;
+    fixture.terminal.wait_text("CONTROL_DISAPPEARED").await;
+    fixture.terminal.wait_text("Captured screenshot").await;
+    fixture.terminal.wait_no_text("SNAPSHOT_CONTROL").await;
+    fixture
+        .terminal
+        .wait_no_text("previous accessibility tree")
+        .await;
+    fixture.terminal.wait_no_text("LONG_PROVIDER_MANUAL").await;
+    eprintln!(
+        "COMPUTER COMPACT\n{}",
+        fixture.terminal.screen.lock().unwrap().screen().contents()
+    );
+    fn click(terminal: &mut Terminal, text: &str) {
+        let row = terminal
+            .screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap()
+            + 1;
+        terminal.input(&format!("\x1b[<0;2;{row}M\x1b[<0;2;{row}m"));
+    }
+    click(&mut fixture.terminal, "Used computer");
+    fixture
+        .terminal
+        .wait_text("INDEPENDENT_COMPUTER_NOTE")
+        .await;
+    fixture.terminal.wait_text("Observe native app").await;
+    fixture.terminal.wait_no_text("SNAPSHOT_CONTROL").await;
+    click(&mut fixture.terminal, "Observe native app");
+    fixture.terminal.wait_text("SNAPSHOT_CONTROL").await;
+    fixture
+        .terminal
+        .wait_text("previous accessibility tree")
+        .await;
+    eprintln!(
+        "COMPUTER EXPANDED\n{}",
+        fixture.terminal.screen.lock().unwrap().screen().contents()
+    );
+}
+
+#[tokio::test]
 async fn terminal_tool_activity_is_compact_live_and_expandable() {
     let mut fixture = Fixture::start_with_active(true).await;
     for (id, command) in [

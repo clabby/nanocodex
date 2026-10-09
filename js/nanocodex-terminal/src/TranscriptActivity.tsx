@@ -3,10 +3,11 @@
 import { memo, useMemo, useState, type ReactNode } from "react";
 import { projectToolOutput, type AgentEntry, type GeneratedOutput, type ToolActivity } from "nanocodex-react/agent";
 import { Bot, ChevronRight } from "lucide-react";
+import { ComputerActivity, hasComputerActivity, isComputerTool } from "./ComputerActivity.js";
 import { GeneratedOutputView } from "./GeneratedOutputView.js";
 import { RichMarkdown } from "./RichMarkdown.js";
 import { KindIcon, StatusIcon, ToolRow, formatElapsed, useNow } from "./ToolActivityView.js";
-import { modelTool, toolKind } from "./toolModel.js";
+import { modelTool, parseJson, toolKind } from "./toolModel.js";
 import { presentTool } from "./toolPresentation.js";
 
 type Entry = AgentEntry;
@@ -138,11 +139,11 @@ export function workDuration(tools: readonly ToolActivity[], now: number, seenAt
 }
 
 /** Previews, interactive client cards, and generated media stay visible when activity collapses. */
-export const ToolArtifacts = memo(function ToolArtifacts({ tool, renderTool }: { tool: ToolActivity; renderTool?: ((tool: ToolActivity) => ReactNode) | undefined }) {
+export const ToolArtifacts = memo(function ToolArtifacts({ tool, renderTool, compactComputer = false }: { tool: ToolActivity; compactComputer?: boolean; renderTool?: ((tool: ToolActivity) => ReactNode) | undefined }) {
   return <>
     <ToolPreviews tool={tool} />
     {renderToolTree(tool, renderTool)}
-    <GeneratedOutputView items={generatedToolOutput(tool)} />
+    <GeneratedOutputView items={generatedToolOutput(tool, compactComputer)} />
   </>;
 });
 
@@ -162,7 +163,31 @@ function renderToolTree(tool: ToolActivity, render: ((tool: ToolActivity) => Rea
   return <>{render(tool)}{tool.children.map(child => <div key={child.callId}>{renderToolTree(child, render)}</div>)}</>;
 }
 
-export function generatedToolOutput(tool: ToolActivity): GeneratedOutput[] {
+/** Only exact result echoes belong to the CUA disclosure; labeled emissions remain artifacts. */
+function computerResultEchoes(tool: ToolActivity): Set<string> {
+  const echoes = new Set<string>();
+  for (const child of tool.children) walk(child, activity => {
+    if (!isComputerTool(activity)) return;
+    for (const raw of [activity.output, activity.result]) {
+      if (!raw) continue;
+      echoes.add(raw);
+      const parsed = parseJson(raw);
+      echoes.add(JSON.stringify(parsed));
+      echoes.add(JSON.stringify(parsed, null, 2));
+      // Use the same public projection as emitted text, including MCP envelopes
+      // and JSON code fences. Do not match substrings or strip user labels.
+      for (const item of projectToolOutput({ type: "text", text: raw })) {
+        if (item.kind === "text") echoes.add(item.text);
+      }
+    }
+    for (const item of activity.generatedOutput ?? []) {
+      if (item.kind === "text") echoes.add(item.text);
+    }
+  });
+  return echoes;
+}
+
+export function generatedToolOutput(tool: ToolActivity, omitComputerImages = false): GeneratedOutput[] {
   const items: GeneratedOutput[] = [];
   const seen = new Set<string>();
   walk(tool, (activity) => {
@@ -170,7 +195,10 @@ export function generatedToolOutput(tool: ToolActivity): GeneratedOutput[] {
       type: "input_image", image_url, name: `${presentTool(activity).title} result ${index + 1}`,
     })));
     const emitsText = ["exec", "wait"].includes(activity.name.split(".").at(-1) ?? "");
+    const echoes = emitsText ? computerResultEchoes(activity) : undefined;
     for (const item of output) {
+      if (item.kind === "text" && echoes?.has(item.text)) continue;
+      if (omitComputerImages && isComputerTool(activity) && item.kind === "image") continue;
       if (item.kind === "text" && !emitsText) continue;
       const key = item.kind === "text" ? `text:${item.text}` : `${item.kind}:${item.url}`;
       if (!seen.has(key)) { seen.add(key); items.push(item); }
@@ -249,14 +277,32 @@ export const WorkGroup = memo(function WorkGroup({ entries, live, showToolCalls,
   const [seenAt] = useState(() => Date.now());
   const disclosure = useDisclosure();
   const current = useMemo(() => active ? currentActivity(tools) : undefined, [active, tools]);
-  const artifacts = tools.map(tool => <div className="agent-terminal-tool-entry" key={tool.callId}><ToolArtifacts tool={tool} renderTool={renderTool} /></div>);
+  const artifacts = tools.map(tool => <div className="agent-terminal-tool-entry" key={tool.callId}><ToolArtifacts tool={tool} renderTool={renderTool} compactComputer={showToolCalls} /></div>);
   if (!showToolCalls) return <div className="agent-work">
     {entries.map(entry => entry.kind === "reasoning" ? <div key={entry.id}>{renderEntry(entry)}</div> : null)}
     {artifacts}
   </div>;
-  const items = entries.map(entry => entry.kind === "tool"
-    ? <ToolRow key={entry.id} tool={entry.tool} />
-    : <ThinkingRow key={entry.id} entry={entry} />);
+  const items: ReactNode[] = [];
+  let hasComputer = tools.some(hasComputerActivity);
+  for (let i = 0; i < entries.length;) {
+    const entry = entries[i]!;
+    if (entry.kind !== "tool" || !isComputerTool(entry.tool)) {
+      items.push(entry.kind === "tool" ? <ToolRow key={entry.id} tool={entry.tool} /> : <ThinkingRow key={entry.id} entry={entry} />);
+      i++;
+      continue;
+    }
+    hasComputer = true;
+    const adjacent: (ToolEntry | ReasoningEntry)[] = [entry];
+    while (++i < entries.length) {
+      const next = entries[i]!;
+      if (next.turnId !== entry.turnId || (next.kind === "tool" && !isComputerTool(next.tool))) break;
+      adjacent.push(next);
+    }
+    items.push(<ComputerActivity key={entry.id} tools={adjacent.flatMap(item => item.kind === "tool" ? [item.tool] : [])}>
+      {adjacent.map(item => item.kind === "tool" ? <ToolRow key={item.id} tool={item.tool} /> : <ThinkingRow key={item.id} entry={item} />)}
+    </ComputerActivity>);
+  }
+  if (hasComputer) return <div className="agent-work">{items}{artifacts}</div>;
   if (entries.length === 1) return <div className="agent-work is-single">{items}{artifacts}</div>;
   const { parts, failed } = summary;
   const duration = workDuration(tools, now, seenAt, active);

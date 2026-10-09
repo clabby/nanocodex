@@ -1541,6 +1541,8 @@ impl LayoutCache {
                 }),
             };
             let mut counts = [0_usize; 4];
+            let mut computer_calls = Vec::new();
+            let mut only_computer = true;
             let mut wrapper_duration = 0_u64;
             let mut wrapper_running = false;
             let mut wrapper_failed = false;
@@ -1569,6 +1571,11 @@ impl LayoutCache {
                 }
                 if member.hidden {
                     continue;
+                }
+                if call.is_computer() {
+                    computer_calls.push(call);
+                } else {
+                    only_computer = false;
                 }
                 counts[match call.state {
                     ToolState::Running => 0,
@@ -1600,6 +1607,10 @@ impl LayoutCache {
             };
             call.name = "__tool_activity".to_owned();
             call.arguments = serde_json::json!({"counts": counts, "running": wrapper_running, "failed": wrapper_failed, "waiting": wrapper_waiting});
+            if only_computer && !computer_calls.is_empty() {
+                call.arguments["computer_previews"] =
+                    tool::computer::previews(&computer_calls, width);
+            }
             call.result = None;
             call.duration_ns = Some(duration);
             call.state = if counts[0] > 0 || wrapper_running {

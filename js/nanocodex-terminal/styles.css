@@ -866,3 +866,14 @@ details[open] > summary .agent-tool-chevron { transform: rotate(90deg); }
 .agent-linked-file > audio { width: min(100%, 440px); }
 .agent-linked-file > iframe { width: 100%; height: 70vh; border: 0; border-radius: 12px; background: #fff; }
 .agent-linked-file-status { color: var(--terminal-muted, #888); font-size: 12px; }
+
+.agent-computer-previews { margin: 0 0 8px 28px; color: var(--terminal-muted); min-width: 0; }
+.agent-computer-previews p { margin: 4px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-computer-previews .is-failed { color: var(--chat-negative, #d95c5c); }
+.agent-computer-previews .agent-generated-media { max-width: 260px; }
+.agent-computer-previews .agent-generated-media img { max-height: 140px; object-fit: contain; }
+
+.agent-computer-failure-title { padding-right: .25em; display: inline-block; max-width: 33%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+@media (max-width: 600px) {
+  .agent-computer-failure-title { display: none; }
+}

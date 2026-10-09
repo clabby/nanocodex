@@ -625,6 +625,19 @@ impl Conversation {
             {
                 ToolStatus::Failed
             }
+            "completed"
+                if payload
+                    .tool
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("mcp__cua_repl__"))
+                    && payload
+                        .structured_result
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        == Some(true) =>
+            {
+                ToolStatus::Failed
+            }
             "completed" => ToolStatus::Completed,
             "cancelled" => ToolStatus::Cancelled,
             _ => ToolStatus::Failed,
@@ -707,7 +720,12 @@ impl Conversation {
                 status,
             });
         }
-        let result = if shell_tool {
+        let result = if shell_tool
+            || payload
+                .tool
+                .as_deref()
+                .is_some_and(|name| name.starts_with("mcp__cua_repl__"))
+        {
             Some(&payload.structured_result)
         } else {
             payload.result.as_ref()
@@ -726,6 +744,10 @@ impl Conversation {
             self.transcript
                 .set_tool_result(&payload.call_id, status, payload.duration_ns, result)
         };
+        if payload.tool.as_deref() == Some("exec") {
+            self.transcript
+                .set_raw_tool_result(&payload.call_id, payload.result.clone());
+        }
         self.note_unseen_output();
         "Working".clone_into(&mut self.status);
         true
@@ -835,7 +857,10 @@ impl Conversation {
             });
         }
         continued.result = Value::String(combined.clone());
-        self.finish_continued_tool(continued, status, Some(combined))
+        let changed = self.finish_continued_tool(continued, status, Some(combined));
+        self.transcript
+            .set_raw_tool_result(&continued.call_id, result.cloned());
+        changed
     }
 
     fn finish_continued_tool(
@@ -3511,6 +3536,9 @@ pub(super) enum PlanStepStatus {
 }
 
 fn summarize_tool_arguments(tool: &str, arguments: &Value) -> String {
+    if tool.starts_with("mcp__cua_repl__") {
+        return arguments.to_string();
+    }
     if tool == "exec"
         && let Some(source) = arguments.as_str()
     {
@@ -3585,6 +3613,9 @@ fn summarize_tool_arguments(tool: &str, arguments: &Value) -> String {
 }
 
 fn present_tool_name(tool: &str, arguments: &Value) -> String {
+    if tool.starts_with("mcp__cua_repl__") {
+        return tool.to_owned();
+    }
     if tool == "write_stdin" {
         return "Process".to_owned();
     }
@@ -3835,6 +3866,9 @@ fn running_cell_id(result: &Value) -> Option<String> {
 }
 
 fn summarize_tool_result(tool: Option<&str>, result: &Value, status: ToolStatus) -> String {
+    if tool.is_some_and(|name| name.starts_with("mcp__cua_repl__")) {
+        return normalize_tool_result(result.clone()).to_string();
+    }
     if matches!(tool, Some("exec_command" | "write_stdin")) {
         let decoded = result
             .as_str()
@@ -3888,7 +3922,7 @@ fn summarize_tool_result(tool: Option<&str>, result: &Value, status: ToolStatus)
     String::new()
 }
 
-fn display_tool_output(value: &Value, depth: usize) -> String {
+pub(super) fn display_tool_output(value: &Value, depth: usize) -> String {
     if depth > 10 {
         return "…".to_owned();
     }

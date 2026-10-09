@@ -107,3 +107,15 @@ under `/brain`, and `BashOutput` uses retained Hand shell sessions.
 - [Claude MCP tools](../bin/nanocodex/src/config/claude/mcp.rs)
 - [Claude JS host](../js/nanocodex/runtime/claude-host.mjs)
 - [Managed Claude adapter](../js/managed/src/claude-tools.ts)
+
+## Computer activity presentation
+
+CUA calls are presented as compact computer activity with action titles,
+screenshot indicators, and short failure diagnostics. Expand an activity to
+inspect its calls and provider output. Code Mode wrappers remain orchestration;
+their independently emitted output stays available in the transcript.
+
+This presentation does not rewrite CUA observations. The upstream provider
+chooses full accessibility trees or diffs; request `{ disableDiffing: true }`
+when a complete current tree is needed. Both Claude and Codex use this same
+provider behavior.

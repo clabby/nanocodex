@@ -275,6 +275,20 @@ impl ToolEntry {
         ToolIdentity::decode(&self.name).mcp_server
     }
 
+    pub(crate) fn is_computer(&self) -> bool {
+        let name = self
+            .metadata
+            .as_ref()
+            .and_then(tool_name)
+            .unwrap_or(&self.name);
+        ToolIdentity::decode(name).mcp_server == Some("cua_repl")
+            || self
+                .metadata
+                .as_ref()
+                .and_then(|value| find_string(value, &["mcp_server"]))
+                == Some("cua_repl")
+    }
+
     pub(crate) fn inferred_execution(
         name: &str,
         arguments: &Value,

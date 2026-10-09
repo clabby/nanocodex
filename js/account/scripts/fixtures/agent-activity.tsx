@@ -1,5 +1,6 @@
 // Synthetic transcript driven by the agent-activity journey through window.fixture.
 import React, { useState } from "react";
+import { projectToolOutput } from "nanocodex-react/agent";
 import { createRoot } from "react-dom/client";
 import { TerminalTranscriptSurface } from "../../../nanocodex-terminal/src/TerminalTranscriptSurface";
 import "../../../nanocodex-terminal/styles.css";
@@ -56,7 +57,7 @@ function Harness() {
     set: (patch: Partial<typeof state>) => setState(previous => ({ ...previous, ...patch })),
     append: (...entries: any[]) => setState(previous => ({ ...previous, entries: [...previous.entries, ...entries] })),
     replace: (id: string, entry: any) => setState(previous => ({ ...previous, entries: previous.entries.map(item => item.id === id ? entry : item) })),
-    tool, completed,
+    tool, completed, projectToolOutput,
   };
   return <TerminalTranscriptSurface entries={state.entries} running={state.running} activity={state.activity}
     composer={<div className="fixture-composer">Ask anything</div>} canLoadOlder={false} isLoadingOlder={false}

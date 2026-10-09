@@ -6,6 +6,8 @@ import {
   Ban, Bot, Brain, Check, ChevronRight, CodeXml, Database, FileDiff as FileDiffIcon, FilePen, FilePlus,
   FileText, Globe, Image, KeyRound, LoaderCircle, Mail, Plug, Search, SquareTerminal, Wrench, X, ExternalLink,
 } from "lucide-react";
+import { GeneratedOutputView } from "./GeneratedOutputView.js";
+import { ComputerToolRows, computerToolFailed, computerToolMedia, hasComputerActivity, isComputerTool } from "./ComputerActivity.js";
 import { boundedToolDetail, presentTool } from "./toolPresentation.js";
 import {
   modelTool, readableToolInput, readableToolResult, type FileDiff, type ReadableValue, type ToolKind, type ToolModel,
@@ -134,8 +136,8 @@ function ProtocolDetails({ tool, source }: { tool: ToolActivity; source?: string
     <summary><ChevronRight className="agent-tool-chevron" aria-hidden="true" />Details</summary>
     {open ? <div className="agent-tool-protocol-body">
       <p className="agent-tool-wire"><span>Tool</span> <code>{tool.name}</code>{source ? <> · {source}</> : null}</p>
-      {input ? <CodeBlock label="Raw input" text={boundedToolDetail(input, 200)} /> : null}
-      {output ? <CodeBlock label="Raw output" text={boundedToolDetail(output, 200)} /> : null}
+      {input ? <CodeBlock label="Raw input" text={hasComputerActivity(tool) ? input : boundedToolDetail(input, 200)} /> : null}
+      {output ? <CodeBlock label="Raw output" text={hasComputerActivity(tool) ? output : boundedToolDetail(output, 200)} /> : null}
     </div> : null}
   </details>;
 }
@@ -185,6 +187,7 @@ function ToolBody({ tool, model }: { tool: ToolActivity; model: ToolModel }) {
   }
   return <div className="agent-tool-body">
     {sections}
+    {isComputerTool(tool) ? <GeneratedOutputView items={computerToolMedia(tool).filter(item => item.kind !== "text")} /> : null}
     <ProtocolDetails tool={tool} source={model.source} />
   </div>;
 }
@@ -195,6 +198,7 @@ function ToolBody({ tool, model }: { tool: ToolActivity; model: ToolModel }) {
  * failures stay collapsed behind a red status marker.
  */
 export const ToolRow = memo(function ToolRow({ tool }: { tool: ToolActivity }) {
+  if (isComputerTool(tool) && computerToolFailed(tool) && tool.status !== "failed") tool = { ...tool, status: "failed" };
   const model = modelTool(tool);
   const [open, setOpen] = useState(false);
   const running = tool.status === "running";
@@ -205,6 +209,7 @@ export const ToolRow = memo(function ToolRow({ tool }: { tool: ToolActivity }) {
   const removed = model.diffs?.reduce((total, diff) => total + diff.removed, 0) ?? 0;
   const target = model.kind === "command" && model.target ? `$ ${model.target}` : model.target;
   const nested = tool.children.length;
+  const computerChildren = tool.children.some(hasComputerActivity);
   return <div className={`agent-tool-row is-${tool.status}`} data-tool-kind={model.kind} data-tool-status={tool.status}>
     <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary title={model.error}>
@@ -227,10 +232,11 @@ export const ToolRow = memo(function ToolRow({ tool }: { tool: ToolActivity }) {
       </summary>
       {open ? <>
         <ToolBody tool={tool} model={model} />
-        {nested ? <div className="agent-tool-children">
-          {tool.children.map(child => <ToolRow key={child.callId} tool={child} />)}
+        {nested && !computerChildren ? <div className="agent-tool-children">
+          <ComputerToolRows tools={tool.children} />
         </div> : null}
       </> : null}
     </details>
+    {computerChildren ? <div className="agent-tool-children"><ComputerToolRows tools={tool.children} /></div> : null}
   </div>;
 });
