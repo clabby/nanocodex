@@ -147,6 +147,9 @@ jobs:
               else
                 cp "target/$TARGET/nightly/nanocodex-hand" "dist/nanocodex2-$TARGET"
               fi
+              signing=unsigned
+              if [[ -f signed-hand/SIGNING ]]; then signing="$(cat signed-hand/SIGNING)"; fi
+              scripts/release/hand-identity.sh "target/$TARGET/nightly/nanocodex" "$TARGET" "$signing" dist
               ;;
             voice)
               # The composite action verifies initialization and relocation.
@@ -380,6 +383,40 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
 
+  hand-reuse-check:
+    if: github.repository == 'gakonst/nanocodex'
+    name: check Hand reuse (read-only)
+    needs: [bundle, build-windows-hand]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Test Hand reuse against a fake release store
+        shell: bash
+        run: scripts/release/test-reuse-unchanged-hand.sh
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: nanocodex-*
+          path: dist
+          merge-multiple: true
+      - name: Compare this build's Hand with the published nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Read-only: reports what publish would reuse, uploads nothing.
+          shopt -s nullglob
+          cat dist/nanocodex2-*.identity
+          previous=""
+          if pointer=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" --jq .object.sha 2>/dev/null); then
+            previous="nightly-$pointer"
+          fi
+          scripts/release/reuse-unchanged-hand.sh dist "$previous"
+
   publish:
     if: >-
       github.repository == 'gakonst/nanocodex' &&
@@ -391,21 +428,39 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: nanocodex-*
           path: dist
           merge-multiple: true
+      - name: Republish an unchanged Hand
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Compare with the nightly the rolling pointer currently names.
+          previous=""
+          if pointer=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" --jq .object.sha 2>/dev/null) \
+            && [[ "$pointer" != "$GITHUB_SHA" ]]; then
+            previous="nightly-$pointer"
+          fi
+          scripts/release/reuse-unchanged-hand.sh dist "$previous"
       - name: Generate checksums
         shell: bash
         run: |
           cd dist
-          sha256sum nanocodex-*.gz nanocodex2-*.gz nanocodex-*.exe nanocodex2-*.exe > SHA256SUMS
+          # Hand reuse keys exist only for CLIs that report a Hand Identity.
+          shopt -s nullglob
+          sha256sum nanocodex-*.gz nanocodex2-*.gz nanocodex-*.exe nanocodex2-*.exe nanocodex2-*.identity > SHA256SUMS
       - name: Publish immutable and rolling releases
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          shopt -s nullglob
           immutable_tag="nightly-${GITHUB_SHA}"
           short_sha="${GITHUB_SHA:0:10}"
           release_name="Nanocodex Nightly ($(date -u +%Y-%m-%d), ${short_sha})"
@@ -442,7 +497,7 @@ jobs:
               gh release edit "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
                 --title "$release_name" --notes-file "$notes_file" --prerelease
             fi
-            gh release upload "$immutable_tag" dist/*.gz dist/*.exe dist/SHA256SUMS \
+            gh release upload "$immutable_tag" dist/*.gz dist/*.exe dist/*.identity dist/SHA256SUMS \
               --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
               --draft=false --prerelease
@@ -474,6 +529,7 @@ jobs:
                 nanocodex-x86_64-pc-windows-msvc.exe|nanocodex2-x86_64-pc-windows-msvc.exe|nanocodex-hand-setup-x86_64.exe|\
                 nanocodex-voice-aarch64-apple-darwin.tar.gz|nanocodex-voice-x86_64-unknown-linux-gnu.tar.gz|\
                 nanocodex-app-aarch64-apple-darwin.tar.gz|\
+                nanocodex2-aarch64-apple-darwin.identity|nanocodex2-x86_64-unknown-linux-gnu.identity|\
                 nanocodex-vm-guest-x86_64-unknown-linux-musl|nanocodex-vm-guest-x86_64-unknown-linux-musl.gz)
                   ;;
                 *)

@@ -119,7 +119,11 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
         return value;
       } catch (error) {
         if (error?.code === 'host_interrupted') throw error;
-        return toolResult(errorText(error), null, { success: false });
+        // Code Mode rejects with an Error built from this value: keep the
+        // handler's code so guest catch blocks can branch on it.
+        const code = typeof error?.code === 'string' || typeof error?.code === 'number' ? error.code : undefined;
+        return toolResult(errorText(error), null, { success: false,
+          value: code === undefined ? errorText(error) : { message: errorText(error), code } });
       }
     },
   }])), { evaluate: codeEvaluator, effectJournal: codeEffectJournal,
@@ -232,7 +236,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
         }
         const wire = wireOutput(value);
         if (Array.isArray(value?.nested_calls)) {
-          wire.metadata = { ...wire.metadata, _nanocodex_code: { calls: value.nested_calls,
+          wire.metadata = { ...wire.metadata, _nanocodex_code: { calls: value.nested_calls.map(nestedEventCall),
             origin_call_id: value.cell?.origin_call_id ?? callId } };
         }
         const content = typeof wire.output === 'string' ? wire.output : wire.output.map((item) => {
@@ -286,6 +290,32 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
     },
   };
   return host;
+}
+
+// Nested receipts in _nanocodex_code are event-only metadata: the Claude core
+// republishes them as tool.result events that are archived and broadcast. Large
+// outputs (and their duplicated structured form) never cross into WASM memory;
+// the model-visible content and durable effect receipts are unchanged.
+const NESTED_EVENT_RESULT_BYTES = 32 * 1024;
+const NESTED_EVENT_PREVIEW_CHARS = 16 * 1024;
+const utf8 = new TextEncoder();
+function nestedEventCall(call) {
+  if (!call || typeof call !== 'object') return call;
+  const output = typeof call.output === 'string' ? call.output : JSON.stringify(call.output ?? null) ?? '';
+  const structured = call.structured_result == null ? '' : JSON.stringify(call.structured_result) ?? '';
+  const metadata = call.metadata == null ? '' : JSON.stringify(call.metadata) ?? '';
+  const size = output.length + (structured === output ? 0 : structured.length) + metadata.length;
+  if (size <= NESTED_EVENT_RESULT_BYTES) return call;
+  const bytes = utf8.encode(output).byteLength + (structured === output ? 0 : utf8.encode(structured).byteLength)
+    + utf8.encode(metadata).byteLength;
+  const reference = call.structured_result && typeof call.structured_result === 'object' && !Array.isArray(call.structured_result)
+    ? Object.fromEntries(['image_url', 'file_id'].flatMap((key) => typeof call.structured_result[key] === 'string'
+      ? [[key, call.structured_result[key]]] : []))
+    : {};
+  return { ...call, output: (output || structured).slice(0, NESTED_EVENT_PREVIEW_CHARS),
+    structured_result: Object.keys(reference).length ? reference : null,
+    metadata: metadata.length <= 4096 ? call.metadata : null,
+    event_truncated: true, event_original_bytes: bytes };
 }
 
 function errorText(error) {

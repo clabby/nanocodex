@@ -73,7 +73,6 @@ pub(super) fn first_emitted_line(tool: &ToolEntry) -> Option<String> {
     })
 }
 
-
 fn emitted_count(result: &Value) -> usize {
     match result {
         Value::Array(items) => items.iter().filter(|item| emitted_item(item)).count(),

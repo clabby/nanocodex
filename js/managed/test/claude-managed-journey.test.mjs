@@ -4,6 +4,9 @@
 // SessionModelEgress, broker vault and Rust OAuth state machine are production.
 // Only account bootstrap (synthetic identity) and external provider HTTP are fixtures.
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
@@ -94,6 +97,8 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
   const trace = [], upstream = [], providerErrors = [], mediaRequests = [], deniedCalls = []; let calls=0, summaries=0, writes=0, canonicalWrites=0, codexWrites=0, nestedWrites=0, allowResponses=false, sidebarCalls=0, holds=0, responsesAttempts=0, catalogOutage=false, catalogUnsupportedOnly=false, catalogRequests=0, catalogHold, hostedJourney, releaseHostedChild, mf;
   const framingRequests = {crOnly:0,truncated:0}, activeSteerRequests = [];
   let releaseActiveSteer;
+  let progressAvailable = false;
+  const progressRequests = [];
   const mcpTrace = [], mcpOrigins = new Set(['https://developers.openai.com','https://mcp.tempo.xyz','https://mercator.sh','https://docs.mcp.cloudflare.com','https://viem.sh','https://vocs.dev']);
   let holdMcp = false, releaseMcp;
   let compacting = false;
@@ -264,7 +269,7 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       if (!url.searchParams.has('after_id')) return Response.json({data:[{id:'claude-gated-unverified',display_name:'Not supported'}],has_more:true,last_id:'claude-gated-unverified'});
       assert.equal(url.searchParams.get('after_id'),'claude-gated-unverified');
       return Response.json({data:[{id:'claude-sonnet-4-6',display_name:'Claude Sonnet 4.6'},
-        {id:'claude-opus-4-6',display_name:'Claude Opus 4.6'}, {id:'claude-gated-unverified',display_name:'Not supported'}],has_more:false});
+        {id:'claude-opus-4-6',display_name:'Claude Opus 4.6'}, ...(progressAvailable?[{id:'claude-opus-5-5',display_name:'Claude Opus 5.5'}]:[]), {id:'claude-gated-unverified',display_name:'Not supported'}],has_more:false});
     }
     if (url.origin === 'https://api.anthropic.com' && url.pathname === '/v1/messages') {
       assert.match(request.headers.get('authorization')??'',/^Bearer synthetic-claude-managed-runtime/);
@@ -278,6 +283,36 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
       assert.equal(request.headers.get('x-stainless-lang'),'js');
       assert.equal(request.headers.get('x-stainless-package-version'),'0.112.1');
       const wire = await request.text(); const body = JSON.parse(wire); calls++;
+      if (body.model === 'claude-opus-5-5') {
+        assert.deepEqual(body.thinking,{type:'adaptive',display:'updates'});
+        assert.equal(body.output_config.effort,'high');
+        assert.equal((request.headers.get('anthropic-beta')??'').split(',').filter(beta=>beta==='thinking-display-updates-2026-08-18').length,1);
+        progressRequests.push(body);
+        if (progressRequests.length > 1) {
+          const blocks=body.messages.flatMap(message=>Array.isArray(message.content)?message.content:[]);
+          assert.ok(blocks.some(block=>block.signature==='PRIVATE_PROGRESS_SIGNATURE'&&block.thinking==='Checking the saved record.'));
+          assert.ok(blocks.some(block=>block.signature==='PRIVATE_REASONING_SIGNATURE'&&block.thinking===''));
+          return sse({type:'text',text:'CLAUDE_TOOL_DONE_PROGRESS'},'end_turn','progress-final');
+        }
+        const events=[
+          {type:'message_start',message:{id:'progress-live',role:'assistant',model:body.model,content:[],usage:{input_tokens:10,output_tokens:0}}},
+          {type:'content_block_start',index:0,content_block:{type:'thinking',thinking:'',signature:''}},
+          {type:'content_block_delta',index:0,delta:{type:'thinking_delta',thinking:''}},
+          {type:'content_block_delta',index:0,delta:{type:'signature_delta',signature:'PRIVATE_REASONING_SIGNATURE'}},
+          {type:'content_block_stop',index:0},
+          {type:'content_block_start',index:1,content_block:{type:'thinking',thinking:'',signature:''}},
+          {type:'content_block_delta',index:1,delta:{type:'thinking_delta',thinking:'Checking the '}},
+          {type:'content_block_delta',index:1,delta:{type:'thinking_delta',thinking:'saved record.'}},
+          {type:'content_block_delta',index:1,delta:{type:'signature_delta',signature:'PRIVATE_PROGRESS_SIGNATURE'}},
+          {type:'content_block_stop',index:1},
+          {type:'content_block_start',index:2,content_block:{type:'tool_use',id:'progress-tool',name:'_exec',input:{}}},
+          {type:'content_block_delta',index:2,delta:{type:'input_json_delta',partial_json:JSON.stringify({code:'text("record verified");'})}},
+          {type:'content_block_stop',index:2},
+          {type:'message_delta',delta:{stop_reason:'tool_use'},usage:{output_tokens:10}},
+          {type:'message_stop'},
+        ];
+        return new Response(events.map(event=>`data: ${JSON.stringify(event)}\n\n`).join(''),{headers:{'content-type':'text/event-stream'}});
+      }
       assert.ok(['claude-sonnet-4-6','claude-opus-4-6'].includes(body.model)); assert.equal(body.stream,true);
       assert.match(body.system[0].text,/^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=cli; cch=[0-9a-f]{5};$/);
       assert.equal(body.system[1].text,"You are Claude Code, Anthropic's official CLI for Claude.");
@@ -670,6 +705,33 @@ test('Managed Code Mode Claude and mixed-family public delegation, account gates
     const created=await call('/v1/agents','POST',{},201), agent=created.agent_id;
     assert.equal(catalogRequests-beforeClaudeDefault,2,'Claude-only default and admission share one paginated live catalog');
     assert.equal((await call(`/v1/agents/${agent}`)).settings.model,'claude-sonnet-4-6');
+    // Exercise production admission and SSE over HTTP with the rebuilt Rust
+    // WASM. Only the upstream Messages response is synthetic.
+    progressAvailable=true;
+    assert.ok((await call('/v1/models')).data.some(model=>model.id==='claude-opus-5-5'));
+    const progressAgent=(await call('/v1/agents','POST',{settings:{model:'claude-opus-5-5',thinking:'high',reasoning_mode:'standard',fast_mode:false}},201)).agent_id;
+    const progressInput={input:'Check the saved record and report progress.',id:'progress-sse'};
+    await writeFile(resolve(evidence,'progress.input.json'),JSON.stringify(progressInput));
+    const endpoint=new URL(`/v1/agents/${progressAgent}/turns`,await mf.ready);
+    const {stdout:progressStatus}=await promisify(execFile)('curl',['--silent','--show-error','--max-time','60','--request','POST',
+      '--header','authorization: Bearer '+token,'--header','content-type: application/json','--header','accept: text/event-stream',
+      '--data-binary','@'+resolve(evidence,'progress.input.json'),'--dump-header',resolve(evidence,'progress.headers'),
+      '--output',resolve(evidence,'progress.sse'),'--write-out','%{http_code}',endpoint.href]);
+    assert.equal(progressStatus,'202');
+    const progressWire=await readFile(resolve(evidence,'progress.sse'),'utf8');
+    const progressEvents=progressWire.split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6)));
+    const progressDeltas=progressEvents.filter(row=>row.event?.type==='reasoning.summary.delta');
+    assert.equal(progressDeltas.map(row=>row.event.payload.text).join(''),'Checking the saved record.');
+    assert.ok(progressDeltas.every(row=>row.event.payload.item_id==='progress-live:thinking:1'));
+    assert.ok(progressWire.indexOf('reasoning.summary.delta')<progressWire.indexOf('tool.call'));
+    assert.match(progressWire,/CLAUDE_TOOL_DONE_PROGRESS/);
+    assert.doesNotMatch(progressWire,/PRIVATE_REASONING_SIGNATURE|PRIVATE_PROGRESS_SIGNATURE/);
+    assert.equal(progressRequests.length,2);
+    const progressHistory=await call(`/v1/agents/${progressAgent}/events/history?after=0&limit=256`);
+    assert.equal(progressHistory.data.filter(row=>row.event?.type==='reasoning.summary.delta').map(row=>row.event.payload.text).join(''),'Checking the saved record.');
+    trace.push({progress:{model:'claude-opus-5-5',effort:'high',display:'updates',public_sse:true,history:true,private_blocks_preserved:true}});
+    progressAvailable=false;
+    await call('/v1/models');
     const platform=(await call('/v1/agents','POST',{},201)).agent_id;
     await turn(platform,'SHARED_PLATFORM_NATIVE_PROBE save and read a synthetic memory','journey-shared-platform');
     const platformHistory=await call(`/v1/agents/${platform}/events/history?after=0&limit=256`);

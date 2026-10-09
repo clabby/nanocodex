@@ -596,6 +596,7 @@ pub(crate) fn lock_service_operation() -> Result<fs::File> {
 
 /// Prefer the verified companion from the active Windows update bundle. A
 /// freshly installed CLI has no managed bundle yet and uses its signed sibling.
+#[cfg(target_os = "windows")]
 pub(crate) fn active_windows_hand_binary() -> Result<Option<PathBuf>> {
     if !cfg!(target_os = "windows") {
         return Ok(None);
@@ -1077,20 +1078,8 @@ async fn hand_unchanged(
     let identity = store.hand_identity_of(key);
     let mut current = Vec::new();
     if installed {
-        #[cfg(target_os = "linux")]
-        if let Ok(state) = crate::linux_hand_service::status().await {
-            current.extend(state.executable);
-        }
-        #[cfg(not(target_os = "linux"))]
-        if cfg!(target_os = "macos")
-            && let Ok(state) = crate::hand_service::status().await
-        {
-            current.extend(state.executable);
-        }
-    }
-    if current.is_empty()
-        && let Some(active) = store.active()?
-    {
+        current.extend(installed_hand_executable().await?);
+    } else if let Some(active) = store.active()? {
         current.push(store.version_dir(&active).join(HAND_FILE));
     }
     for path in current {
@@ -1293,7 +1282,7 @@ async fn install_local_binary(
     let companion = companion
         .map(Path::to_path_buf)
         .or_else(|| sibling.is_file().then_some(sibling));
-    let hand_identity = match &companion {
+    let mut hand_identity = match &companion {
         Some(companion) => local::verify_pair(path, companion).await?,
         None => {
             local::verify_single(path).await?;
@@ -1301,7 +1290,7 @@ async fn install_local_binary(
         }
     };
     let contents = fs::read(path).wrap_err_with(|| format!("failed to read {}", path.display()))?;
-    let companion = companion
+    let mut companion = companion
         .map(fs::read)
         .transpose()
         .wrap_err("failed to read the local Hand binary")?;
@@ -1309,6 +1298,16 @@ async fn install_local_binary(
         .map(fs::read)
         .transpose()
         .wrap_err("failed to read the voice archive")?;
+    if companion.is_none() {
+        (companion, hand_identity) = retained_hand(store).await?;
+        if companion.is_none() && voice.is_some() {
+            bail!(
+                "--voice-archive needs a Hand: pass --hand-binary or build nanocodex-hand beside --path"
+            );
+        }
+    }
+    // Include the retained Hand too: the same CLI can be selected again after
+    // a service Hand update, without reusing an older immutable bundle.
     let mut digest = Sha256::new();
     for item in [
         Some(contents.as_slice()),
@@ -1333,7 +1332,7 @@ async fn install_local_binary(
                 voice.as_deref(),
             )?;
         }
-        None => install_cli_carrying_hand(store, &key, &contents, voice.as_deref())?,
+        None => store.install(&key, &contents)?,
     }
     let activated = activate_coordinated(store, &key, false, restart_hand).await?;
     // Preserve the previous selection if validation or the handover fails.
@@ -1352,42 +1351,57 @@ async fn install_local_binary(
     Ok(())
 }
 
-/// A CLI-only selection keeps the active bundle's verified Hand. Its bytes are
-/// unchanged, so activation leaves the running Hand service untouched.
-fn install_cli_carrying_hand(
-    store: &VersionStore,
-    key: &str,
-    cli: &[u8],
-    voice: Option<&[u8]>,
-) -> Result<()> {
-    let active = store.active()?;
-    let identity = active
-        .as_deref()
-        .and_then(|active| store.hand_identity_of(active));
-    let hand = match active.as_deref() {
-        Some(active) if store.is_cached_bundle(active, false)? => {
-            Some(fs::read(store.version_dir(active).join(HAND_FILE))?)
-        }
-        _ => None,
-    };
-    match hand {
-        Some(hand) => {
-            eprintln!(
-                "No nanocodex-hand given or found beside the CLI; keeping the current Hand (sha256 {})",
-                hex::encode(Sha256::digest(&hand))
-            );
-            store.install_bundle_with_hand(key, cli, &hand, identity.as_deref(), None, voice)
-        }
-        None if voice.is_some() => {
-            bail!(
-                "--voice-archive needs a Hand: pass --hand-binary or build nanocodex-hand beside --path"
-            )
-        }
-        None => {
-            eprintln!("No nanocodex-hand given or found beside the CLI; installing the CLI only");
-            store.install(key, cli)
+/// Return the executable owned by the installed service, even when a staged or
+/// manually selected CLI bundle points at a different Hand. Inspection failures
+/// must not silently substitute a different daemon during a CLI-only update.
+async fn installed_hand_executable() -> Result<Option<PathBuf>> {
+    #[cfg(target_os = "linux")]
+    let state = crate::linux_hand_service::status().await?;
+    #[cfg(target_os = "macos")]
+    let state = crate::hand_service::status().await?;
+    #[cfg(target_os = "windows")]
+    let state = crate::windows_hand::status().await?;
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        if state.installed || state.loaded {
+            return state.executable.map(Some).ok_or_else(|| {
+                eyre!("Installed Hand executable is unknown; inspect hand status before updating")
+            });
         }
     }
+    Ok(None)
+}
+
+/// A CLI-only selection keeps the installed service's Hand, or the active
+/// bundle's verified Hand when there is no service. No daemon handover occurs.
+async fn retained_hand(store: &VersionStore) -> Result<(Option<Vec<u8>>, Option<String>)> {
+    let (hand, identity) = if let Some(path) = installed_hand_executable().await? {
+        let bytes = fs::read(&path)
+            .wrap_err_with(|| format!("Could not read installed Hand {}", path.display()))?;
+        let identity = identity_of_hand_bytes(store, &bytes).await?;
+        (Some(bytes), identity)
+    } else {
+        let active = store.active()?;
+        let identity = active
+            .as_deref()
+            .and_then(|active| store.hand_identity_of(active));
+        let hand = match active.as_deref() {
+            Some(active) if store.is_cached_bundle(active, false)? => {
+                Some(fs::read(store.version_dir(active).join(HAND_FILE))?)
+            }
+            _ => None,
+        };
+        (hand, identity)
+    };
+    if let Some(hand) = &hand {
+        eprintln!(
+            "No nanocodex-hand given or found beside the CLI; keeping the current Hand (sha256 {})",
+            hex::encode(Sha256::digest(hand))
+        );
+    } else {
+        eprintln!("No nanocodex-hand given or found beside the CLI; installing the CLI only");
+    }
+    Ok((hand, identity))
 }
 
 async fn install_source(

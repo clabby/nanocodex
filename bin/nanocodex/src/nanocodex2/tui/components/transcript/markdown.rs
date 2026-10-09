@@ -604,7 +604,7 @@ impl<'a> Renderer<'a> {
             |language| super::highlight::syntax_for_token(&assets.syntaxes, language),
         );
         let syntax_theme = super::highlight::theme();
-        let mut highlighter = HighlightLines::new(syntax, &syntax_theme);
+        let mut highlighter = HighlightLines::new(syntax, syntax_theme);
         let header = self.lines.len();
         self.lines.push(code_block_header(
             language.as_deref(),
@@ -666,7 +666,7 @@ impl<'a> Renderer<'a> {
             |language| super::highlight::syntax_for_token(&assets.syntaxes, language),
         );
         let syntax_theme = super::highlight::theme();
-        let mut highlighter = HighlightLines::new(syntax, &syntax_theme);
+        let mut highlighter = HighlightLines::new(syntax, syntax_theme);
         let content_width = self.width.saturating_sub(2).max(1);
         for source_line in code.trim_end_matches('\n').split('\n') {
             let highlighted =

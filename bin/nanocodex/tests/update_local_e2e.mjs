@@ -52,8 +52,15 @@ writeFileSync(account, JSON.stringify({ fixture: true, access_token: 'synthetic-
 const accountBefore = readFileSync(account);
 // Drop inherited account, provider, target, and install-path overrides. No GitHub
 // access is needed. Keep only command discovery and OS temp variables.
+// Resolve the real toolchain before isolating HOME. A rustup proxy in PATH
+// would otherwise consult the empty fixture home and reject source metadata
+// before the updater reaches the compatibility checks this journey exercises.
+const cargoPath = spawnSync('rustup', ['which', 'cargo'], { encoding: 'utf8' });
+const fixturePath = cargoPath.status === 0
+  ? `${dirname(cargoPath.stdout.trim())}:${process.env.PATH}`
+  : process.env.PATH;
 const env = {
-  PATH: process.env.PATH, HOME: home, USERPROFILE: home,
+  PATH: fixturePath, HOME: home, USERPROFILE: home,
   LOCALAPPDATA: join(home, 'localappdata'), XDG_CONFIG_HOME: join(home, '.config'),
   NANOCODEX_DIR: store, NANOCODEX_ACCOUNT_FILE: account, NO_COLOR: '1',
   TMPDIR: process.env.TMPDIR ?? tmpdir(), TMP: tmpdir(), TEMP: tmpdir(),
@@ -137,6 +144,7 @@ function localKey() {
 let plist;
 let plistBefore;
 let linuxOwner;
+let installedHandPath;
 const livePidBefore = handPid();
 trace.push(`live Hand before (read-only launchctl print): ${livePidBefore}`);
 try {
@@ -150,11 +158,20 @@ try {
     assert.equal(readFileSync(journal, 'utf8'), 'interrupted development fixture');
     rmSync(journal);
   }
-  const revision = oneRevision(run(cli, ['--version']).stdout, 'CLI');
+  const cliVersion = run(cli, ['--version']).stdout;
+  const handVersion = run(hand, ['--version']).stdout;
+  const revision = oneRevision(cliVersion, 'CLI');
   assert.ok(revision, 'CLI must expose full source revision');
-  assert.equal(oneRevision(run(hand, ['--version']).stdout, 'Hand'), revision,
-    'supply a real CLI + Hand built from the same checkout');
-  trace.push(`real candidate pair revision: ${revision}; platform: ${process.platform}; fixture: ${fixture}`);
+  const identity = version => {
+    const matches = [...version.matchAll(/^Hand Identity: ([0-9a-f]{64})$/gm)];
+    assert.equal(matches.length, 1, 'candidate must expose exactly one Hand content identity');
+    return matches[0][1];
+  };
+  assert.equal(identity(handVersion), identity(cliVersion),
+    'supply a real CLI + Hand with matching Hand source inputs');
+  assert.doesNotMatch(handVersion, /^Commit SHA:|^Build Timestamp:/m,
+    'Hand version must remain independent of CLI-only revisions');
+  trace.push(`real candidate pair revision: ${revision}; Hand identity: ${identity(handVersion)}; platform: ${process.platform}; fixture: ${fixture}`);
 
   if (process.platform === 'darwin') {
     const escape = x => x.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -164,6 +181,7 @@ try {
     // the already-existing GUI owner. All test commands defer rather than restart.
     plistBefore = `<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>com.nanocodex.hand</string><key>ProgramArguments</key><array><string>${escape(hand)}</string><string>hand</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>EnvironmentVariables</key><dict><key>HOME</key><string>${escape(home)}</string><key>NANOCODEX_ACCOUNT_FILE</key><string>${escape(account)}</string></dict></dict></plist>`;
     writeFileSync(plist, plistBefore);
+    installedHandPath = hand;
   }
 
   if (process.platform === 'linux') {
@@ -171,6 +189,7 @@ try {
     assert.equal(typeof linuxOwner.installed, 'boolean');
     assert.equal(typeof linuxOwner.loaded, 'boolean');
     trace.push(`read-only native Linux owner: ${JSON.stringify(linuxOwner)}`);
+    if (linuxOwner.installed || linuxOwner.loaded) installedHandPath = linuxOwner.executable;
   }
 
   // (b) Real pair installation: the sibling nanocodex-hand is found without
@@ -183,7 +202,11 @@ try {
   const versionsBeforeExplicit = versions();
   update(['--path', cli, '--hand-binary', explicitHand]);
   assert.deepEqual(versions(), versionsBeforeExplicit, 'explicit --hand-binary must reuse the identical cached pair');
-  if (process.platform === 'darwin') {
+  const sameInstalledHand = installedHandPath && digest(readFileSync(installedHandPath)) === digest(readFileSync(hand));
+  if (sameInstalledHand) {
+    assert.equal(active(), key, 'same installed Hand activates CLI immediately');
+    assert.equal(pending(), null);
+  } else if (process.platform === 'darwin') {
     assert.equal(pending(), key, 'installed Hand must stage without explicit restart');
     assert.notEqual(before, key, 'CLI must remain on previous version while Hand is deferred');
     update(['--apply']);
@@ -246,27 +269,34 @@ try {
   trace.push('PASS: public offline background updates preserve staged and active local selections; newer pending selections supersede the hold; no real Hand or scheduler mutation');
 
   // (c) Hand decoupling. Select the pair as the CLI (modelled: no Hand restart).
-  // A CLI-only update (no Hand given or beside --path) keeps that Hand bytes and
+  // A CLI-only update keeps the installed service Hand even when the selected
+  // CLI bundle contains a different Hand. Without a service it keeps the active Hand and
   // activates immediately even with an installed owner: nothing is staged and
   // the service is not touched.
   const keepActive = active();
   const keepPending = pending();
   select(store, key);
-  const cliKey = keyOf([cliOnly]);
+  const cliKey = keyOf([cliOnly, installedHandPath ?? suppliedHand]);
   const cliOnlyRun = update(['--path', cliOnly]);
   assert.match(cliOnlyRun.stderr, /keeping the current Hand/);
   assert.equal(active(), cliKey, 'CLI-only update must activate without a Hand handover');
   assert.equal(pending(), null, 'CLI-only update must not stage a Hand switch');
-  bundleBytes(join(store, 'versions', cliKey), 'CLI-only update carries the current Hand');
+  bundleBytes(join(store, 'versions', cliKey), 'CLI-only update carries the current Hand', installedHandPath ?? suppliedHand);
   if (process.platform === 'darwin') {
     assert.match(cliOnlyRun.stderr, /Hand is unchanged/);
     assert.equal(readFileSync(plist, 'utf8'), plistBefore, 'Hand owner definition unchanged');
   }
-  // A full pair whose Hand bytes equal the running Hand also switches only the CLI.
+  // A full pair switches only the CLI when its Hand matches the installed
+  // owner. A different pair must still stage, even just after a CLI-only update.
   const samePair = update(['--path', cli]);
-  assert.equal(active(), key);
-  assert.equal(pending(), null);
-  if (process.platform === 'darwin') assert.match(samePair.stderr, /Hand is unchanged/);
+  if (installedHandPath && !sameInstalledHand) {
+    assert.equal(active(), cliKey);
+    assert.equal(pending(), key);
+  } else {
+    assert.equal(active(), key);
+    assert.equal(pending(), null);
+    if (installedHandPath) assert.match(samePair.stderr, /Hand is unchanged/);
+  }
   assert.equal(handPid(), livePidBefore, 'live Hand untouched by CLI-only activations');
   trace.push(`PASS (c): CLI-only ${cliKey} and same-Hand pair ${key} activated without staging or service changes; live Hand ${handPid()}`);
   checkAliases(store, revision, 'new updater activation');
