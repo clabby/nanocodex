@@ -80,6 +80,8 @@ pub(crate) enum SettingsCommand {
     SetEffort(ReasoningEffort),
     OpenModel,
     SetModel(Model),
+    // FEATURE-HOOK: wp1/wp4 local feature commands (/mcp, /benchmark)
+    Feature(crate::nanocodex2::tui::features::FeatureCommand),
     Invalid(String),
 }
 
@@ -129,6 +131,24 @@ impl SettingsCommand {
             } else {
                 Self::Zoom
             }),
+            // FEATURE-HOOK: wp4 /mcp and /benchmark (legacy local commands)
+            "/mcp" => Some(match (parts.next(), parts.next(), parts.next()) {
+                (Some("login"), Some(name), None) => Self::Feature(
+                    crate::nanocodex2::tui::features::FeatureCommand::McpLogin(name.to_owned()),
+                ),
+                (Some("reload"), Some(name), None) => Self::Feature(
+                    crate::nanocodex2::tui::features::FeatureCommand::McpReload(Some(name.to_owned())),
+                ),
+                _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload <server>".into()),
+            }),
+            "/benchmark" => Some(Self::Feature(
+                crate::nanocodex2::tui::features::FeatureCommand::Benchmark(
+                    input.trim_start()[command.len()..].trim().to_owned(),
+                ),
+            )),
+            "/voice" if input.trim_start()[command.len()..].trim() == "list" => {
+                Some(Self::Voice(crate::nanocodex2::voice::Command::List))
+            }
             "/voice" => Some(
                 match crate::nanocodex2::voice::Command::parse(
                     input.trim_start()[command.len()..].trim(),
