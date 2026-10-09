@@ -163,8 +163,7 @@ fn imply_hand_command(arguments: &mut Vec<OsString>) {
         // Help describes the `hand` command, as `nanocodex hand --help`.
         Some("--help" | "-h") => false,
         Some(first) => {
-            first == "hand"
-                || is_hand_daemon_invocation(&[OsString::new(), OsString::from(first)])
+            first == "hand" || is_hand_daemon_invocation(&[OsString::new(), OsString::from(first)])
         }
         None => false,
     };

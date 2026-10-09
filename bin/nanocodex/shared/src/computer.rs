@@ -51,22 +51,82 @@ impl Computer {
         if background {
             eprintln!("Preparing signed Computer Use components…");
         }
-        let receipt = nanocodex_computer::provision::provision_upstream(refresh).await?;
-        // Discover the exact provider catalog off the interactive path, so a
-        // later attachment can register it from the version-bound cache.
-        if receipt["status"] == "installed" {
-            eprintln!("Components verified; preparing the Computer Use tool catalog…");
-            let config = nanocodex_computer::provision::config_from_receipt(&receipt)?;
-            nanocodex_computer::ComputerTools::connect(config)
-                .await
-                .map_err(|error| error.to_string())?;
-            eprintln!(
-                "Computer Use components are ready; running Hands discover them on their next computer call."
-            );
+        // This attempt supersedes the previous outcome; running Hands report
+        // preparing until it records its own.
+        let directory = setup_directory()?;
+        clear_setup_failure(&directory)?;
+        let result = async {
+            let receipt = nanocodex_computer::provision::provision_upstream(refresh).await?;
+            // Discover the exact provider catalog off the interactive path, so a
+            // later attachment can register it from the version-bound cache.
+            if receipt["status"] == "installed" {
+                eprintln!("Components verified; preparing the Computer Use tool catalog…");
+                let config = nanocodex_computer::provision::config_from_receipt(&receipt)?;
+                nanocodex_computer::ComputerTools::connect(config)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                eprintln!(
+                    "Computer Use components are ready; running Hands discover them on their next computer call."
+                );
+            }
+            Ok::<_, String>(receipt)
         }
-        println!("{receipt}");
-        Ok(())
+        .await;
+        match result {
+            Ok(receipt) => {
+                if receipt["status"] != "installed" {
+                    record_setup_failure(&directory, &receipt)?;
+                }
+                println!("{receipt}");
+                Ok(())
+            }
+            Err(error) => {
+                record_setup_failure(
+                    &directory,
+                    &serde_json::json!({"status": "failed", "error": error}),
+                )?;
+                Err(error)
+            }
+        }
     }
+}
+
+/// Outcome of the last setup attempt that did not install the components,
+/// read by running Hands so a failed background installation is reported
+/// instead of an indefinite "preparing".
+const SETUP_FAILURE: &str = "setup-failure.json";
+
+fn clear_setup_failure(directory: &std::path::Path) -> Result<(), String> {
+    match fs::remove_file(directory.join(SETUP_FAILURE)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "could not clear the previous Computer Use setup outcome: {error}"
+        )),
+    }
+}
+
+fn record_setup_failure(
+    directory: &std::path::Path,
+    receipt: &serde_json::Value,
+) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let mut failure = receipt.clone();
+    failure["log"] = directory.join("setup.log").display().to_string().into();
+    failure["retry"] = "nanocodex computer setup".into();
+    // Readers see the previous complete outcome or this one, never a torn file.
+    let staged = directory.join(format!(".{SETUP_FAILURE}.{}", std::process::id()));
+    fs::write(&staged, failure.to_string()).map_err(|error| error.to_string())?;
+    fs::rename(&staged, directory.join(SETUP_FAILURE)).map_err(|error| error.to_string())
+}
+
+#[allow(dead_code)] // Read by the Hand gateway only.
+fn setup_failure(directory: Option<&std::path::Path>) -> Option<serde_json::Value> {
+    let path = directory?.join(SETUP_FAILURE);
+    if fs::metadata(&path).ok()?.len() > 64 * 1024 {
+        return None;
+    }
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
 /// Connect the Hand before optional CUA downloads. The child owns provisioning
@@ -188,6 +248,7 @@ pub async fn connect_for_hand() -> Result<Option<nanocodex_computer::ComputerToo
     Ok(Some(nanocodex_computer::ComputerTools::new(
         LazyComputer {
             state: tokio::sync::Mutex::new(LazyComputerState::default()),
+            setup: setup_directory().ok(),
         },
         catalog,
     )))
@@ -196,6 +257,8 @@ pub async fn connect_for_hand() -> Result<Option<nanocodex_computer::ComputerToo
 #[allow(dead_code)]
 struct LazyComputer {
     state: tokio::sync::Mutex<LazyComputerState>,
+    /// Background setup state directory, consulted while no provider exists.
+    setup: Option<PathBuf>,
 }
 
 #[allow(dead_code)] // Also compiled into the installer, which does not publish tools.
@@ -244,8 +307,14 @@ impl nanocodex_computer::ComputerExecutor for LazyComputer {
             if state.connected.is_none() {
                 if state.initializing.is_none() {
                     let Some(config) = nanocodex_computer::ComputerConfig::discover() else {
+                        let failure = setup_failure(self.setup.as_deref());
                         if discovery {
-                            return discovery_output(json!({"status":"preparing"}));
+                            return discovery_output(
+                                failure.unwrap_or_else(|| json!({"status":"preparing"})),
+                            );
+                        }
+                        if let Some(failure) = failure {
+                            return Err(format!("Computer Use setup did not install the components; no action was dispatched: {failure}").into());
                         }
                         return Err("Computer Use components are unavailable; discover the Hand contract again before sending input".into());
                     };
@@ -358,6 +427,7 @@ for line in sys.stdin:
                         .map_err(|e| e.to_string())
                 })),
             }),
+            setup: None,
         };
         let context = |call| ToolContext::new("lazy-gateway", "fixture-session", call, &[], 16000);
         assert!(
@@ -416,6 +486,7 @@ for line in sys.stdin:
                         .map_err(|e| e.to_string())
                 })),
             }),
+            setup: None,
         };
         let error = gateway
             .invoke_tool(
@@ -432,5 +503,66 @@ for line in sys.stdin:
                 .to_string()
                 .contains("Cannot start upstream Sky MCP provider")
         );
+    }
+
+    // No provider is selected while background setup runs. Its recorded
+    // outcome distinguishes a failed installation from one still preparing.
+    #[tokio::test]
+    async fn failed_background_setup_is_reported_instead_of_preparing() {
+        if ComputerConfig::discover().is_some() {
+            eprintln!("skipped: this account already selects a Computer Use provider");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let gateway = LazyComputer {
+            state: tokio::sync::Mutex::new(LazyComputerState::default()),
+            setup: Some(directory.path().to_owned()),
+        };
+        let context = |call| ToolContext::new("lazy-gateway", "fixture-session", call, &[], 16000);
+        let preparing = gateway
+            .invoke_tool("js", json!({}), context("preparing"))
+            .await
+            .unwrap();
+        eprintln!(
+            "no recorded outcome, expected preparing: {}",
+            preparing.structured_result()
+        );
+        assert!(
+            preparing
+                .structured_result()
+                .to_string()
+                .contains("preparing")
+        );
+
+        record_setup_failure(
+            directory.path(),
+            &json!({"status":"failed", "error":"OpenAI appcast signature mismatch"}),
+        )
+        .unwrap();
+        let failed = gateway
+            .invoke_tool("js", json!({}), context("failed"))
+            .await
+            .unwrap()
+            .structured_result()
+            .to_string();
+        eprintln!("recorded failure, expected failed: {failed}");
+        assert!(failed.contains("failed") && failed.contains("appcast signature mismatch"));
+        assert!(failed.contains("nanocodex computer setup") && failed.contains("setup.log"));
+        let action = gateway
+            .invoke_tool("js", json!({"code":"1"}), context("action"))
+            .await
+            .err()
+            .expect("an action without components must fail")
+            .to_string();
+        eprintln!("action after failure: {action}");
+        assert!(action.contains("no action was dispatched") && action.contains("appcast"));
+
+        // A new attempt clears the outcome before it runs.
+        clear_setup_failure(directory.path()).unwrap();
+        let retry = gateway
+            .invoke_tool("js", json!({}), context("retry"))
+            .await
+            .unwrap();
+        assert!(retry.structured_result().to_string().contains("preparing"));
     }
 }
