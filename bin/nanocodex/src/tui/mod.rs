@@ -4418,6 +4418,7 @@ mod tests {
 
     fn scoped_agent_update(root_session_id: &str, update: AgentUpdate) -> ScopedAgentUpdate {
         ScopedAgentUpdate {
+            detach: false,
             root_session_id: root_session_id.to_owned(),
             update,
         }

@@ -126,12 +126,13 @@ export function createBrowserHost(options?: {
   /** @internal Trusted durable effect receipts, not available inside guest code. */
   codeEffectJournal?: CodeEffectJournal;
   toolMode?: "code" | "code-only" | "direct";
-  /** @internal Live host lifecycle for ephemeral Rust-owned subagents. */
+  /** @internal Live host lifecycle for Rust-owned subagents. */
   subagentRouting?: Pick<import('../runtime/subagent-routing.mjs').SubagentRouting, 'resolve' | 'bind'>;
   subagentSessions?: {
     bindingDescriptor?(sessionId: string, descriptor: SubagentToolContext, hostContextRef?: string): SubagentToolContext;
     bind(sessionId: string, descriptor: SubagentToolContext, hostContextRef?: string): void;
-    release(sessionId: string, hostContextRef?: string): void;
+    /** detach releases live resources while preserving durable bindings for restoration. */
+    release(sessionId: string, hostContextRef?: string, options?: { detach?: boolean }): void;
   };
   /** @internal Content-free summary, once when ownership closes; no public transport option. */
   onSocketTiming?: (timing: {

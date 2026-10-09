@@ -1033,9 +1033,17 @@ function cloudflareSubagentSessions(reservation, lifecycle) {
         status,
       });
     },
-    release(sessionId, hostContextRef) {
-      if (!mayReleaseCloudflareSubagentSession(reservation)) return;
+    release(sessionId, hostContextRef, options) {
       const retained = bindings.get(sessionId);
+      if (options?.detach === true) {
+        // Runtime teardown: the durable task tree restores this child with its
+        // retained authority and route, so only the live binding is dropped.
+        if (retained !== undefined && retained.hostContextRef === hostContextRef) {
+          bindings.delete(sessionId);
+        }
+        return;
+      }
+      if (!mayReleaseCloudflareSubagentSession(reservation)) return;
       if (retained === undefined || retained.hostContextRef !== hostContextRef) return;
       // Closing a parent releases its complete live subtree.
       const removed = new Set([retained.descriptor.agentId]);

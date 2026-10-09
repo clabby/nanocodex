@@ -196,15 +196,15 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
       subagentSessions?.bind?.(sessionId, descriptor, hostContextRef);
       children.set(sessionId, { descriptor, hostContextRef });
     },
-    releaseSession(sessionId) {
+    releaseSession(sessionId, options) {
       abort(sessionId);
       sessions.delete(sessionId);
-      code?.releaseSession(sessionId);
+      code?.releaseSession(sessionId, options);
       codeTurns.delete(sessionId);
       codeTurnOrdinals.delete(sessionId);
       effectIdentity.release(sessionId);
       const retained = children.get(sessionId);
-      if (retained) subagentSessions?.release?.(sessionId, retained.hostContextRef);
+      if (retained) subagentSessions?.release?.(sessionId, retained.hostContextRef, options);
       children.delete(sessionId);
     },
     releaseTurn(sessionId, turnId) {
@@ -276,7 +276,7 @@ export function createClaudeHost({ auth, tools = [], onEvent = () => {}, fetch, 
       apiKey = undefined;
       headerProvider = undefined;
       for (const sessionId of sessions.keys()) abort(sessionId);
-      for (const sessionId of [...children.keys()]) host.releaseSession(sessionId);
+      for (const sessionId of [...children.keys()]) host.releaseSession(sessionId, { detach: true });
       sessions.clear();
       handlers.clear();
       codeTurns.clear();

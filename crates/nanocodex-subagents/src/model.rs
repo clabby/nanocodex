@@ -296,6 +296,9 @@ pub enum AgentUpdate {
 }
 
 pub struct ScopedAgentUpdate {
+    /// A closed status tears down only live resources; durable bindings survive.
+    /// Captured by the registry when closing, independent of observer scheduling.
+    pub detach: bool,
     pub root_session_id: String,
     pub update: AgentUpdate,
 }

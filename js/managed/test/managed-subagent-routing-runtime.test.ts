@@ -72,7 +72,7 @@ it.each([
   ["openrouter", "workers_ai", "binding"], ["vercel", "workers_ai", "binding"],
   ["cloudflare", "workers_ai", "binding"], ["openrouter", "cloudflare", "binding"], ["cloudflare", "cloudflare", "binding"],
   ["cloudflare", "workers_ai", "rest"], ["openrouter", "cloudflare", "rest"], ["cloudflare", "cloudflare", "rest"],
-] as const)("opt-in %s root and %s child (%s) pin independent live transports and never resurrect children after unload", async (provider, childProvider, transport) => {
+] as const)("opt-in %s root and %s child (%s) pin independent live transports and restore durable children with their route after unload", async (provider, childProvider, transport) => {
   // Chat Completions tool calls require a supported pinned model.
   const rootModel = provider === "cloudflare" ? "gpt-6.1-sol" : "gpt-6-astra";
   const childModel = childProvider === "cloudflare" ? "gpt-6-astra" : OSS_MODEL;
@@ -83,12 +83,14 @@ it.each([
   const sessions = (env as unknown as { NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession> }).NANOCODEX_SESSIONS;
   await runInDurableObject(sessions.getByName(crypto.randomUUID()), async (session, state) => {
     let choices = 0, rootCalls = 0, childCalls = 0, childToolResults = 0, submissions = 0;
-    let phase = 1, step = 0, childId: number | undefined;
+    let phase = 1, step = 0, childId: number | undefined, closed = false;
     const childInference = Promise.withResolvers<void>();
     const observedTools: string[] = [];
     const sql = state.storage.sql;
     const table = (name: string) => sql.exec(`SELECT * FROM ${name}`).toArray();
-    const expectNoDurableChildren = () => {
+    const bindingRows = () => sql.exec<{ kind: string; session_id: string }>(
+      "SELECT kind, session_id FROM managed_subagent_bindings ORDER BY kind, session_id").toArray();
+    const expectNoObsoleteChildTables = () => {
       expect(sql.exec("SELECT name FROM sqlite_master WHERE name IN ('managed_subagent_routes', 'managed_subagent_authorizations', 'nanocodex_cloudflare_subagents', 'nanocodex_cloudflare_subagent_checkpoints')").toArray()).toEqual([]);
     };
     const request = (path: string, method: string, body?: unknown) => {
@@ -115,6 +117,11 @@ it.each([
           expect(input.reasoning).toEqual({ effort: "low" });
           return toNative(await (await rootResponse(fromNative(input))).json());
         }
+        // Thread titles use the same Workers AI model as children, but no tools.
+        // Keep this ancillary inference out of the child's turn accounting.
+        if (model === OSS_MODEL && !input.tools?.length) {
+          return completion({ content: "Exercise durable child routing" });
+        }
         const nativeInput = input;
         if (childProvider === "cloudflare") {
           expect(model).toBe("openai/gpt-6-astra");
@@ -125,13 +132,13 @@ it.each([
         const handleChild = async () => {
           childCalls++;
           if (childCalls === 1) await childInference.promise;
-          expect(childCalls).toBeLessThanOrEqual(6);
+          expect(childCalls).toBeLessThanOrEqual(7);
           if (childProvider === "workers_ai") {
             expect(model).toBe(OSS_MODEL);
             expect(nativeInput.reasoning_effort).toBe("high");
           }
-          expectNoDurableChildren();
-          // Result revisions remain runtime-owned after child durability is removed.
+          expectNoObsoleteChildTables();
+          // Result revisions stay runtime-owned; they never leak into model input.
           expect(JSON.stringify(input.messages)).not.toMatch(/turn_token: \d+/);
           const childTurn = phase;
           const last = input.messages.at(-1);
@@ -193,24 +200,45 @@ it.each([
         expect(childId).toBeTypeOf("number");
         return Response.json(completion({ content: "ROOT_DONE_1" }));
       }
-      if (phase === 2 && step++ === 0) return Response.json(call(body, "send_agent_message", {
-        agent_id: childId, message: "Recall the prior value from history and submit it for turn 2.", purpose: "delegate",
+      // After the idle unload, the rebuilt root must find its child restored
+      // from the durable task-tree journal before delegating to it again.
+      if (phase === 3 && step === 0) {
+        step++;
+        return Response.json(call(body, "list_agents", { include_completed: true }));
+      }
+      if (phase === 3 && step === 1) {
+        step++;
+        expect(JSON.parse(last.content).agents).toEqual([expect.objectContaining({
+          agent_id: childId, status: { state: "completed", output: { value: marker, turn: 2 } },
+        })]);
+      }
+      if (phase === 4) {
+        if (step++ === 0) return Response.json(call(body, "list_agents", { include_completed: true }));
+        expect(JSON.parse(last.content).agents).toEqual([expect.objectContaining({
+          agent_id: childId, status: { state: "closed" }, can_message: false, can_manage: false,
+        })]);
+        return Response.json(completion({ content: "ROOT_DONE_4" }));
+      }
+      if (phase >= 2 && step++ <= (phase === 3 ? 2 : 0)) return Response.json(call(body, "send_agent_message", {
+        agent_id: childId, message: `Recall the prior value from history and submit it for turn ${phase}.`, purpose: "delegate",
       }));
-      if (phase < 3) {
-        const receipt = last?.role === "tool" ? JSON.parse(last.content) : undefined;
-        const child = receipt?.agents?.find((agent: any) => agent.agent_id === childId);
-        if (child?.status.state === "completed") {
-          expect(child.status.output).toEqual({ value: marker, turn: phase });
-          return Response.json(completion({ content: `ROOT_DONE_${phase}` }));
+      if (closed) {
+        expect(JSON.parse(last.content).agents).toEqual([expect.objectContaining({
+          agent_id: childId, status: { state: "closed" },
+        })]);
+        return Response.json(completion({ content: `ROOT_DONE_${phase}` }));
+      }
+      const receipt = last?.role === "tool" ? JSON.parse(last.content) : undefined;
+      const child = receipt?.agents?.find((agent: any) => agent.agent_id === childId);
+      if (child?.status.state === "completed" && child.status.output?.turn === phase) {
+        expect(child.status.output).toEqual({ value: marker, turn: phase });
+        if (phase === 3) {
+          closed = true;
+          return Response.json(call(body, "close_agent", { agent_id: childId }));
         }
-        return Response.json(call(body, "wait_agent", { agent_ids: [childId], timeout_ms: 5_000 }));
+        return Response.json(completion({ content: `ROOT_DONE_${phase}` }));
       }
-      if (step++ === 0) return Response.json(call(body, "list_agents", { include_completed: true }));
-      if (step === 2) {
-        expect(JSON.parse(last.content).agents).toEqual([]);
-        return Response.json(call(body, "close_agent", { agent_id: childId }));
-      }
-      return Response.json(completion({ content: "ROOT_DONE_3" }));
+      return Response.json(call(body, "wait_agent", { agent_ids: [childId], timeout_ms: 5_000 }));
     };
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const req = new Request(input, init);
@@ -250,7 +278,7 @@ it.each([
       expect(choices).toBe(0);
       expect(table("managed_thread_route")).toHaveLength(0);
       let rootPin: unknown;
-      for (phase = 1; phase <= 3; phase++) {
+      for (phase = 1; phase <= 4; phase++) {
         step = 0;
         const id = `fixture-turn-${phase}`;
         expect((await request("/turns", "POST", { id, input: `Run fixture phase ${phase}.` })).status).toBe(202);
@@ -261,7 +289,7 @@ it.each([
         if (phase === 1) {
           rootPin = table("managed_thread_route");
           // The root is finished, but a child still owns an in-flight model call.
-          // Aging the root must not unload that ephemeral child.
+          // Aging the root must not unload that running child.
           sql.exec("UPDATE session_state SET last_active=0");
           await session.alarm();
           expect(await (await request("/state", "GET")).json()).toMatchObject({ agent_loaded: true });
@@ -289,16 +317,27 @@ it.each([
         expect(status.model_route).toEqual(JSON.parse(String(table("managed_thread_route")[0].route_json)));
         expect(status.model_route).toMatchObject({ backend: provider, model: rootModel, thinking: "low" });
         expect(choices).toBe(2);
-        expectNoDurableChildren();
+        expectNoObsoleteChildTables();
+        if (phase === 3) {
+          expect(bindingRows()).toEqual([]);
+          sql.exec("UPDATE session_state SET last_active=0");
+          await session.alarm();
+          expect(await (await request("/state", "GET")).json()).toMatchObject({ agent_loaded: false });
+        }
         if (phase === 2) {
           if (provider !== "cloudflare" && childProvider !== "cloudflare") {
             (session as unknown as { env: Record<string, unknown> }).env.NANOCODEX_CLOUDFLARE_FRONTIER_ENABLED = "false";
           }
           // Drive the production idle alarm after aging only its activity clock.
+          const durableBindings = bindingRows();
+          expect(durableBindings.map(row => row.kind).sort()).toEqual(["authorization", "route"]);
           sql.exec("UPDATE session_state SET last_active=0");
           await session.alarm();
           expect(await (await request("/state", "GET")).json()).toMatchObject({ agent_loaded: false });
-          expectNoDurableChildren();
+          // Unloading is a runtime teardown, not a close: the restored child
+          // keeps its spawning authority and pinned route.
+          expect(bindingRows()).toEqual(durableBindings);
+          expectNoObsoleteChildTables();
           // A fresh client connection reads the retained root settings without
           // selecting a route or reconstructing a child on the read itself.
           const headers = new Headers({ upgrade: "websocket" });
@@ -314,13 +353,15 @@ it.each([
           socket.close(1000, "fixture reconnect complete");
           expect(choices).toBe(2);
           expect(table("managed_thread_route")).toEqual(rootPin);
-          expectNoDurableChildren();
+          expectNoObsoleteChildTables();
         }
       }
-      expectNoDurableChildren();
+      expectNoObsoleteChildTables();
+      // An explicit close is permanent and releases the child's bindings.
+      expect(bindingRows()).toEqual([]);
       expect(childToolResults).toBe(1);
-      expect(submissions).toBe(2);
-      expect(childCalls).toBe(5);
+      expect(submissions).toBe(3);
+      expect(childCalls).toBe(7);
       expect(observedTools).toEqual(expect.arrayContaining(["spawn_agent", "wait_agent", "send_agent_message", "list_agents", "close_agent", "child:exec_command", "child:submit_result"]));
     } finally {
       childInference.resolve();

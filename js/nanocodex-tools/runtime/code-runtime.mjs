@@ -958,12 +958,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     closeCodeObservations(sessionId, turn);
   }
 
-  function releaseSession(sessionId) {
+  function releaseSession(sessionId, options) {
     turnLifecycle.release(sessionId);
     cancel(sessionId);
     const binding = subagentBindingsBySession.get(sessionId);
     if (binding !== undefined) {
-      subagentSessions?.release?.(sessionId, binding.hostContextRef);
+      subagentSessions?.release?.(sessionId, binding.hostContextRef, options);
     }
     turns.delete(sessionId);
     stores.delete(sessionId);

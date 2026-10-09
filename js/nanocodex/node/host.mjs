@@ -351,7 +351,7 @@ export function createNodeHost(options = {}) {
     cancelCode: code.cancel,
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
-    releaseSession: (sessionId) => { effectIdentity.release(sessionId); return code.releaseSession(sessionId); },
+    releaseSession: (sessionId, options) => { effectIdentity.release(sessionId); return code.releaseSession(sessionId, options); },
     emitEvent: (event, ...args) => { code.observeEvent(event); effectIdentity.observe(event); return onEvent(event, ...args); },
     reset: () => { effectIdentity.reset(); return code.reset(); },
     dispose,

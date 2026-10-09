@@ -594,7 +594,9 @@ const hostBridge = Object.freeze({
     host.bindSubagentSession(sessionId, JSON.parse(contextJson), hostContextRef);
     hostSessions.set(sessionId, host);
   },
-  releaseSubagentSession(hostDefinitionId, rootSessionId, sessionId) {
+  // `detach` marks a runtime teardown: the child stays restorable from its
+  // durable task-tree journal, so hosts keep its durable bindings.
+  releaseSubagentSession(hostDefinitionId, rootSessionId, sessionId, detach) {
     let host;
     if (sessionId !== undefined) {
       host = definitionHosts.get(hostDefinitionId);
@@ -606,7 +608,7 @@ const hostBridge = Object.freeze({
       host = hostSessions.get(sessionId);
     }
     if (!host || hostSessions.get(sessionId) !== host) return;
-    host.releaseSession(sessionId);
+    host.releaseSession(sessionId, detach === true ? { detach: true } : undefined);
     releaseHostSession(host, sessionId);
   },
   executeCode(source, sessionId, callId, model, turnId, localDefinitions, executeLocalTool) {

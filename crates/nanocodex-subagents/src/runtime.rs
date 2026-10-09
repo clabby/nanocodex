@@ -1766,16 +1766,19 @@ impl Registry {
     }
 
     pub(super) async fn harness_closed(&self, root_session_id: &str, id: AgentId) {
-        let status_update = {
+        let (status_update, detach) = {
             let mut state = self.state.lock().await;
-            let Some(session) = state
-                .scopes
-                .get_mut(root_session_id)
-                .and_then(|scope| scope.sessions.get_mut(&id))
-            else {
+            let Some(scope) = state.scopes.get_mut(root_session_id) else {
                 return;
             };
-            if matches!(session.status, AgentStatus::Closed) {
+            // close_all sets this only after taking message_lock, so an
+            // explicit close already draining its harness stays a permanent
+            // release even if shutdown has started waiting for that lock.
+            let detach = scope.closing;
+            let Some(session) = scope.sessions.get_mut(&id) else {
+                return;
+            };
+            let status = if matches!(session.status, AgentStatus::Closed) {
                 None
             } else {
                 session.harness = None;
@@ -1790,10 +1793,16 @@ impl Registry {
                     session.status = AgentStatus::Closed;
                     Some(AgentStatus::Closed)
                 }
-            }
+            };
+            (status, detach)
         };
         if let Some(status) = status_update {
-            self.send(root_session_id, AgentUpdate::Status { id, status });
+            let _ = send_update(
+                &self.updates,
+                root_session_id,
+                AgentUpdate::Status { id, status },
+                detach,
+            );
         }
         self.changed();
     }
@@ -1818,7 +1827,7 @@ impl Registry {
     }
 
     pub(super) fn send(&self, root_session_id: &str, update: AgentUpdate) {
-        let _ = send_update(&self.updates, root_session_id, update);
+        let _ = send_update(&self.updates, root_session_id, update, false);
     }
 
     pub async fn directory(
@@ -2190,7 +2199,8 @@ impl Registry {
             self.send(&root_session_id, AgentUpdate::Status { id, status });
         }
         self.changed();
-        self.stop_and_close(root_session_id, ids, harnesses).await
+        self.stop_and_close(root_session_id, ids, harnesses, false)
+            .await
     }
 
     async fn close_batch(&self, root_session_id: &str, ids: Vec<AgentId>) {
@@ -2216,7 +2226,9 @@ impl Registry {
         }
         self.changed();
         let root = root_session_id.clone();
-        let result = self.stop_and_close(root_session_id, ids, harnesses).await;
+        let result = self
+            .stop_and_close(root_session_id, ids, harnesses, true)
+            .await;
         if result.is_ok() {
             // Factory recipes may retain the embedding's registry. Drop the root
             // capability at scope shutdown so those approved recipes do not form
@@ -2234,6 +2246,7 @@ impl Registry {
         root_session_id: String,
         ids: Vec<AgentId>,
         harnesses: Vec<HarnessHandle>,
+        detach: bool,
     ) -> std::io::Result<Vec<AgentSummary>> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -2256,12 +2269,14 @@ impl Registry {
             .await
             .finish_close(&root_session_id, &ids)?;
         for summary in &summaries {
-            self.send(
+            let _ = send_update(
+                &self.updates,
                 &root_session_id,
                 AgentUpdate::Status {
                     id: summary.agent_id,
                     status: AgentStatus::Closed,
                 },
+                detach,
             );
         }
         let closed_sessions = {
@@ -2596,7 +2611,12 @@ pub(super) fn forward_events(
                 event.kind,
                 AgentEventKind::ModelCallStarted | AgentEventKind::ToolCall
             );
-            if !send_update(&updates, &root_session_id, AgentUpdate::Event { id, event }) {
+            if !send_update(
+                &updates,
+                &root_session_id,
+                AgentUpdate::Event { id, event },
+                false,
+            ) {
                 return;
             }
             if progress && let Some(registry) = registry.upgrade() {
@@ -2613,9 +2633,11 @@ fn send_update(
     updates: &mpsc::UnboundedSender<ScopedAgentUpdate>,
     root_session_id: &str,
     update: AgentUpdate,
+    detach: bool,
 ) -> bool {
     updates
         .send(ScopedAgentUpdate {
+            detach,
             root_session_id: root_session_id.to_owned(),
             update,
         })
