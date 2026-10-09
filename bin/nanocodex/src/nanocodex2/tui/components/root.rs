@@ -3446,7 +3446,14 @@ impl RootNode {
         if self.side_pane
             && !matches!(
                 &command,
-                SettingsCommand::CloseBtw | SettingsCommand::Btw(_) | SettingsCommand::Zoom
+                SettingsCommand::CloseBtw
+                    | SettingsCommand::Btw(_)
+                    | SettingsCommand::Zoom
+                    // FEATURE-HOOK: wp2 the side thread collapses or splits from its own pane.
+                    | SettingsCommand::Feature(
+                        crate::nanocodex2::tui::features::FeatureCommand::Collapse
+                            | crate::nanocodex2::tui::features::FeatureCommand::Split
+                    )
             )
         {
             self.notification = Some(Notification::plain(
