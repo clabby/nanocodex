@@ -1173,6 +1173,18 @@ impl AppNode {
         (pane, *parent)
     }
 
+    /// FEATURE-HOOK: wp2 closes the side pane on a feature's request (/collapse, /split).
+    pub(crate) fn close_fork(&mut self, pane: PaneId) -> ComponentUpdate<AppEffect> {
+        if self.fork.as_ref().is_some_and(|(id, _)| *id == pane) {
+            self.remove_pane(pane);
+            return ComponentUpdate {
+                effects: vec![AppEffect::ClosePane(pane)],
+                render: RenderRequest::Immediate,
+            };
+        }
+        ComponentUpdate::render(RenderRequest::Immediate)
+    }
+
     fn remove_pane(&mut self, pane: PaneId) {
         if self.pending_btw.as_ref().is_some_and(|(id, _)| *id == pane) {
             self.pending_btw = None;

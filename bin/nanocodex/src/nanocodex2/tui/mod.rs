@@ -4311,9 +4311,10 @@ async fn apply_feature_update(
             runtime.local_voice_status = status;
             app.update(AppEvent::VoiceStatus(runtime.voice_status()))
         }
+        // FEATURE-HOOK: wp2 /collapse and /split close the local side pane.
+        FeatureUpdate::ClosePane(pane) => app.close_fork(pane),
         FeatureUpdate::ReplaceAgent(_)
         | FeatureUpdate::OpenPane(_)
-        | FeatureUpdate::ClosePane(_)
         | FeatureUpdate::Capabilities(_) => app.update(AppEvent::NotifyError {
             pane: PaneId::Main,
             error: "This feature action is not wired into the unified TUI yet".to_owned(),
@@ -4350,6 +4351,36 @@ async fn apply_update(
                         &mut effects,
                         scheduler,
                     );
+                    continue;
+                }
+                if runtime.local.is_some() {
+                    // FEATURE-HOOK: wp2 local /btw forks the in-process agent.
+                    let Some(main) = runtime.agent.clone() else {
+                        absorb(
+                            app.update(AppEvent::ForkFailed {
+                                pane,
+                                error: "Wait for the local agent before opening /btw".into(),
+                            }),
+                            &mut effects,
+                            scheduler,
+                        );
+                        continue;
+                    };
+                    let (commands, requests) = mpsc::unbounded_channel();
+                    let task = tokio::spawn(features::btw_local::run(
+                        pane,
+                        main,
+                        runtime.settings,
+                        runtime.sequence.saturating_add(1),
+                        requests,
+                        runtime.btw_events.clone(),
+                    ));
+                    runtime.btw = Some(BtwConnection {
+                        pane,
+                        agent_id: None,
+                        commands,
+                        task,
+                    });
                     continue;
                 }
                 let (commands, requests) = mpsc::unbounded_channel();
@@ -4415,6 +4446,15 @@ async fn apply_update(
                 }
                 if pane != PaneId::Main {
                     match effect {
+                        RootEffect::Feature(command) => {
+                            // FEATURE-HOOK: wp2 /collapse and /split typed in the side pane.
+                            let handled = runtime.local.as_mut().is_some_and(|local| {
+                                local.with_features(|features, cx| features.command(pane, &command, cx))
+                            });
+                            if !handled {
+                                absorb(app.update(AppEvent::NotifyError { pane, error: "This command needs a local agent (run ncl)".into() }), &mut effects, scheduler);
+                            }
+                        }
                         RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
                             if runtime
                                 .btw

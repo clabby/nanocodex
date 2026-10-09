@@ -15,6 +15,7 @@ mod notification;
 mod scheduler;
 mod selection;
 mod slash_commands;
+#[path = "../nanocodex2/tui/features/split_launch.rs"]
 mod split;
 mod startup;
 mod telemetry;

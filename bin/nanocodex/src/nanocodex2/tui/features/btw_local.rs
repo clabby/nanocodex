@@ -12,7 +12,7 @@ use nanocodex_agent::{PromptRequest, TurnControl, TurnResult};
 use nanocodex_managed::AgentSettings;
 use tokio::{sync::mpsc, task::JoinSet};
 
-use super::{Feature, FeatureCommand, FeatureContext, FeatureUpdate};
+use super::{Feature, FeatureCommand, FeatureContext, FeaturePrompt, FeatureUpdate};
 use crate::nanocodex2::tui::{
     btw::{Event, Request},
     history,
@@ -230,13 +230,15 @@ impl Feature for LocalBtw {
             return false;
         }
         match collapse_prompt(cx.busy) {
-            Ok((side, prompt)) => {
+            Ok((side, (display, instruction))) => {
                 drop(release(side.pane));
                 cx.host.send(FeatureUpdate::ClosePane(side.pane));
-                cx.host.send(FeatureUpdate::Submit {
+                cx.host.send(FeatureUpdate::SubmitPrompt(FeaturePrompt {
                     pane: Some(PaneId::Main),
-                    text: prompt,
-                });
+                    display,
+                    instruction: Some(instruction),
+                    completion: None,
+                }));
                 tokio::spawn(async move { drop(side.agent.shutdown().await) });
             }
             Err(error) => cx.host.error(Some(pane), format!("BTW was not collapsed: {error}")),
@@ -245,7 +247,7 @@ impl Feature for LocalBtw {
     }
 }
 
-fn collapse_prompt(main_busy: bool) -> Result<(Side, String), &'static str> {
+fn collapse_prompt(main_busy: bool) -> Result<(Side, (String, String)), &'static str> {
     let side = active().ok_or("/collapse requires an open /btw thread")?;
     if side.busy {
         return Err("BTW has an active turn; wait for it to finish before /collapse");
@@ -265,13 +267,14 @@ fn collapse_prompt(main_busy: bool) -> Result<(Side, String), &'static str> {
     Ok((side, prompt))
 }
 
-fn collapse_btw_prompt(thread_id: &str) -> String {
-    format!(
-        "BTW Codex thread ID: {thread_id}\n\nThe user completed a /btw side exploration in local Codex thread {thread_id}. Read that thread and incorporate its relevant findings into the main task. Use `read_session` with source `local` and session_id `{thread_id}` when available; otherwise locate the local Codex rollout by this thread ID and inspect it with local tools."
-    )
+fn collapse_btw_prompt(thread_id: &str) -> (String, String) {
+    let display = format!("BTW Codex thread ID: {thread_id}");
+    (display, format!(
+        "The user completed a /btw side exploration in local Codex thread {thread_id}. Read that thread and incorporate its relevant findings into the main task. Use `read_session` with source `local` and session_id `{thread_id}` when available; otherwise locate the local Codex rollout by this thread ID and inspect it with local tools."
+    ))
 }
 
-fn inline_collapse_btw_prompt(exchanges: &[(bool, String)]) -> String {
+fn inline_collapse_btw_prompt(exchanges: &[(bool, String)]) -> (String, String) {
     let first_question = exchanges
         .iter()
         .find_map(|(user, text)| user.then_some(text.trim()))
@@ -322,7 +325,7 @@ fn inline_collapse_btw_prompt(exchanges: &[(bool, String)]) -> String {
     for block in kept {
         transcript.push_str(&block);
     }
-    format!(
-        "{display}\n\nThe user finished a /btw side conversation forked from this conversation. It ran separately while this thread continued, so its answers may reflect earlier context and any tool activity in it is not shown. Incorporate its relevant findings into the main task; do not repeat work it already settled unless current evidence contradicts it.\n\n<btw_conversation>\n{transcript}</btw_conversation>"
-    )
+    (display, format!(
+        "The user finished a /btw side conversation forked from this conversation. It ran separately while this thread continued, so its answers may reflect earlier context and any tool activity in it is not shown. Incorporate its relevant findings into the main task; do not repeat work it already settled unless current evidence contradicts it.\n\n<btw_conversation>\n{transcript}</btw_conversation>"
+    ))
 }
