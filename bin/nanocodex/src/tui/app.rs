@@ -1235,6 +1235,8 @@ fn smooth_scroll_drain(pending_rows: usize) -> usize {
 pub(super) struct BtwPane {
     pub(super) id: u64,
     pub(super) request_id: Option<Arc<str>>,
+    /// Whether another process can read or resume this fork from a rollout.
+    pub(super) resumable: bool,
     collapsing: bool,
     splitting: bool,
     pub(super) conversation: Conversation,
@@ -2400,6 +2402,7 @@ impl App {
         self.btw = Some(BtwPane {
             id,
             request_id: None,
+            resumable: false,
             collapsing: false,
             splitting: false,
             conversation,
@@ -2597,9 +2600,10 @@ impl App {
         }
     }
 
-    pub(super) fn btw_opened(&mut self, id: u64, request_id: Arc<str>) {
+    pub(super) fn btw_opened(&mut self, id: u64, request_id: Arc<str>, resumable: bool) {
         if let Some(btw) = self.btw.as_mut().filter(|btw| btw.id == id) {
             btw.request_id = Some(request_id);
+            btw.resumable = resumable;
             btw.conversation.status = if btw.conversation.pending_turns == 0 {
                 "Ready".to_owned()
             } else {
@@ -4527,7 +4531,7 @@ mod tests {
         assert!(!app.begin_btw_split(id));
         assert!(!app.btw_splitting(id));
 
-        app.btw_opened(id, Arc::from("btw-thread"));
+        app.btw_opened(id, Arc::from("btw-thread"), true);
         assert!(app.begin_btw_split(id));
         assert!(app.btw_busy());
         app.btw_split_failed(id, "no terminal".to_owned(), false);
@@ -4541,7 +4545,7 @@ mod tests {
         assert_eq!(app.main.status, "BTW moved to the right tmux pane");
 
         let id = app.begin_btw();
-        app.btw_opened(id, Arc::from("second-btw-thread"));
+        app.btw_opened(id, Arc::from("second-btw-thread"), true);
         assert!(app.begin_btw_split(id));
         app.btw_split_failed(id, "launch failed; resume manually".to_owned(), true);
         assert!(app.btw.is_none());
