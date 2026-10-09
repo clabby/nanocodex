@@ -2373,6 +2373,8 @@ async fn run_inner(
         feature_completions: HashMap::new(),
         feature_turns: HashSet::new(),
         local_voice_status: None,
+        feature_relaunching: false,
+        feature_relaunch_queued: false,
         pending_voice: None,
         voice_selection: Default::default(),
         voice_tasks: JoinSet::new(),
