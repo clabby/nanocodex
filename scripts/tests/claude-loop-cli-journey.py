@@ -85,7 +85,7 @@ def main():
   (workspace/'.claude/loop.md').unlink();(home/'.claude').mkdir();(home/'.claude/loop.md').write_text('user-home-default-marker')
   phase('home-default');enter('/loop');completed();require('user-home-default-marker' in latest_prompt(),'user fallback not loaded');os.write(master,b'\x1b');wait(lambda:'wakeup' not in journal()['tasks'],'home loop cancellation missing');checks.append('missing project loop.md falls back to trusted user home')
   # New real CLI sessions prove automatic fallback cannot bypass Ask or Deny.
-  os.write(master,b'\x03');proc.wait(timeout=10);drain()
+  os.write(master,b'\x03\x03');proc.wait(timeout=10);drain()
   for admission in ['ask','deny']:
    case_rules=artifact/(admission+'-permissions.json');case_rules.write_text(json.dumps({'permissions':{'defaultMode':'full-access',admission:['ScheduleWakeup']}}))
    before=set((codex_home/'claude/schedules').glob('*.json'));case_flags=common.copy();case_flags[case_flags.index(str(rules))]=str(case_rules);phase('policy-'+admission)
@@ -100,7 +100,7 @@ def main():
     added=set((codex_home/'claude/schedules').glob('*.json'))-before;require(len(added)==1,'policy scheduler journal missing');case_journal=json.loads(next(iter(added)).read_text());require('wakeup' not in case_journal['tasks'] and not case_journal['wakeup_iteration_active'],'automatic fallback bypassed '+admission);(artifact/(admission+'-journal.json')).write_text(json.dumps(case_journal,indent=2))
    finally:
     if cp.poll() is None:
-     os.write(cm,b'\x03')
+     os.write(cm,b'\x03\x03')
      try:cp.wait(timeout=10)
      except subprocess.TimeoutExpired:cp.kill();cp.wait()
     os.close(cm);(artifact/(admission+'.pty')).write_bytes(case_bytes);(artifact/(admission+'.screen.txt')).write_text(case_screen.text())
@@ -108,7 +108,7 @@ def main():
   outcome={'success':True,'checks':checks,'binary_sha256':binary_sha256,'timing_boundary':'20-minute fallback accelerated by explicit persisted journal fixture; no fake production clock'}
  finally:
   if proc.poll() is None:
-   os.write(master,b'\x03')
+   os.write(master,b'\x03\x03')
    try:proc.wait(timeout=10)
    except subprocess.TimeoutExpired:proc.kill();proc.wait()
   drain();os.close(master);server.shutdown();(artifact/'terminal.pty').write_bytes(transcript);(artifact/'screen.txt').write_text(screen.text());(artifact/'receipts.json').write_text(json.dumps(receipts,indent=2));(artifact/'persisted-time-fixtures.json').write_text(json.dumps(fixtures,indent=2));(artifact/'scenario.json').write_text(json.dumps({'command':command,'environment':env},indent=2));(artifact/'outcome.json').write_text(json.dumps(outcome,indent=2));print(json.dumps({'artifact':str(artifact),**outcome}))

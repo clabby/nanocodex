@@ -149,8 +149,8 @@ def main():
             wait(lambda: all(model in screen.text() for model in models), 'picker omitted a model')
             (out / 'picker.txt').write_text(screen.text())
             if picker:
-                # Default Sol is second; Sonnet is fifth in the public menu.
-                os.write(master, b'jjj\r')
+                # Default Sol is second; Sonnet is fifth in the unified picker.
+                os.write(master, b'\x1b[B\x1b[B\x1b[B\r')
             else:
                 os.write(master, b'\x1b')
                 wait(lambda: 'Select model' not in screen.text(), 'picker failed to close')
