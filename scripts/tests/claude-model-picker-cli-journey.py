@@ -127,7 +127,11 @@ def main():
             os.write(master, text.encode() + b'\r')
 
         def footer():
-            return screen.text().splitlines()[-1]
+            # The unified composer shows model and effort on its top border and
+            # the status line below it; read the composer block, not one row.
+            lines = screen.text().splitlines()
+            top = max((i for i, line in enumerate(lines) if line.lstrip().startswith('╭─')), default=len(lines) - 1)
+            return ' '.join(lines[top:])
 
         start = len(requests)
         try:
@@ -171,7 +175,7 @@ def main():
                 wire = requests[-1]['request']
                 effort = wire.get('output_config', {}).get('effort')
                 h.require(wire.get('thinking', {}).get('type') == 'adaptive', 'Haiku 5.5 lost adaptive thinking')
-                h.require(effort is not None and f'· {effort}' in footer(), 'Haiku 5.5 effort display does not match the wire')
+                h.require(effort is not None and f' {effort} ' in footer(), 'Haiku 5.5 effort display does not match the wire')
             send('/model sol' if expected.startswith('claude') else '/model sonnet')
             wait(lambda: 'only be changed before the first prompt' in screen.text(), 'started thread allowed model change')
             h.require(expected in footer(), 'rejected change altered displayed model')
