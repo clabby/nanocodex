@@ -79,7 +79,7 @@ test('public SDK shares canonical children across both native harness families',
     return 'MIXED_EFFECT_RECEIPT';
   } };
   const codex = { module, model: 'gpt-6.1-sol', thinking: 'low', toolMode: 'direct', tools: [proof], transport: Transport.openAi({ apiKey: 'synthetic-codex', apiBaseUrl: `${base}/v1`, stateless: true }) };
-  const claude = { module, model: 'claude-sonnet-4-6', thinking: 'low', endpoint: `${base}/v1/messages`, auth: { apiKey: 'synthetic-claude' }, tools: [{ name: proof.name, description: proof.description, inputSchema: proof.parameters, handler: proof.handler }, {
+  const claude = { module, model: 'claude-sonnet-5-5', thinking: 'low', endpoint: `${base}/v1/messages`, auth: { apiKey: 'synthetic-claude' }, tools: [{ name: proof.name, description: proof.description, inputSchema: proof.parameters, handler: proof.handler }, {
     name: 'await_abort', description: 'Hold one synthetic effect until cancellation', handler(_input, context) {
       assert.ok(context.subagent, 'interrupted handler receives child identity');
       assert.equal(context.signal.aborted, false);
@@ -101,7 +101,7 @@ test('public SDK shares canonical children across both native harness families',
     const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);
     roots.push(await Agent.create({ ...claude, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code', codeEvaluator: createQuickJsEvaluator(quickJs) } } }));
     roots.push(await NodeAgent.create({ ...claude, module: undefined, harness: 'claude', subagents: {}, harnesses: { codex: { ...codex, toolMode: 'code' } } }));
-    roots.push(await Agent.create({ ...claude, model: 'claude-proxy-fixture', thinking: undefined, harness: 'claude', subagents: {} }));
+    roots.push(await Agent.create({ ...claude, model: 'claude-proxy-fixture', maxTokens: 1024, thinking: undefined, harness: 'claude', subagents: {} }));
     const batchTask = { role: 'batch fixture', task: 'Perform proof once, then submit the typed result.', outputSchema: { type: 'object' } };
     for (const override of [{ harness: 'claude' }, { harness: 'codex' }, { model: 'sol' }, { thinking: 'low' }]) {
       const before = trace.length;
