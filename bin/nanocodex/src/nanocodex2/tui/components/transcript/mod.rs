@@ -7,6 +7,7 @@ mod diff;
 mod empty;
 mod highlight;
 pub(crate) mod image;
+pub(crate) mod math;
 mod markdown;
 mod message;
 mod review;
@@ -139,6 +140,8 @@ struct LayoutCache {
     tools_hidden: bool,
     workspace: std::path::PathBuf,
     images: image::Cache,
+    /// Last observed math renderer update; see math::updates.
+    math_updates: u64,
 }
 
 impl Default for LayoutCache {
@@ -148,6 +151,7 @@ impl Default for LayoutCache {
             entries: HashMap::new(),
             validated_activity: Default::default(),
             live_tool_durations: HashMap::new(),
+            math_updates: 0,
             expansion_overrides: HashMap::new(),
             expand_all: tool_calls_from_env().0,
             tools_hidden: tool_calls_from_env().1,
@@ -473,6 +477,7 @@ impl Transcript {
             .into_iter()
             .chain(self.retry_timer.and_then(|timer| timer.next_frame))
             .chain(self.cache.images.animation_deadline())
+            .chain(math::deadline(Instant::now()))
             .min()
     }
 
@@ -1488,6 +1493,7 @@ impl LayoutCache {
     }
 
     fn refresh_terminal_images(&mut self) {
+        math::reupload_all();
         self.images.advance_terminal_generation();
         self.entries
             .retain(|_, entry| entry.image_state != markdown::ImageState::Pending);
@@ -1499,6 +1505,20 @@ impl LayoutCache {
     }
 
     fn poll_images(&mut self, now: Instant) -> bool {
+        let math_updates = math::updates();
+        let math_changed = math_updates != self.math_updates;
+        if math_changed {
+            // A formula finished (or the renderer started): re-layout entries
+            // that showed pending source. Visible ones re-mark pending if needed.
+            self.math_updates = math_updates;
+            math::clear_pending();
+            self.entries
+                .retain(|_, entry| entry.image_state != markdown::ImageState::Pending);
+        }
+        self.poll_terminal_images(now) || math_changed
+    }
+
+    fn poll_terminal_images(&mut self, now: Instant) -> bool {
         let result = self.images.poll(now);
         match result.layout_change {
             image::LayoutChange::Ready => {

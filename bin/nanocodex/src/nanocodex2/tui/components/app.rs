@@ -1196,6 +1196,10 @@ impl AppNode {
         self.main.as_ref().map(|(pane, _)| *pane)
     }
 
+    pub(crate) fn fork_pane(&self) -> Option<PaneId> {
+        self.fork.as_ref().map(|(pane, _)| *pane)
+    }
+
     fn pane(&self, pane: PaneId) -> Option<&Node<RootNode>> {
         self.main
             .as_ref()
