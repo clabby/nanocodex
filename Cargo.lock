@@ -2747,7 +2747,6 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
- "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
@@ -5841,7 +5840,6 @@ dependencies = [
  "chrono-tz",
  "clap",
  "criterion",
- "crossterm 0.28.1",
  "crossterm 0.29.0",
  "dark-light",
  "dotenvy",
@@ -5885,8 +5883,7 @@ dependencies = [
  "percent-encoding",
  "png 0.18.1",
  "portable-pty",
- "pulldown-cmark 0.10.3",
- "pulldown-cmark 0.13.4",
+ "pulldown-cmark",
  "rand 0.9.5",
  "ratatex",
  "ratatui 0.29.0",
@@ -8124,17 +8121,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "pulldown-cmark"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76979bea66e7875e7509c4ec5300112b316af87fa7a252ca91c448b32dfe3993"
-dependencies = [
- "bitflags 2.13.1",
- "memchr",
- "unicase",
 ]
 
 [[package]]

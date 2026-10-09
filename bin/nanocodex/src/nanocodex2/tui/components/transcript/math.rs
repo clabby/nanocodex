@@ -21,8 +21,8 @@ use std::{
 
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use ratatex::{FormulaState, FormulaWidget, GraphicsSupport, PixelSize, Ratatex, TerminalProfile};
-// ratatex draws with the ratatui release the legacy TUI still uses.
-use legacy_ratatui::{buffer::Buffer, layout::Rect, widgets::Widget as _};
+// ratatex exposes 0.29 buffers, converted below into the shared 0.30 renderer.
+use ratatex_ratatui::{buffer::Buffer, layout::Rect, widgets::Widget as _};
 use ratatui::{
     style::{Color, Style},
     text::Span,
@@ -172,7 +172,7 @@ pub(super) fn render(source: &str, max_columns: u16) -> Rendered {
                         let cell = &buffer[(x, y)];
                         text.push_str(cell.symbol());
                         // The foreground colour encodes the Kitty image id.
-                        if let legacy_ratatui::style::Color::Rgb(red, green, blue) = cell.fg {
+                        if let ratatex_ratatui::style::Color::Rgb(red, green, blue) = cell.fg {
                             style = Style::default().fg(Color::Rgb(red, green, blue));
                         }
                     }
