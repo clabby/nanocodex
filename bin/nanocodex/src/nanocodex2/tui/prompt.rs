@@ -115,7 +115,7 @@ impl Submission {
         let offset = prefix.len() + separator.len();
         self.text = format!("{prefix}{separator}{}", self.text);
         if let Some(agent) = self.agent.take() {
-            self.agent = Some(Box::new(agent.prepend_text(prefix.clone())));
+            self.agent = Some(Box::new(agent.prepend_text(prefix)));
         }
         for image in &mut self.images {
             image.range.start += offset;
