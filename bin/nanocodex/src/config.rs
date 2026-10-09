@@ -756,7 +756,7 @@ impl AgentArgs {
         let claude_tools = tools
             .clone()
             .into_builder()
-            .workspace(false)
+            .workspace(self.workspace_tools)
             .web_search(false)
             .image_generation(false)
             .build()?;

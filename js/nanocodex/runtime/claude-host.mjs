@@ -5,11 +5,11 @@ import { createCodeEffectIdentity } from './code-effect-identity.mjs';
 
 const TOOL_RESULT = Symbol.for('nanocodex.toolResult');
 const MEDIA = new Set(['input_text', 'input_image', 'input_audio', 'encrypted_content']);
-// These are Codex runtime contracts, not Claude capabilities. Never reinterpret
-// a namedTool() from the existing default catalog as a native Claude definition.
+// Reserve harness-owned operations. Explicit execution capabilities share the
+// exec_command/write_stdin contracts across Codex and Claude.
 const TOOL_KEYS = new Set(['name', 'description', 'handler', 'inputSchema', 'parameters', 'strict', 'deferLoading', 'defer_loading', 'supportsParallelToolCalls']);
 const CODEX_TOOL_NAMES = new Set([
-  'exec', 'wait', 'tool_search', 'exec_command', 'write_stdin', 'apply_patch',
+  'exec', 'wait', 'tool_search', 'apply_patch',
   'view_image', 'update_plan', 'web__run', 'image_gen__imagegen',
 ]);
 // Shared platform operations are installed by the owned task-tree runtime.
@@ -19,7 +19,7 @@ const PLATFORM_SUBAGENT_NAMES = new Set([
   'interrupt_agent', 'close_agent', 'submit_result',
 ]);
 
-/** Explicit Claude-only catalog; never discovers or installs Codex tools. */
+/** Explicit host-owned catalog; never discovers or installs tools implicitly. */
 export function resolveClaudeTools(tools = []) {
   if (!Array.isArray(tools)) throw new TypeError('Claude tools must be an explicit array');
   const handlers = new Map();

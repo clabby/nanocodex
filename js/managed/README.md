@@ -11,15 +11,16 @@ through `tools.*` inside Code Mode. Tool allowlists and sessions without attache
 providers retain this policy. Recreated sessions select the same policy from
 backend code. Evaluation uses the lazy Workers-compatible QuickJS evaluator.
 
-Claude retains its native `Bash`, `BashOutput`, `Read`, `Write`, and `Edit`
-handlers behind Code Mode. Memories, session recall, canonical subagents,
+Claude uses the shared `exec_command` and `write_stdin` schemas and handlers
+behind Code Mode, alongside its native `Read`, `Write`, and `Edit` handlers. Memories, session recall, canonical subagents,
 connectors, Hands, CUA, and Vault retain their owned handlers and authorization.
 All harnesses use the canonical `spawn_agent`, `list_agents`, `send_agent_message`,
 `wait_agent`, `interrupt_agent`, `close_agent`, and `submit_result` lifecycle.
 Legacy Claude agent `Task`, `TaskOutput`, and `TaskStop` are unavailable. A
 configuration requesting them fails before inference with an explicit removed
 capability error; legacy IDs are never aliased to canonical children.
-`BashOutput` continues to poll retained native shell sessions.
+`write_stdin` polls retained native shell sessions. Legacy `Bash` and
+`BashOutput` capabilities are unavailable.
 
 When a direct subagent completes after its parent turn has ended, the hosted
 thread automatically starts a continuation to inspect and integrate its result.

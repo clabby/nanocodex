@@ -504,10 +504,12 @@ impl Update {
         };
         let (contents, companion_contents, voice_contents, guest_contents) =
             tokio::try_join!(cli_download, hand_download, voice_download, guest_download)?;
-        store.install_bundle(
+        let hand_identity = identity_of_hand_bytes(&store, &companion_contents).await?;
+        store.install_bundle_with_hand(
             &key,
             &contents,
             &companion_contents,
+            hand_identity.as_deref(),
             guest_contents.as_deref(),
             voice_contents.as_deref(),
         )?;
@@ -916,7 +918,6 @@ async fn activate_coordinated(
     if hand_present && !store.is_cached_bundle(key, false)? {
         bail!("update Hand binary failed checksum verification");
     }
-    let hand_unchanged = hand_present && hand_unchanged(store, &companion).await?;
     let installed = if cfg!(target_os = "macos") {
         let state = crate::hand_service::status().await?;
         state.installed || state.loaded
@@ -934,6 +935,7 @@ async fn activate_coordinated(
             false
         }
     };
+    let hand_unchanged = hand_present && hand_unchanged(store, key, &companion, installed).await?;
     let switch_hand = installed && hand_present && !hand_unchanged;
     if installed && !switch_hand {
         if hand_present {
@@ -1058,33 +1060,69 @@ async fn activate_coordinated(
     result
 }
 
-/// True when the candidate Hand has the same bytes as the active bundle's Hand
-/// or as the executable the installed Hand service currently runs.
-async fn hand_unchanged(store: &VersionStore, candidate: &Path) -> Result<bool> {
-    // Byte comparison after a size check; verified bundles already carry
-    // checksums, and hashing here would only add another full pass.
-    let Ok(candidate) = fs::read(candidate) else {
+/// True when the candidate Hand is the Hand already in use: the executable the
+/// installed Hand service runs, or (without a service) the active version's
+/// Hand. Equal bytes or an equal reported Hand identity both count; an
+/// identity covers every source input of the Hand, so rebuilding only the CLI
+/// never switches or restarts the Hand.
+async fn hand_unchanged(
+    store: &VersionStore,
+    key: &str,
+    candidate: &Path,
+    installed: bool,
+) -> Result<bool> {
+    let Ok(candidate_bytes) = fs::read(candidate) else {
         return Ok(false);
     };
-    let same = |path: &Path| {
-        fs::metadata(path).is_ok_and(|metadata| metadata.len() == candidate.len() as u64)
-            && fs::read(path).is_ok_and(|bytes| bytes == candidate)
-    };
+    let identity = store.hand_identity_of(key);
     let mut current = Vec::new();
-    if let Some(active) = store.active()? {
+    if installed {
+        #[cfg(target_os = "linux")]
+        if let Ok(state) = crate::linux_hand_service::status().await {
+            current.extend(state.executable);
+        }
+        #[cfg(not(target_os = "linux"))]
+        if cfg!(target_os = "macos")
+            && let Ok(state) = crate::hand_service::status().await
+        {
+            current.extend(state.executable);
+        }
+    }
+    if current.is_empty()
+        && let Some(active) = store.active()?
+    {
         current.push(store.version_dir(&active).join(HAND_FILE));
     }
-    #[cfg(target_os = "linux")]
-    if let Ok(state) = crate::linux_hand_service::status().await {
-        current.extend(state.executable);
+    for path in current {
+        // Byte comparison after a size check; verified bundles already carry
+        // checksums, and hashing here would only add another full pass.
+        if fs::metadata(&path).is_ok_and(|metadata| metadata.len() == candidate_bytes.len() as u64)
+            && fs::read(&path).is_ok_and(|bytes| bytes == candidate_bytes)
+        {
+            return Ok(true);
+        }
+        if let Some(identity) = &identity
+            && local::probe_hand_identity(&path).await.as_deref() == Some(identity.as_str())
+        {
+            eprintln!("The Hand identity {identity} is unchanged");
+            return Ok(true);
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    if cfg!(target_os = "macos")
-        && let Ok(state) = crate::hand_service::status().await
-    {
-        current.extend(state.executable);
-    }
-    Ok(current.iter().any(|path| same(path)))
+    Ok(false)
+}
+
+/// The identity a downloaded, checksum-verified Hand reports, probed from a
+/// private temporary copy. Unknown for Hands that predate identities.
+async fn identity_of_hand_bytes(store: &VersionStore, hand: &[u8]) -> Result<Option<String>> {
+    fs::create_dir_all(store.root())
+        .wrap_err_with(|| format!("failed to create {}", store.root().display()))?;
+    let probe = tempfile::Builder::new()
+        .prefix(".hand-probe-")
+        .tempdir_in(store.root())
+        .wrap_err("failed to stage the Hand identity probe")?;
+    let path = probe.path().join(HAND_FILE);
+    store::atomic_write(&path, hand, true)?;
+    Ok(local::probe_hand_identity(&path).await)
 }
 
 #[async_trait::async_trait]
@@ -1255,10 +1293,13 @@ async fn install_local_binary(
     let companion = companion
         .map(Path::to_path_buf)
         .or_else(|| sibling.is_file().then_some(sibling));
-    match &companion {
+    let hand_identity = match &companion {
         Some(companion) => local::verify_pair(path, companion).await?,
-        None => local::verify_single(path).await?,
-    }
+        None => {
+            local::verify_single(path).await?;
+            None
+        }
+    };
     let contents = fs::read(path).wrap_err_with(|| format!("failed to read {}", path.display()))?;
     let companion = companion
         .map(fs::read)
@@ -1283,7 +1324,14 @@ async fn install_local_binary(
     let key = format!("local-{}", &hex::encode(digest.finalize())[..12]);
     match companion {
         Some(companion) => {
-            store.install_bundle(&key, &contents, &companion, None, voice.as_deref())?;
+            store.install_bundle_with_hand(
+                &key,
+                &contents,
+                &companion,
+                hand_identity.as_deref(),
+                None,
+                voice.as_deref(),
+            )?;
         }
         None => install_cli_carrying_hand(store, &key, &contents, voice.as_deref())?,
     }
@@ -1313,6 +1361,9 @@ fn install_cli_carrying_hand(
     voice: Option<&[u8]>,
 ) -> Result<()> {
     let active = store.active()?;
+    let identity = active
+        .as_deref()
+        .and_then(|active| store.hand_identity_of(active));
     let hand = match active.as_deref() {
         Some(active) if store.is_cached_bundle(active, false)? => {
             Some(fs::read(store.version_dir(active).join(HAND_FILE))?)
@@ -1325,7 +1376,7 @@ fn install_cli_carrying_hand(
                 "No nanocodex-hand given or found beside the CLI; keeping the current Hand (sha256 {})",
                 hex::encode(Sha256::digest(&hand))
             );
-            store.install_bundle(key, cli, &hand, None, voice)
+            store.install_bundle_with_hand(key, cli, &hand, identity.as_deref(), None, voice)
         }
         None if voice.is_some() => {
             bail!(
@@ -1351,7 +1402,14 @@ async fn install_source(
     let checkout = store.root().join("source-build/checkout");
     let build = source::build(selection, &checkout, &target).await?;
     let key = format!("{}-{}", selection.key_prefix(), build.sha);
-    store.install_bundle(&key, &build.cli, &build.hand, None, None)?;
+    store.install_bundle_with_hand(
+        &key,
+        &build.cli,
+        &build.hand,
+        build.hand_identity.as_deref(),
+        None,
+        None,
+    )?;
     let activated = activate_coordinated(store, &key, false, restart_hand).await?;
     // Preserve the previous selection if validation or the handover fails.
     // The update lock fences background staging until this record is durable.

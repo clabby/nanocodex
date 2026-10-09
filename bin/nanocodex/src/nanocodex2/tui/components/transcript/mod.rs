@@ -132,6 +132,8 @@ struct LayoutCache {
     live_tool_durations: HashMap<EntryId, u64>,
     expansion_overrides: HashMap<EntryId, bool>,
     expand_all: Option<bool>,
+    /// Ctrl+O's third state: only the conversation, no tool rows.
+    tools_hidden: bool,
     workspace: std::path::PathBuf,
     images: image::Cache,
 }
@@ -143,7 +145,8 @@ impl Default for LayoutCache {
             entries: HashMap::new(),
             live_tool_durations: HashMap::new(),
             expansion_overrides: HashMap::new(),
-            expand_all: None,
+            expand_all: tool_calls_from_env().0,
+            tools_hidden: tool_calls_from_env().1,
             workspace: std::env::current_dir().unwrap_or_default(),
             images: image::Cache::default(),
         }
@@ -1394,6 +1397,16 @@ fn is_expandable(entry: &TranscriptEntry) -> bool {
     )
 }
 
+/// Initial tool display from NANOCODEX_TOOL_CALLS, shared with the classic CLI's
+/// --tool-calls: expanded (every detail), folded (summaries, default) or hidden.
+fn tool_calls_from_env() -> (Option<bool>, bool) {
+    match std::env::var("NANOCODEX_TOOL_CALLS").as_deref() {
+        Ok("expanded") => (Some(true), false),
+        Ok("hidden") => (None, true),
+        _ => (None, false),
+    }
+}
+
 impl LayoutCache {
     fn expanded(&self, entry: &TranscriptEntry) -> bool {
         self.expansion_overrides
@@ -1438,7 +1451,7 @@ impl LayoutCache {
 
     // Hidden wrappers are transparent, but every visible ancestor must be open.
     fn visible_depth(&self, entry: &TranscriptEntry, model: &TranscriptModel) -> Option<u16> {
-        if entry.hidden {
+        if entry.hidden || (self.tools_hidden && matches!(entry.kind, EntryKind::Tool(_))) {
             return None;
         }
         if let Some(head) = self
@@ -1543,6 +1556,9 @@ impl LayoutCache {
             };
             let mut counts = [0_usize; 4];
             let mut computer_calls = Vec::new();
+            let mut calls = Vec::new();
+            let mut wrapper_error = None;
+            let mut note = None;
             let mut only_computer = true;
             let mut wrapper_duration = 0_u64;
             let mut wrapper_running = false;
@@ -1562,12 +1578,19 @@ impl LayoutCache {
                         self.live_tool_durations
                             .get(&member.id)
                             .copied()
+                            .filter(|_| call.state == ToolState::Running)
                             .or(call.duration_ns)
                             .unwrap_or(0),
                     );
                     wrapper_running |= call.state == ToolState::Running;
                     wrapper_failed |= call.state == ToolState::Failed;
                     wrapper_waiting |= call.state == ToolState::Yielded;
+                    if call.state == ToolState::Failed && wrapper_error.is_none() {
+                        wrapper_error = tool::failure_line(call);
+                    }
+                    if note.is_none() {
+                        note = tool::first_emitted_line(call);
+                    }
                     continue;
                 }
                 if member.hidden {
@@ -1578,6 +1601,13 @@ impl LayoutCache {
                 } else {
                     only_computer = false;
                 }
+                // Live ticks describe running calls only; settled calls keep their own duration.
+                let live = self
+                    .live_tool_durations
+                    .get(&member.id)
+                    .copied()
+                    .filter(|_| call.state == ToolState::Running);
+                calls.push((call, live));
                 counts[match call.state {
                     ToolState::Running => 0,
                     ToolState::Succeeded => 1,
@@ -1585,10 +1615,7 @@ impl LayoutCache {
                     ToolState::Yielded => 3,
                 }] += 1;
                 duration = duration.saturating_add(
-                    self.live_tool_durations
-                        .get(&member.id)
-                        .copied()
-                        .or(call.duration_ns)
+                    live.or(call.duration_ns)
                         .unwrap_or(0),
                 );
             }
@@ -1623,6 +1650,7 @@ impl LayoutCache {
             } else {
                 crate::nanocodex2::tui::transcript::ToolState::Succeeded
             };
+            let state = call.state;
             if self.entries.get(&entry.id).is_some_and(|cached| {
                 cached.activity
                     && cached.revision == summary.revision
@@ -1632,16 +1660,34 @@ impl LayoutCache {
             }) {
                 return &self.entries[&entry.id].lines;
             }
-            let mut cached = CachedEntry::new(
-                &summary,
-                depth,
-                None,
-                width,
-                theme,
-                false,
-                &self.workspace,
-                &mut self.images,
-            );
+            let mut cached = if only_computer && !computer_calls.is_empty() {
+                CachedEntry::new(
+                    &summary,
+                    depth,
+                    None,
+                    width,
+                    theme,
+                    false,
+                    &self.workspace,
+                    &mut self.images,
+                )
+            } else {
+                let group = tool::ToolGroup {
+                    calls,
+                    state,
+                    duration_ns: duration,
+                    wrapper_running,
+                    wrapper_waiting,
+                    wrapper_error,
+                    note,
+                };
+                CachedEntry::from_layout(
+                    render_tool_group(&summary, depth, &group, width, theme),
+                    summary.revision,
+                    width,
+                    depth,
+                )
+            };
             cached.activity = true;
             cached.live_duration_ns = Some(duration);
             self.entries.insert(entry.id, cached);
@@ -1711,7 +1757,12 @@ impl LayoutCache {
     }
 
     fn toggle_all(&mut self) {
-        self.expand_all = Some(!matches!(self.expand_all, Some(true)));
+        // Ctrl+O cycles summaries -> every detail -> hidden tool rows -> summaries.
+        (self.expand_all, self.tools_hidden) = match (self.expand_all, self.tools_hidden) {
+            (_, true) => (None, false),
+            (Some(true), false) => (None, true),
+            _ => (Some(true), false),
+        };
         self.expansion_overrides.clear();
         self.entries.clear();
     }
@@ -1803,6 +1854,25 @@ impl LayoutCache {
 }
 
 impl CachedEntry {
+    fn from_layout(layout: markdown::Layout, revision: u64, width: u16, depth: u16) -> Self {
+        Self {
+            activity: false,
+            revision,
+            width,
+            expanded: false,
+            live_duration_ns: None,
+            tool_summary_lines: 0,
+            depth,
+            lines: layout.lines,
+            images: layout.images,
+            links: layout.links,
+            selections: layout.selections,
+            envelopes: layout.envelopes,
+            selection_source: layout.selection_source,
+            image_state: layout.image_state,
+        }
+    }
+
     fn new(
         entry: &TranscriptEntry,
         depth: u16,
@@ -2212,6 +2282,27 @@ fn render_entry(
         layout.selections.push(Vec::new());
     }
     layout
+}
+
+// A folded batch: the classic CLI's "Tools" header and per-call rows.
+fn render_tool_group(
+    entry: &TranscriptEntry,
+    depth: u16,
+    group: &tool::ToolGroup<'_>,
+    width: u16,
+    theme: &Theme,
+) -> markdown::Layout {
+    let indent = nested_tool_indent(depth, width);
+    let tool_width = width
+        .saturating_sub(indent)
+        .saturating_sub(tool_agent_label_width(entry));
+    let mut lines = tool::group_lines(group, tool_width, theme);
+    label_tool_agent(entry, &mut lines, theme);
+    indent_nested_tool(indent, &mut lines, theme, false, entry.trailing_spacer);
+    if entry.trailing_spacer {
+        lines.push(Line::default());
+    }
+    layout_without_links(lines)
 }
 
 fn render_live_tool_summary(
