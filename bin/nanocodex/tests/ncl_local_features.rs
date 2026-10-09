@@ -1,4 +1,5 @@
 //! Shipped ncl over a PTY: /mcp reload|login, /benchmark and local Realtime /voice.
+#![cfg(unix)]
 #[path = "support/local_cli.rs"]
 mod local_cli;
 use local_cli::local_cli;

@@ -957,9 +957,15 @@ impl Composer {
                 .as_str()
                 .parse::<nanocodex::HarnessModel>()
                 .map_or(true, |model| {
-                    [Thinking::Low, Thinking::Medium, Thinking::High, Thinking::Xhigh, Thinking::Max]
-                        .into_iter()
-                        .any(|thinking| model.supports_thinking(thinking))
+                    [
+                        Thinking::Low,
+                        Thinking::Medium,
+                        Thinking::High,
+                        Thinking::Xhigh,
+                        Thinking::Max,
+                    ]
+                    .into_iter()
+                    .any(|thinking| model.supports_thinking(thinking))
                 })
     }
 
@@ -1849,15 +1855,14 @@ impl Composer {
             .front()
             .map(|timer| format!(" {} ", timer.label()))
             .unwrap_or_default();
-        let effort =
-            if self.shared_access.is_some()
-                || self.auto_routing && self.routed_effort.is_none()
-                || !self.model_has_effort()
-            {
-                String::new()
-            } else {
-                format!(" {} ", self.effort().as_str())
-            };
+        let effort = if self.shared_access.is_some()
+            || self.auto_routing && self.routed_effort.is_none()
+            || !self.model_has_effort()
+        {
+            String::new()
+        } else {
+            format!(" {} ", self.effort().as_str())
+        };
         let fast_mode =
             (self.shared_access.is_none() && !self.auto_routing && self.fast_mode).then_some("⚡ ");
         let pro_mode = (self.shared_access.is_none()
