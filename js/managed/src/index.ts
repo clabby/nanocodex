@@ -4266,6 +4266,9 @@ export class DurableAgentSession extends DurableComputerObject {
   readonly #turns = new Map<string, Turn>();
   readonly #deliveredCancellationTurnIds = new Set<string>();
   readonly #reopenInterruptedTurnIds = new Set<string>();
+  // Runtime constructions by this object instance. 1 means the first runtime
+  // after the object (re)started; larger values are in-process rebuilds.
+  #agentConstructionCount = 0;
   readonly #eventTurnQueue: string[] = [];
   #eventTurnId?: string;
   readonly #pendingTurnIds = new Set<string>();
@@ -11711,6 +11714,8 @@ export class DurableAgentSession extends DurableComputerObject {
       throw error;
     }
     this.#logCapacity("agent_constructed", {
+      object_agent_construction: ++this.#agentConstructionCount,
+      object_age_ms: Math.max(0, Date.now() - this.#constructorEnteredAtMs),
       account_mcp_refresh_ms: accountMcpRefreshMs,
       discovery_join_ms: roundMilliseconds(discoveryJoinMs),
       credential_binding_ms: roundMilliseconds(credentialBindingMs),
@@ -13131,6 +13136,11 @@ A direct subagent completed after the previous turn ended. Continue the current 
     if (resolution.kind === "retry" && resolution.blockedBy !== undefined) {
       this.#reconcilePendingOperation(resolution.blockedBy);
     }
+    // Retries are otherwise visible only in the durable event log; keep the
+    // reason next to runtime construction and reopen logs.
+    if (resolution.kind === "retry") this.#observe("managed.turn_retry", { turn_id: id, source,
+      reopen_agent: resolution.reopenAgent, interrupted: resolution.interrupted === true,
+      blocked: resolution.blockedBy !== undefined, error: resolution.error.slice(0, 240) }, "warn");
     const row = this.#managedTurn(id);
     return this.#commitManagedMessage(id, managedControlTransitionForResolution(
       id,
@@ -14002,6 +14012,8 @@ A direct subagent completed after the previous turn ended. Continue the current 
   }
 
   async #reopenAgent(failedId: string): Promise<void> {
+    // Retiring the runtime interrupts every sibling turn and live Code Mode cell.
+    this.#observe("managed.agent_reopen", { failed_turn_id: failedId, interrupted_turns: Math.max(0, this.#turns.size - 1) }, "warn");
     for (const siblingId of this.#turns.keys()) {
       if (siblingId !== failedId) this.#reopenInterruptedTurnIds.add(siblingId);
     }
