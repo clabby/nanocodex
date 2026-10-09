@@ -100,6 +100,20 @@ function assertTerminal(response, expected = 'turn_completed') {
   return { ...receipt, terminal_cursor: terminal.data.cursor ?? terminal.id };
 }
 
+async function readHistory(label, agent) {
+  const data = [];
+  let cursor = '0';
+  for (let page = 0; page < 8; page++) {
+    const response = (await request(`${label}-${page}`, `/v1/agents/${agent}/events/history?after=${cursor}&limit=256`)).json();
+    data.push(...response.data);
+    if (!response.has_more) return data;
+    const next = response.data.at(-1)?.cursor;
+    assert.ok(next && BigInt(next) > BigInt(cursor), 'History pagination makes progress');
+    cursor = next;
+  }
+  assert.fail('Synthetic journey exceeded 2048 retained events; inspect the saved history pages');
+}
+
 async function lifecycleJourney() {
   const key = `curl-durable-${run}`;
   const expectedA = { marker: `curl-parent-${run}`, value: 42 };
@@ -240,17 +254,28 @@ async function interruptionJourney() {
   assert.ok(['completed', 'failed'].includes(terminal.state), 'Interrupted turn must reach an explicit terminal state');
   const afterProof = await request('proof-after-restart', `/v1/agents/${agent}/files?path=${encodeURIComponent(proof)}`);
   assert.equal(afterProof.raw, 'settled\npending\n', 'Neither completed nor uncertain effect may be blindly repeated');
-  const history = (await request('recovery-history', `/v1/agents/${agent}/events/history?after=0&limit=256`)).json();
+  const history = await readHistory('recovery-history', agent);
   await request('recovery-diagnostics', `/v1/agents/${agent}/diagnostics?limit=256`);
-  const recoveryErrors = history.data.filter(row => row.event?.type === 'tool.result'
-    && row.event.payload.status === 'failed').map(row => row.event.payload);
-  assert.ok(recoveryErrors.some(result => result.structured_result?.outcome === 'unknown'
-    || /outcome unknown|outcome.*uncertain/i.test(String(result.result))), 'Interrupted effect has an actual unknown-outcome result, not just model prose');
+  const recoveryError = history.find(row => row.event?.type === 'tool.result'
+    && row.event.payload.status === 'failed'
+    && /outcome["\s:]*unknown|outcome.*uncertain/i.test(JSON.stringify(row.event.payload.structured_result ?? row.event.payload.result)));
+  const pendingCalls = history.filter(row => row.agent_id === childId && row.event?.type === 'tool.call'
+    && row.event.payload.tool === 'exec_command' && row.event.payload.arguments?.cmd === pendingCommand);
+  // A child restored from a portable checkpoint receives a runtime-authored
+  // input.accepted warning, rather than a fabricated result for its lost call.
+  const recoveryNotice = history.find(row => row.agent_id === childId && row.event?.type === 'input.accepted'
+    && pendingCalls.some(call => row.event.payload.input?.includes(`call_id ${call.event.payload.call_id}; started; no result was observed`)));
+  assert.ok(recoveryError || recoveryNotice, 'Public runtime evidence identifies the unknown outcome; model narration is not evidence');
+  await writeFile(`${output}/recovery-evidence.json`, JSON.stringify({
+    kind: recoveryError ? 'tool_result' : 'runtime_resume_notice',
+    event: recoveryError ?? recoveryNotice,
+    pending_call_ids: pendingCalls.map(row => row.event.payload.call_id),
+  }, null, 2));
   const recovered = await request('explicit-child-recovery', `/v1/agents/${agent}/turns`, { method: 'POST', expected: 202, headers: { Accept: 'text/event-stream', 'Idempotency-Key': `recover-${run}` }, body: { input: `New synthetic task. Do not execute or repeat any previous shell command, or access files, Hands, services or connectors. Do not spawn replacements. Use explicit delegation to existing child ${childId}, task: submit integer 2 using existing output contract, then finish; no other actions and no parent or peer messages. Wait until child ${childId} completes, keeping it open. Report actual result.` } });
   assertTerminal(recovered);
   assert.equal(completedOutputs(recovered).get(childId), 2, 'Original child reusable after interrupted work');
   assert.equal(events(recovered).filter(event => event.type === 'tool.call' && event.payload.tool === 'spawn_agent').length, 0);
-  const cancelInput = `Synthetic cancellation test. Use actual exec_command in /brain once with cmd ${JSON.stringify(`echo cancel-ready >> ${proof}; sleep 45; echo MUST_NOT_RUN >> ${proof}`)}. Access no other files, Hands, services or connectors; do not spawn agents. Do not retry any command.`;
+  const cancelInput = `Synthetic cancellation test. Use your declared shell command tool through Code Mode in /brain exactly once with command ${JSON.stringify(`echo cancel-ready >> ${proof}; sleep 45; echo MUST_NOT_RUN >> ${proof}`)} and a command timeout of at least 60 seconds. Inspect ALL_TOOLS for its schema if needed. Access no other files, Hands, services or connectors; do not spawn agents. Do not retry any command.`;
   const cancelTurn = (await request('cancel-admit', `/v1/agents/${agent}/turns`, { method: 'POST', expected: 202, headers: { 'Idempotency-Key': `cancel-${run}` }, body: { input: cancelInput } })).json();
   for (let i = 0; i < 45; i++) {
     const response = await request(`cancel-ready-${i}`, `/v1/agents/${agent}/files?path=${encodeURIComponent(proof)}`);
