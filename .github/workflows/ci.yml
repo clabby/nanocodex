@@ -452,6 +452,12 @@ jobs:
           --features guest-runtime --target ${{ matrix.target }}
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          # Docker Hub images resolve through mirror.gcr.io first; BuildKit
+          # falls back to Docker Hub, avoiding anonymous pull limits.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Configure Docker Hand registry cache
         id: hand-cache
         shell: bash
