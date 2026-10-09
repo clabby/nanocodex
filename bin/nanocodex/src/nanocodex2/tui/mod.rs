@@ -1575,7 +1575,7 @@ impl DriverRuntime {
             LocalEvent::WorkerTurnAccepted { .. } => local.set_busy(true),
             LocalEvent::WorkerTurnFinished { id, error } => {
                 for completion in self.feature_completions.remove(id).into_iter().flatten() {
-                    drop(completion.send(error.is_none()));
+                    let _ = completion.send(error.is_none());
                 }
                 self.feature_instructions.remove(id);
                 self.feature_turns.remove(id);
@@ -1584,7 +1584,7 @@ impl DriverRuntime {
             LocalEvent::WorkerTurnsInterrupted { .. } => {
                 for (_, completions) in self.feature_completions.drain() {
                     for completion in completions {
-                        drop(completion.send(false));
+                        let _ = completion.send(false);
                     }
                 }
                 local.set_busy(false);
