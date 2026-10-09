@@ -114,10 +114,12 @@ async function setup(instance: DurableAgentSession, state: DurableObjectState, i
 
 // The directory and shutdown execute real Rust/WASM. Only the stored journal
 // is seeded, simulating restart before managed child bindings are registered.
-it.each(["interrupted", "completed", "failed", "closed", "unrecoverable", "explicit-shutdown"])(
+it.each(["interrupted", "completed", "failed", "closed", "unrecoverable", "explicit-shutdown", "recovery-exhausted"])(
   "idle alarm respects restored %s children without managed bindings",
   (scenario) => fixture(async f => {
     const kind = scenario === "explicit-shutdown" ? "interrupted" : scenario;
+    // Runtime loss during every automatic resume must stop at the journaled budget.
+    const exhausted = scenario === "recovery-exhausted";
     await f.prepare();
     const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 36_000);
     const realList = Subagents.list;
@@ -130,12 +132,14 @@ it.each(["interrupted", "completed", "failed", "closed", "unrecoverable", "expli
       await f.instance.alarm();
       expect(await f.snapshot()).toMatchObject({ agent_loaded: false });
       const childSession = "0198d3f0-8844-7000-8000-000000000093";
-      const status = kind === "completed" ? { state: kind, output: "done" }
+      const status = exhausted ? { state: "running" }
+        : kind === "completed" ? { state: kind, output: "done" }
         : kind === "failed" ? { state: kind, error: "fixture failure" }
         : { state: kind === "unrecoverable" ? "interrupted" : kind };
       const journal = { version: 1, agents: [{
         descriptor: { id: 73, session_id: childSession, role: "retained", task: "fixture", parent: null },
-        status, output_schema: { type: "string" }, turn_in_flight: false,
+        status, output_schema: { type: "string" }, turn_in_flight: exhausted,
+        ...(exhausted ? { resume_attempts: 3 } : {}),
         ...(kind === "unrecoverable" ? {} : { checkpoint: {
           session_id: childSession, model: "astra", thinking: "max",
           service_tier: "standard", conversation: null,
@@ -151,7 +155,8 @@ it.each(["interrupted", "completed", "failed", "closed", "unrecoverable", "expli
       await vi.waitFor(() => expect(runtime).toBeDefined());
       const restored = runtime!;
       expect((await realList(restored, { includeCompleted: true })).agents)
-        .toEqual(expect.arrayContaining([expect.objectContaining({ agent_id: 73, status })]));
+        .toEqual(expect.arrayContaining([expect.objectContaining({ agent_id: 73, status: exhausted
+          ? { state: "failed", error: expect.stringContaining("subagent recovery exhausted") } : status })]));
       expect((await realList(restored)).agents.map(a => a.agent_id))
         .toEqual(kind === "interrupted" ? [73] : []);
       clock.mockReturnValue(Date.now() + 36_000);

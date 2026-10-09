@@ -66,20 +66,21 @@ it.each([
   await runInDurableObject(sessions.getByName(crypto.randomUUID()), async (session, state) => {
     const denied = model === "kimi" && !routingEnabled;
     const childIsGateway = model === "kimi";
-    let rootStep = 0, childCalls = 0, gatewayCalls = 0, childId: number | undefined;
+    let phase = 1, rootStep = 0, childCalls = 0, gatewayCalls = 0, childId: number | undefined;
     const sockets: WebSocket[] = [];
     const tool = (body: any, name: string, args: unknown) => toolCall(body, name, args, crypto.randomUUID());
     const childResponse = (body: any) => {
       body = normalizeResults(body);
       childCalls++;
-      expect(childCalls).toBeLessThanOrEqual(2);
+      expect(childCalls).toBeLessThanOrEqual(4);
       if (body.messages.at(-1)?.role === "tool") return completion({ content: "MANUAL_CHILD_DONE" });
-      return tool(body, "submit_result", { output: JSON.stringify({ value: marker, turn: 1 }) });
+      return tool(body, "submit_result", { output: JSON.stringify({ value: marker, turn: phase }) });
     };
     const rootResponse = (body: any) => {
       body = normalizeResults(body);
       expect(rootStep).toBeLessThan(10);
-      if (rootStep++ === 0) return tool(body, "spawn_agent", {
+      if (phase === 2 && rootStep++ === 0) return tool(body, "list_agents", { include_completed: true });
+      if (phase === 1 && rootStep++ === 0) return tool(body, "spawn_agent", {
         role: "manual fixture", task: "Return the requested schema.", model: model ?? null, thinking: thinking ?? null,
         output_contract: contract,
       });
@@ -93,15 +94,20 @@ it.each([
       childId ??= result?.agent_id;
       expect(childId).toBeTypeOf("number");
       const child = result?.agents?.find((agent: any) => agent.agent_id === childId);
-      if (child?.status.state === "completed") {
-        expect(child.status.output).toEqual({ value: marker, turn: 1 });
+      if (phase === 2 && rootStep === 2) {
+        expect(child?.status).toEqual({ state: "completed", output: { value: marker, turn: 1 } });
+        return tool(body, "send_agent_message", { agent_id: childId, purpose: "delegate",
+          message: "Recall the original value from your history and submit it for turn 2." });
+      }
+      if (child?.status.state === "completed" && child.status.output.turn === phase) {
+        expect(child.status.output).toEqual({ value: marker, turn: phase });
         return completion({ content: "MANUAL_ROOT_DONE" });
       }
       return tool(body, "wait_agent", { agent_ids: [childId], timeout_ms: 5_000 });
     };
     const original = (session as unknown as { env: Record<string, unknown> }).env;
     Object.defineProperty(session, "env", { configurable: true, value: { ...original,
-      NANOCODEX_THREAD_ROUTING: String(routingEnabled), OPENROUTER_API_KEY: "synthetic-availability-only",
+      AGENT_IDLE_TIMEOUT_MS: "1000", NANOCODEX_THREAD_ROUTING: String(routingEnabled), OPENROUTER_API_KEY: "synthetic-availability-only",
       AI_GATEWAY_API_KEY: undefined, AI: { run: () => { throw new Error("Manual native spawning must not classify"); } },
       NANOCODEX_MEMORY: { getByName: () => ({ fetch: async () => new Response(null, { status: 204 }) }) },
       NANOCODEX_USERS: { getByName: () => ({ fetch: async () => new Response(null, { status: 204 }) }) },
@@ -165,6 +171,21 @@ it.each([
       expect(childCalls).toBe(denied ? 0 : 2);
       expect(gatewayCalls).toBe(childIsGateway && !denied ? 2 : 0);
       expect(state.storage.sql.exec("SELECT * FROM managed_thread_route").toArray()).toEqual([]);
+      if (!denied) {
+        // Exercise the same native session and production idle teardown used by
+        // `nanocodex2 run`, then delegate to the original durable child ID.
+        state.storage.sql.exec("UPDATE session_state SET last_active=0");
+        await session.alarm();
+        expect(await (await request("/state")).json()).toMatchObject({ agent_loaded: false });
+        phase = 2;
+        rootStep = 0;
+        expect((await request("/turns", { id: "manual-resume-turn", input: "Resume the original child." })).status).toBe(202);
+        await expect.poll(() => state.storage.sql.exec("SELECT state,error FROM managed_turns WHERE id='manual-resume-turn'").one(), { timeout: 15_000 })
+          .toEqual({ state: "completed", error: null });
+        const resumed = await (await request("/turns/manual-resume-turn")).json() as any;
+        expect(resumed.terminal.final_message).toBe("MANUAL_ROOT_DONE");
+        expect(childCalls).toBe(4);
+      }
     } finally {
       fetchSpy.mockRestore();
       sockets.forEach(socket => socket.close(1000, "fixture complete"));

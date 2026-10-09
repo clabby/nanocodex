@@ -122,6 +122,9 @@ pub(super) struct PersistedAgent {
     /// Whether a turn was running when this value was written.
     #[serde(default)]
     pub(super) turn_in_flight: bool,
+    /// Automatic restart resumes since the child last finished a turn.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) resume_attempts: u32,
     /// Latest committed boundary; absent for native backends without a
     /// portable checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,6 +236,7 @@ pub(super) fn persist_agent(
         last_output: session.last_output.clone(),
         next_instruction_revision: session.next_instruction_revision,
         turn_in_flight: session.active || matches!(session.status, AgentStatus::Running),
+        resume_attempts: session.resume_attempts,
         checkpoint,
         native_checkpoint,
     }
@@ -251,6 +255,14 @@ impl PersistedAgent {
     }
 }
 
+/// Consecutive restart resumes allowed before a turn must settle. Runtime loss
+/// that recurs on every resume would otherwise restart the child forever.
+pub(super) const MAX_RESUME_ATTEMPTS: u32 = 3;
+
+const fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 pub(super) fn restored_session(
     agent: PersistedAgent,
 ) -> std::io::Result<(ChildSession, bool, bool)> {
@@ -261,8 +273,17 @@ pub(super) fn restored_session(
     let in_flight = !terminal
         && (agent.turn_in_flight
             || matches!(agent.status, AgentStatus::Running | AgentStatus::Pending));
+    let exhausted = in_flight && recoverable && agent.resume_attempts >= MAX_RESUME_ATTEMPTS;
     let status = if terminal {
         AgentStatus::Closed
+    } else if exhausted {
+        AgentStatus::Failed {
+            error: format!(
+                "subagent recovery exhausted: the runtime restarted during each of the last \
+                 {MAX_RESUME_ATTEMPTS} automatic resumes of this turn. Inspect child evidence \
+                 before delegating a recovery; do not replay task side effects."
+            ),
+        }
     } else if in_flight && !recoverable {
         AgentStatus::Failed {
             error: "subagent could not be restored after a runtime restart: no portable \
@@ -274,6 +295,8 @@ pub(super) fn restored_session(
     } else {
         agent.status
     };
+    let resume = in_flight && recoverable && !exhausted;
+    let resume_attempts = if resume { agent.resume_attempts + 1 } else { 0 };
     let binding_task = agent.binding_task;
     let mut session = ChildSession::restored(
         agent.descriptor,
@@ -288,5 +311,6 @@ pub(super) fn restored_session(
     if let Some(task) = binding_task {
         session.binding_task = task;
     }
-    Ok((session, in_flight && recoverable, !recoverable && !terminal))
+    session.resume_attempts = resume_attempts;
+    Ok((session, resume, (!recoverable && !terminal) || exhausted))
 }

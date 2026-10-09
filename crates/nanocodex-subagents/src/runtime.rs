@@ -56,6 +56,8 @@ pub(super) struct ChildSession {
     pub(super) last_output: Option<Value>,
     pub(super) last_used: u64,
     pub(super) evicted: bool,
+    /// Automatic restart resumes since this child last finished a turn.
+    pub(super) resume_attempts: u32,
     /// Journal-restored children need a fresh host binding before execution.
     announce: bool,
 }
@@ -113,7 +115,11 @@ pub struct Registry {
     /// Per-root restoration outcome. Pending and failed roots must never be saved.
     restored: std::sync::Mutex<HashMap<String, RestorationOutcome>>,
     journal_writer: std::sync::atomic::AtomicBool,
+    /// Orders background snapshots and the final pre-teardown journal flush.
+    journal_write_lock: tokio::sync::Mutex<()>,
     checkpoints: std::sync::Mutex<HashMap<(String, AgentId), ChildSnapshot>>,
+    /// Terminal checkpoints registered before their completed status is visible.
+    pending_checkpoints: std::sync::Mutex<HashMap<String, usize>>,
     /// In-flight mid-turn checkpoint captures; `true` requests one more pass.
     progress_captures: std::sync::Mutex<HashMap<(String, AgentId), bool>>,
     pending_resume: std::sync::Mutex<HashMap<String, Vec<AgentId>>>,
@@ -132,6 +138,33 @@ struct AgentScope {
     sessions: HashMap<AgentId, ChildSession>,
     messages: MessageThreads,
     closing: bool,
+    /// Shutdown saved the durable pre-teardown tree; later Closing/Closed
+    /// transitions are live-only and must never reach the journal.
+    journal_frozen: bool,
+}
+
+impl AgentScope {
+    fn journal_payload(
+        &self,
+        root_session_id: &str,
+        checkpoints: &HashMap<(String, AgentId), ChildSnapshot>,
+    ) -> std::io::Result<String> {
+        let mut ids = self.sessions.keys().copied().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let agents = ids
+            .into_iter()
+            .filter_map(|id| {
+                let session = self.sessions.get(&id)?;
+                let checkpoint = checkpoints.get(&(root_session_id.to_owned(), id));
+                Some(durable::persist_agent(session, checkpoint))
+            })
+            .collect();
+        serde_json::to_string(&durable::PersistedScope {
+            version: durable::JOURNAL_VERSION,
+            agents,
+        })
+        .map_err(std::io::Error::other)
+    }
 }
 
 pub(super) struct AgentReservation {
@@ -285,22 +318,12 @@ impl RegistryState {
         checkpoints: &HashMap<(String, AgentId), ChildSnapshot>,
     ) -> Vec<(String, String)> {
         let mut payloads = Vec::with_capacity(self.scopes.len());
-        for (root_session_id, scope) in &self.scopes {
-            let mut ids = scope.sessions.keys().copied().collect::<Vec<_>>();
-            ids.sort_unstable();
-            let agents = ids
-                .into_iter()
-                .filter_map(|id| {
-                    let session = scope.sessions.get(&id)?;
-                    let checkpoint = checkpoints.get(&(root_session_id.clone(), id));
-                    Some(durable::persist_agent(session, checkpoint))
-                })
-                .collect();
-            let journal = durable::PersistedScope {
-                version: durable::JOURNAL_VERSION,
-                agents,
-            };
-            match serde_json::to_string(&journal) {
+        for (root_session_id, scope) in self
+            .scopes
+            .iter()
+            .filter(|(_, scope)| !scope.journal_frozen)
+        {
+            match scope.journal_payload(root_session_id, checkpoints) {
                 Ok(payload) => payloads.push((root_session_id.clone(), payload)),
                 Err(error) => tracing::warn!(%error, "could not encode subagent journal"),
             }
@@ -999,7 +1022,9 @@ impl Registry {
             journals: std::sync::RwLock::new(HashMap::new()),
             restored: std::sync::Mutex::new(HashMap::new()),
             journal_writer: std::sync::atomic::AtomicBool::new(false),
+            journal_write_lock: tokio::sync::Mutex::new(()),
             checkpoints: std::sync::Mutex::new(HashMap::new()),
+            pending_checkpoints: std::sync::Mutex::new(HashMap::new()),
             progress_captures: std::sync::Mutex::new(HashMap::new()),
             pending_resume: std::sync::Mutex::new(HashMap::new()),
         }
@@ -1132,12 +1157,14 @@ impl Registry {
                 let Some(live) = registry.upgrade() else {
                     return;
                 };
+                // Capture under the same lock as the final flush: an older
+                // background payload must never overwrite shutdown's snapshot.
+                let write_guard = live.journal_write_lock.lock().await;
                 let payloads = live.journal_payloads().await;
                 let stores = payloads
                     .iter()
                     .map(|(root, _)| live.store_for(root))
                     .collect::<Vec<_>>();
-                drop(live);
                 for ((root_session_id, payload), store) in payloads.into_iter().zip(stores) {
                     let Some(store) = store else { continue };
                     if saved.get(&root_session_id) == Some(&payload) {
@@ -1152,6 +1179,8 @@ impl Registry {
                         }
                     }
                 }
+                drop(write_guard);
+                drop(live);
                 if revision.changed().await.is_err() {
                     return;
                 }
@@ -1197,12 +1226,30 @@ impl Registry {
         if self.store_for(&root_session_id).is_none() {
             return;
         }
+        *self
+            .pending_checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(root_session_id.clone())
+            .or_default() += 1;
         let registry = Arc::clone(self);
         drop(platform::spawn(async move {
             if let Ok(snapshot) = harness.snapshot().await {
                 registry.record_checkpoint(&root_session_id, id, snapshot);
-                registry.changed();
             }
+            {
+                let mut pending = registry
+                    .pending_checkpoints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(count) = pending.get_mut(&root_session_id) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        pending.remove(&root_session_id);
+                    }
+                }
+            }
+            registry.changed();
         }));
     }
 
@@ -1281,6 +1328,8 @@ impl Registry {
         };
         let journal: durable::PersistedScope = serde_json::from_str(&payload)
             .map_err(|error| std::io::Error::other(format!("invalid subagent journal: {error}")))?;
+        // Journals carry whole child conversations; do not hold a second copy.
+        drop(payload);
         if journal.version != durable::JOURNAL_VERSION {
             return Err(std::io::Error::other(format!(
                 "unsupported subagent journal version {}",
@@ -1317,12 +1366,49 @@ impl Registry {
             }
         }
         drop(state);
+        // Persist each resume attempt before admitting it: a runtime lost during
+        // every resume must still exhaust its bounded recovery budget.
+        if !report.interrupted.is_empty() {
+            self.save_scope(root_session_id, store.as_ref())
+                .await
+                .map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("could not record subagent resume attempts: {error}"),
+                    )
+                })?;
+        }
         self.pending_resume
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(root_session_id.to_owned(), report.interrupted.clone());
         self.changed();
         Ok(report)
+    }
+
+    /// Synchronously saves one root's current journal, ordered with the writer.
+    async fn save_scope(
+        &self,
+        root_session_id: &str,
+        store: &dyn SubagentStore,
+    ) -> std::io::Result<()> {
+        let _write_guard = self.journal_write_lock.lock().await;
+        let payload = {
+            let state = self.state.lock().await;
+            let checkpoints = self
+                .checkpoints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state
+                .scopes
+                .get(root_session_id)
+                .map(|scope| scope.journal_payload(root_session_id, &checkpoints))
+                .transpose()?
+        };
+        match payload {
+            Some(payload) => store.save(root_session_id, payload).await,
+            None => Ok(()),
+        }
     }
 
     /// Continues every child whose turn was interrupted by the restart.
@@ -1565,6 +1651,7 @@ impl Registry {
                 last_output: None,
                 last_used: 0,
                 evicted: false,
+                resume_attempts: 0,
                 announce: false,
             },
         )?;
@@ -1676,6 +1763,8 @@ impl Registry {
             session.active = false;
             session.active_instruction_revision = None;
             session.steering = false;
+            // The turn settled in this runtime, so restart recovery made progress.
+            session.resume_attempts = 0;
             let submitted_output = session.submitted_output.take();
             // Acceptance belongs to this turn even if cancellation/close wins settlement.
             // Keep its evidence, without claiming the interrupted execution completed.
@@ -1694,12 +1783,13 @@ impl Registry {
                 }
             }
             .clone_into(&mut session.status);
-            (session.status.clone(), session.harness.clone())
+            // Register capture while state is still locked: shutdown must not
+            // observe Completed before its final checkpoint is pending.
+            if let Some(harness) = session.harness.clone() {
+                self.capture_checkpoint(root_session_id.to_owned(), id, harness);
+            }
+            session.status.clone()
         };
-        let (status, harness) = status;
-        if let Some(harness) = harness {
-            self.capture_checkpoint(root_session_id.to_owned(), id, harness);
-        }
         self.send(root_session_id, AgentUpdate::Status { id, status });
         self.changed();
         let registry = Arc::clone(self);
@@ -2227,15 +2317,66 @@ impl Registry {
     async fn close_all(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
         self.await_restored(session_id).await?;
         let _message_guard = self.message_lock.lock().await;
+        let write_guard = self.journal_write_lock.lock().await;
+        let mut revision = self.revision.subscribe();
+        let capture_deadline = Instant::now() + AGENT_STOP_TIMEOUT;
+        let (request, final_journal) = loop {
+            let mut state = self.state.lock().await;
+            let root = state.root_session_id(session_id).to_owned();
+            let captures_pending = self
+                .pending_checkpoints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&root);
+            if captures_pending {
+                drop(state);
+                // A wedged harness must not block teardown forever; freeze the
+                // newest checkpoint already recorded once the deadline passes.
+                match timeout_at(capture_deadline, revision.changed()).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(_)) => {
+                        return Err(std::io::Error::other("subagent runtime is closed"));
+                    }
+                    Err(_) => {
+                        tracing::warn!(%root, "subagent checkpoint capture timed out during shutdown");
+                        self.pending_checkpoints
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .remove(&root);
+                        continue;
+                    }
+                }
+            }
+            let final_journal = if let Some(store) = self.store_for(&root) {
+                let checkpoints = self
+                    .checkpoints
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let scope = state.scope_mut(&root);
+                let payload = scope.journal_payload(&root, &checkpoints)?;
+                scope.journal_frozen = true;
+                Some((store, payload))
+            } else {
+                None
+            };
+            // Freeze and transition under one state lock. Explicit closes that
+            // won message_lock are already reflected in this durable snapshot.
+            break (state.request_close_all(session_id)?, final_journal);
+        };
         let CloseRequest {
             root_session_id,
             ids,
             harnesses,
             status_updates,
-        } = {
-            let mut state = self.state.lock().await;
-            state.request_close_all(session_id)?
+        } = request;
+        let journal_result = if let Some((store, payload)) = final_journal {
+            store.save(&root_session_id, payload).await
+        } else {
+            Ok(())
         };
+        drop(write_guard);
+        // Even if persistence failed, join the live subtree; report the error
+        // after cleanup rather than leaving children running during shutdown.
         for (id, status) in status_updates {
             self.send(&root_session_id, AgentUpdate::Status { id, status });
         }
@@ -2253,7 +2394,9 @@ impl Registry {
                 .expect("session handles poisoned")
                 .remove(&root);
         }
-        result
+        let summaries = result?;
+        journal_result?;
+        Ok(summaries)
     }
 
     async fn stop_and_close(
@@ -2557,6 +2700,7 @@ impl ChildSession {
             last_output,
             last_used: 0,
             evicted: true,
+            resume_attempts: 0,
             announce: true,
         }
     }
@@ -3239,6 +3383,7 @@ mod tests {
             last_output: None,
             last_used: 0,
             evicted: false,
+            resume_attempts: 0,
             announce: false,
         }
     }
