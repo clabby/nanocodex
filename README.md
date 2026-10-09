@@ -122,10 +122,11 @@ nanocodex
 Nanocodex installs two native binaries by role: the `nanocodex` CLI and the
 `nanocodex-hand` daemon (installed under its service name `nanocodex2`). The CLI
 is exposed as `nanocodex`, `nc`, and `ncl` under `~/.nanocodex/bin`; the name
-selects the command tree. `nanocodex`, `nc`, and `nanocodex2` run the managed agent (bare = the
-managed TUI; `run`, `login`, `status`, `logout`, and `auth` are the managed
+selects the command tree. Both trees open the same terminal UI over a different
+backend. `nanocodex`, `nc`, and `nanocodex2` run the managed agent (bare = the
+TUI on a durable managed agent; `run`, `login`, `status`, `logout`, and `auth` are the managed
 account commands). `ncl`, or `nanocodex --local`, runs the local agent: bare =
-the local non-durable TUI, `ncl run` is the local headless JSONL run (exit code
+the TUI on a local non-durable agent, `ncl run` is the local headless JSONL run (exit code
 75 means retryable), and `ncl auth` signs in to the harness provider
 subscription. Nanocodex Connect is `nanocodex connect login|status|logout`
 (`ncl login|status|logout` also manage Connect). `nanocodex hand` with no

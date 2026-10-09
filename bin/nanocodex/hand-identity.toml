@@ -3,14 +3,13 @@
 # Every file of every path package in nanocodex-bin's Cargo.lock closure is
 # hashed by workspace-relative path and content. The set is conservative:
 # shared command definitions and dependencies remain inputs even when a
-# particular target does not link them. The two terminal renderers below are
-# reached only by CLI entrypoints; the daemon dispatch never invokes them.
+# particular target does not link them. The shared terminal UI below is
+# reached only by CLI entrypoints; the daemon dispatch never invokes it.
 # Unlisted files are always included, so a new file can only change the
 # identity. Paths are workspace-relative; directories match recursively.
 exclude = [
     # The CLI executable root; nanocodex-hand is built from src/hand_main.rs.
     "bin/nanocodex/src/main.rs",
-    "bin/nanocodex/src/tui",
     "bin/nanocodex/src/nanocodex2/tui",
     # Integration tests, benchmarks and documentation are not compiled into
     # either executable.
