@@ -53,7 +53,11 @@ identity is kept, so re-signed copies of an unchanged Hand never
 replace it. An installed standalone Hand with the same identity stays in place
 until an explicit `--restart-hand` moves the service into the bundle. For a CLI
 containing both command trees, `bin/{nanocodex,nanocodex2,nc,ncl}` all link
-`../current/nanocodex` and argv[0] selects the tree (`ncl` is local). Older
+`../current/nanocodex` and argv[0] selects the tree (`ncl` is local);
+`bin/{nanocodex-hand,nc-hand}` link the Hand (`../current/nanocodex2`, or the signed
+`../current/Nanocodex.app/Contents/MacOS/nanocodex2` on macOS) when it serves the
+`hand` command under those names: `nc-hand --help` is `nanocodex hand --help` and
+`nc-hand status` is `nanocodex hand status`. Older
 pairs keep `bin/nanocodex2` and `nc` on their managed `nanocodex2`. Windows
 writes `nc.cmd`/`ncl.cmd` shims (`ncl.cmd` passes `--local`). An activation whose
 Hand is absent or byte-identical to the active/running Hand switches only the

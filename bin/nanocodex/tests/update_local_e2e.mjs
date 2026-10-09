@@ -105,6 +105,7 @@ const provenance = (stdout, what) => development ? plainBuild(stdout, what) : on
 // Help structure distinguishes the trees: the managed tree takes only a
 // command (no top-level options), while only the local tree has `auth`.
 const managedHelp = /^Usage: \S+ \[COMMAND\]$/m;
+let expectedHandIdentity = '';
 const localHelp = /^\s+auth\s/m;
 function checkAliases(root, revision, label) {
   for (const alias of ['nanocodex', 'nanocodex2', 'nc', 'ncl']) {
@@ -121,6 +122,23 @@ function checkAliases(root, revision, label) {
     assert.doesNotMatch(help, localHelp, `${label}: ${alias} --help must not show the local tree`);
   }
   trace.push(`PASS ${label}: bin/{nanocodex,nanocodex2,nc,ncl} -> ../current/nanocodex; each reports ${development ? 'plain build' : 'one Commit SHA'} ${revision}; ncl --help local tree, the others managed tree`);
+  // The Hand executable is on PATH as nanocodex-hand and nc-hand, where it is
+  // the `hand` command: bare help is `hand --help`, a word is a management
+  // subcommand forwarded to the active CLI (read-only `status` here).
+  const handTarget = process.platform === 'darwin'
+    ? join('..', 'current', 'Nanocodex.app', 'Contents', 'MacOS', 'nanocodex2')
+    : join('..', 'current', 'nanocodex2');
+  for (const alias of ['nanocodex-hand', 'nc-hand']) {
+    const link = join(root, 'bin', alias);
+    assert.equal(readlinkSync(link), handTarget, `${label}: bin/${alias} must link the Hand`);
+    const version = run(link, ['--version']).stdout;
+    assert.equal([...version.matchAll(/^Hand Identity: ([0-9a-f]{64})$/gm)].map(m => m[1]).join(), expectedHandIdentity,
+      `${label}: ${alias} --version must be the Hand's own version`);
+    assert.match(run(link, ['--help']).stdout, /^Usage: \S+ hand\b/m, `${label}: ${alias} --help must be the hand command help`);
+    const status = JSON.parse(run(link, ['status']).stdout);
+    assert.equal(typeof status.installed, 'boolean', `${label}: ${alias} status must be hand status`);
+  }
+  trace.push(`PASS ${label}: bin/{nanocodex-hand,nc-hand} -> ${handTarget}; --version prints Hand Identity ${expectedHandIdentity}; --help is the hand command help; status is hand status`);
 }
 function bundleBytes(directory, label, handBytes = suppliedHand) {
   assert.equal(digest(readFileSync(join(directory, 'nanocodex'))), digest(readFileSync(suppliedCli)), `${label}: CLI bytes`);
@@ -198,6 +216,7 @@ try {
       'supply a real CLI + Hand with matching Hand source inputs');
     assert.doesNotMatch(handVersion, /^Commit SHA:|^Build Timestamp:/m,
       'Hand version must remain independent of CLI-only revisions');
+    expectedHandIdentity = identity(handVersion);
     trace.push(`real candidate pair revision: ${revision}; Hand identity: ${identity(handVersion)}; platform: ${process.platform}; fixture: ${fixture}`);
   }
 
