@@ -1,4 +1,4 @@
-export const DEFAULT_API_URL: "https://api.nanocodex.xyz";
+export const DEFAULT_API_URL: "https://nanocodex-connect-api.gakonst.workers.dev";
 
 export type Request = Readonly<{
   path: string;

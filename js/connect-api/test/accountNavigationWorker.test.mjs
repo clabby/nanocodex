@@ -16,7 +16,7 @@ test("SDK navigation links cross the public Connect Worker transport without an 
   const server = createServer(async (req, res) => {
     trace.push({ method: req.method, path: req.url });
     // The fixture translates the loopback transport to the public deployment URL.
-    const response = await worker.fetch(new Request(`https://api.nanocodex.xyz${req.url}`, {
+    const response = await worker.fetch(new Request(`https://nanocodex-connect-api.gakonst.workers.dev${req.url}`, {
       method: req.method, headers: { ...req.headers, origin: "https://app.example" },
     }), {}, { waitUntil() {} });
     res.writeHead(response.status, Object.fromEntries(response.headers));

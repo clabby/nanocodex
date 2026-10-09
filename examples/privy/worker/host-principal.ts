@@ -149,7 +149,7 @@ function configurationFromEnv(env: Env): HostConfiguration | undefined {
   const secret = env.NANOCODEX_HOST_PROJECT_SECRET?.trim();
   const privyAppId = boundedClaim(env.PRIVY_APP_ID?.trim());
   const privySecret = env.PRIVY_APP_SECRET?.trim();
-  const apiUrl = exactOrigin(env.NANOCODEX_API_URL ?? "https://api.nanocodex.xyz");
+  const apiUrl = exactOrigin(env.NANOCODEX_API_URL ?? "https://nanocodex-connect-api.gakonst.workers.dev");
   const dialogUrl = exactPublicUrl(
     env.NANOCODEX_CONNECT_DIALOG_URL
       ?? "https://nanocodex.gakonst.workers.dev/connect-dialog/",

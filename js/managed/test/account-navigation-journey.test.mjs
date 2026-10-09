@@ -35,7 +35,7 @@ test("public account navigation through managed HTTP and account proxy", { timeo
       }
       for(const add of ["api_key","card","address","phone","totp"]) assert.equal((await client.account.links({add})).vault,`${base.origin}/connect/vault?add=${add}`);
     }
-    for(const origin of ["https://managed.nanocodex.gakonst.workers.dev","https://nanocodex.gakonst.workers.dev","https://api.nanocodex.xyz"]) {
+    for(const origin of ["https://managed.nanocodex.gakonst.workers.dev","https://nanocodex.gakonst.workers.dev","https://nanocodex-connect-api.gakonst.workers.dev"]) {
       const r=await call(`/v1/account/links?__origin=${encodeURIComponent(origin)}`); assert.equal(r.status,200); assert.equal((await r.json()).connections,"https://nanocodex.gakonst.workers.dev/connect");
     }
     assert.equal((await (await call("/v1/account/links?__origin=https%3A%2F%2Funknown.example")).json()).connections,"https://nanocodex.gakonst.workers.dev/connect");

@@ -143,7 +143,7 @@ test("app connector requests use the Connect session without an agent turn", asy
   const seen = [];
   const client = Client.create({ appId: "playlist-app", appOrigin: "https://app.example.com",
     dialog: Dialog.memory(), session: false,
-    transport: Transport.http("https://api.nanocodex.xyz", { fetch: async (input, init) => {
+    transport: Transport.http("https://nanocodex-connect-api.gakonst.workers.dev", { fetch: async (input, init) => {
       seen.push(new Request(input, init));
       return Response.json({ items: [] }, { status: 200 });
     } }),
@@ -171,7 +171,7 @@ test("plural and provider-scoped connector APIs keep the current grant and exact
   const seen = [];
   const client = Client.create({ appId: "playlist-app", appOrigin: "https://app.example.com",
     dialog: Dialog.memory(), session: false,
-    transport: Transport.http("https://api.nanocodex.xyz", { fetch: async (input, init) => {
+    transport: Transport.http("https://nanocodex-connect-api.gakonst.workers.dev", { fetch: async (input, init) => {
       seen.push(new Request(input, init));
       return Response.json({ error: "rate limited" }, { status: 429, headers: { "retry-after": "5" } });
     } }),

@@ -1,6 +1,6 @@
 import { HttpError } from "./Errors.mjs";
 
-export const DEFAULT_API_URL = "https://api.nanocodex.xyz";
+export const DEFAULT_API_URL = "https://nanocodex-connect-api.gakonst.workers.dev";
 
 export function from(parameters) {
   if (!parameters || typeof parameters !== "object") {

@@ -14,7 +14,7 @@ export function create(parameters) {
     throw new TypeError("HostPrincipal.create requires a 32 to 512 character project secret");
   }
   const appOrigin = publicOrigin(parameters.appOrigin, "HostPrincipal.create appOrigin");
-  const baseUrl = serviceBaseUrl(parameters.baseUrl ?? "https://api.nanocodex.xyz");
+  const baseUrl = serviceBaseUrl(parameters.baseUrl ?? "https://nanocodex-connect-api.gakonst.workers.dev");
   const fetchFn = parameters.fetch ?? globalThis.fetch;
   if (typeof fetchFn !== "function") throw new TypeError("HostPrincipal.create requires fetch");
 

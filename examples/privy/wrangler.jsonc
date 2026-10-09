@@ -13,7 +13,7 @@
     "PRIVY_APP_ID": "replace-with-your-development-privy-app-id",
     "NANOCODEX_HOST_APP_ID": "privy-example",
     "NANOCODEX_HOST_APP_ORIGIN": "http://localhost:5173",
-    "NANOCODEX_API_URL": "https://api.nanocodex.xyz",
+    "NANOCODEX_API_URL": "https://nanocodex-connect-api.gakonst.workers.dev",
     "NANOCODEX_CONNECT_DIALOG_URL": "https://nanocodex.gakonst.workers.dev/connect-dialog/"
   }
 }

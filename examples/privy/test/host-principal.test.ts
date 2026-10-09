@@ -15,7 +15,7 @@ const env = {
   NANOCODEX_HOST_APP_ID: "privy-example",
   NANOCODEX_HOST_APP_ORIGIN: origin,
   NANOCODEX_HOST_PROJECT_SECRET: "nanocodex-project-secret-with-32-random-characters",
-  NANOCODEX_API_URL: "https://api.nanocodex.xyz",
+  NANOCODEX_API_URL: "https://nanocodex-connect-api.gakonst.workers.dev",
   NANOCODEX_CONNECT_DIALOG_URL: "https://connect.example.test/dialog/",
 } satisfies Env;
 

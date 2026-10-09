@@ -1,9 +1,9 @@
 # Account navigation links
 
-Call `GET /v1/account/links` from the account API or `https://api.nanocodex.xyz` to get browser URLs for Connections, Vault, Wallet, and API access. These are ordinary navigation links: visitors sign into their own account, and no account credential or grant is included in the URL.
+Call `GET /v1/account/links` from the account API or `https://nanocodex-connect-api.gakonst.workers.dev` to get browser URLs for Connections, Vault, Wallet, and API access. These are ordinary navigation links: visitors sign into their own account, and no account credential or grant is included in the URL.
 
 ```sh
-curl 'https://api.nanocodex.xyz/v1/account/links?connect=github&add=login'
+curl 'https://nanocodex-connect-api.gakonst.workers.dev/v1/account/links?connect=github&add=login'
 ```
 
 The cloud SDK exposes the same operation before or after connecting:
