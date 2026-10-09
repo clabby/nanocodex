@@ -143,6 +143,10 @@ path = "tests/local_managed_server.rs"
 name = "tui_control"
 path = "tests/tui_control.rs"
 
+[[test]]
+name = "code_mode_teardown"
+path = "tests/code_mode_teardown.rs"
+
 [[bin]]
 name = "nanocodex"
 path = "src/main.rs"
