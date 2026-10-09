@@ -76,10 +76,9 @@ impl Feature for Branches {
 
     fn attach(&mut self, _parts: &mut LocalParts, cx: &FeatureContext<'_>) {
         if let Some(agent) = cx.agent {
-            let thread = agent.rollout().map_or_else(
-                || agent.session_id().to_owned(),
-                |rollout| rollout.thread_id().to_owned(),
-            );
+            let thread = agent
+                .rollout()
+                .map_or_else(|| agent.session_id().to_owned(), |rollout| rollout.thread_id().to_owned());
             self.registry
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -96,10 +95,7 @@ impl Feature for Branches {
     }
 
     fn key(&mut self, key: &KeyEvent, cx: &FeatureContext<'_>) -> KeyOutcome {
-        if !key
-            .modifiers
-            .contains(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
+        if !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return KeyOutcome::Ignored;
         }
         match key.code {
@@ -122,12 +118,42 @@ impl Feature for Branches {
 
 impl Branches {
     fn open(&self, pane: PaneId, cx: &FeatureContext<'_>) {
-        match navigator(&self.registry, cx) {
-            Ok(navigator) => cx
-                .host
-                .send(FeatureUpdate::OpenOverlay(Box::new(navigator))),
-            Err(error) => cx.host.error(Some(pane), error),
-        }
+        let prepared = (|| -> Result<_, String> {
+            let launch = ready(cx)?.clone();
+            let agent = cx.agent.ok_or("wait for the local agent to connect")?;
+            BRANCH_HOST.set(cx.host.clone());
+            // Edits fork the Codex rollout; Claude sessions use ncl rewind instead.
+            let rollout = agent
+                .rollout()
+                .map(|rollout| (rollout.thread_id().to_owned(), rollout.path().to_path_buf()));
+            Ok((launch, rollout))
+        })();
+        let (launch, rollout) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                cx.host.error(Some(pane), error);
+                return;
+            }
+        };
+        let registry = Arc::clone(&self.registry);
+        let host = cx.host.clone();
+        let workspace = cx.workspace.to_path_buf();
+        // Reading the transcript touches the disk; keep it off the input loop.
+        tokio::spawn(async move {
+            let thread = rollout.as_ref().map(|(thread, _)| thread.clone());
+            let prompts = tokio::task::spawn_blocking(move || thread.map(|thread| prompts(&thread)).unwrap_or_default())
+                .await
+                .unwrap_or_default();
+            let navigator = BranchNavigator::new(
+                registry,
+                host.clone(),
+                launch,
+                workspace,
+                rollout.map(|(_, path)| path),
+                prompts,
+            );
+            host.send(FeatureUpdate::OpenOverlay(Box::new(navigator)));
+        });
     }
 
     fn cycle(&self, direction: isize, cx: &FeatureContext<'_>) {
@@ -135,30 +161,23 @@ impl Branches {
             let registry = self.registry.lock().unwrap_or_else(PoisonError::into_inner);
             let count = registry.branches.len();
             if count < 2 {
-                cx.host.error(
-                    None,
-                    "This conversation has no other branch; edit an earlier prompt with Ctrl+Alt+B",
-                );
+                cx.host.error(None, "This conversation has no other branch; edit an earlier prompt with Ctrl+Alt+B");
                 return;
             }
             let position = registry
                 .current
                 .as_ref()
-                .and_then(|current| {
-                    registry
-                        .branches
-                        .iter()
-                        .position(|branch| &branch.thread == current)
-                })
+                .and_then(|current| registry.branches.iter().position(|branch| &branch.thread == current))
                 .unwrap_or(0);
-            let next = position
-                .cast_signed()
-                .saturating_add(direction)
-                .rem_euclid(count.cast_signed());
+            let next = position.cast_signed().saturating_add(direction).rem_euclid(count.cast_signed());
             registry.branches[next.cast_unsigned()].thread.clone()
         };
-        if let Err(error) = ready(cx).and_then(|launch| switch(launch, &target)) {
-            cx.host.error(None, error);
+        match ready(cx) {
+            Ok(launch) => {
+                BRANCH_HOST.set(cx.host.clone());
+                switch(launch, &target);
+            }
+            Err(error) => cx.host.error(None, error),
         }
     }
 }
@@ -171,59 +190,38 @@ fn ready<'a>(cx: &'a FeatureContext<'_>) -> Result<&'a LocalLaunch, String> {
     if btw_local::active().is_some() {
         return Err("close /btw before editing history or switching branches".to_owned());
     }
-    cx.launch
-        .ok_or_else(|| "branches need a local agent (run ncl)".to_owned())
+    cx.launch.ok_or_else(|| "branches need a local agent (run ncl)".to_owned())
 }
 
-/// Reopens `thread` in place.
-pub(crate) fn switch(launch: &LocalLaunch, thread: &str) -> Result<(), String> {
-    let launch = sessions::relaunch(launch, thread).map_err(|error| format!("{error:#}"))?;
-    BRANCH_HOST.with_host(|host| host.send(FeatureUpdate::Relaunch(Box::new(launch))));
-    Ok(())
-}
-
-fn navigator(
-    registry: &SharedRegistry,
-    cx: &FeatureContext<'_>,
-) -> Result<BranchNavigator, String> {
-    let launch = ready(cx)?.clone();
-    let agent = cx.agent.ok_or("wait for the local agent to connect")?;
-    BRANCH_HOST.set(cx.host.clone());
-    // Edits fork the Codex rollout; Claude sessions use ncl rewind instead.
-    let rollout = agent
-        .rollout()
-        .map(|rollout| (rollout.thread_id().to_owned(), rollout.path().to_path_buf()));
-    let prompts = match &rollout {
-        Some((thread, _)) => {
-            let home = crate::config::default_codex_home().map_err(|error| error.to_string())?;
-            RolloutConfig::new(&home)
-                .load_session(thread)
-                .map(|session| {
-                    session
-                        .transcript()
-                        .iter()
-                        .filter_map(|item| match item {
-                            RolloutTranscriptItem::User(text) => Some(text.clone()),
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
-        None => Vec::new(),
+/// User prompts of a saved Codex thread, oldest first.
+fn prompts(thread: &str) -> Vec<String> {
+    let Ok(home) = crate::config::default_codex_home() else {
+        return Vec::new();
     };
-    Ok(BranchNavigator::new(
-        Arc::clone(registry),
-        cx.host.clone(),
-        launch,
-        cx.workspace.to_path_buf(),
-        rollout.map(|(_, path)| path),
-        prompts,
-    ))
+    RolloutConfig::new(&home)
+        .load_session(thread)
+        .map(|session| {
+            session
+                .transcript()
+                .iter()
+                .filter_map(|item| match item {
+                    RolloutTranscriptItem::User(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Reopens the branch `thread` in place. Branch threads are known Codex threads,
+/// so the relaunch needs no disk access here; the connection task loads it.
+pub(crate) fn switch(launch: &LocalLaunch, thread: &str) {
+    let launch = sessions::codex_launch(launch, sessions::Resume::Codex(thread.to_owned()));
+    BRANCH_HOST.with_host(|host| host.send(FeatureUpdate::Relaunch(Box::new(launch))));
 }
 
 /// Starts a branch whose history ends before prompt `index` (0-based) and
-/// submits `prompt` there.
+/// submits `prompt` there. The rollout copy happens in the connection task.
 pub(crate) fn edit(
     registry: &SharedRegistry,
     launch: &LocalLaunch,
@@ -233,38 +231,37 @@ pub(crate) fn edit(
     prompt: String,
 ) -> Result<LocalLaunch, String> {
     let label = branch_label(&prompt, index);
-    let mut registry = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    let parent = registry.current.clone();
-    if index == 0 {
+    let branch = if index == 0 {
         // Nothing precedes the first prompt: the branch is a fresh session.
         let mut fresh = sessions::fresh(launch);
         fresh.replaceable = false;
         fresh.resume = Some(sessions::Resume::Branch {
             thread: None,
+            fork: None,
             prompt,
         });
-        registry.pending = Some((parent, label));
-        return Ok(fresh);
-    }
-    let rollout = rollout.ok_or("editing history needs a saved Codex rollout; this session has none (Claude sessions use ncl rewind)")?;
-    let home = crate::config::default_codex_home().map_err(|error| error.to_string())?;
-    let thread = crate::rollout_fork::fork(
-        rollout,
-        &crate::rollout_fork::Point::Count(index),
-        &home,
-        workspace,
-    )
-    .map_err(|error| format!("could not start a branch: {error:#}"))?;
-    let mut branch = sessions::relaunch(launch, &thread).map_err(|error| format!("{error:#}"))?;
-    branch.resume = Some(sessions::Resume::Branch {
-        thread: Some(thread.clone()),
-        prompt,
-    });
-    registry.branches.push(Branch {
-        thread,
-        parent,
-        label,
-    });
+        fresh
+    } else {
+        let source = rollout
+            .ok_or("editing history needs a saved Codex rollout; this session has none (Claude sessions use ncl rewind)")?
+            .to_path_buf();
+        sessions::codex_launch(
+            launch,
+            sessions::Resume::Branch {
+                thread: None,
+                fork: Some(sessions::Fork {
+                    source,
+                    turns: index,
+                    workspace: workspace.to_path_buf(),
+                }),
+                prompt,
+            },
+        )
+    };
+    let mut registry = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    let parent = registry.current.clone();
+    // The new thread id is known once the branch connects (Feature::attach).
+    registry.pending = Some((parent, label));
     Ok(branch)
 }
 
@@ -286,12 +283,7 @@ impl HostCell {
     }
 
     fn with_host(&self, send: impl FnOnce(&super::FeatureHost)) {
-        if let Some(host) = self
-            .0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
+        if let Some(host) = self.0.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
             send(host);
         }
     }

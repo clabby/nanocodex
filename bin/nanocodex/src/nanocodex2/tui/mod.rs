@@ -514,6 +514,12 @@ enum ConnectionResult {
         request_id: u64,
         result: Option<Result<AgentList, ManagedError>>,
     },
+    /// FEATURE-HOOK: wp2 local session discovery, read off the input loop.
+    LocalSessions {
+        pane: PaneId,
+        request_id: u64,
+        result: Option<Result<Vec<SessionSummary>, String>>,
+    },
     RecentPrompts {
         pane: PaneId,
         request_id: u64,
@@ -3413,6 +3419,21 @@ async fn run_inner(
                             let update = app.update(AppEvent::RecentPromptsLoaded { pane, session_id, prompts });
                             stopping |= apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
                         }
+                        ConnectionResult::LocalSessions { pane, request_id, result } => {
+                            let cancelled = runtime.session_list_cancellations.remove(&(pane, request_id))
+                                .is_none_or(|token| token.is_cancelled());
+                            if cancelled { continue; }
+                            let Some(result) = result else { continue; };
+                            let update = match result {
+                                Ok(sessions) => app.update(AppEvent::SessionsLoaded { pane, request_id, sessions }),
+                                Err(error) => app.update(AppEvent::SessionListFailed {
+                                    pane,
+                                    request_id,
+                                    error: format!("Could not load local sessions: {error}"),
+                                }),
+                            };
+                            stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+                        }
                         ConnectionResult::Sessions { pane, request_id, result } => {
                             let cancelled = runtime.session_list_cancellations.remove(&(pane, request_id))
                                 .is_none_or(|token| token.is_cancelled());
@@ -4462,12 +4483,6 @@ async fn apply_feature_update(
             scheduler.request_immediate(Instant::now());
             return Ok(false);
         }
-        FeatureUpdate::ReplaceAgent(_) | FeatureUpdate::OpenPane(_) => {
-            app.update(AppEvent::NotifyError {
-                pane: PaneId::Main,
-                error: "This feature action is not wired into the unified TUI yet".to_owned(),
-            })
-        }
     };
     apply_update(update, app, runtime, terminal, scheduler).await
 }
@@ -4557,7 +4572,13 @@ async fn apply_update(
                 if runtime.btw.as_ref().is_some_and(|btw| btw.pane == pane)
                     && let Some(btw) = runtime.btw.take()
                 {
-                    btw.task.abort();
+                    if runtime.local.is_some() {
+                        // FEATURE-HOOK: wp2 dropping the request channel makes the local
+                        // side task cancel its turn and shut its forked agent down.
+                        drop(btw.commands);
+                    } else {
+                        btw.task.abort();
+                    }
                 }
             }
             AppEffect::Pane { pane, effect } => {
@@ -5429,19 +5450,25 @@ async fn apply_update(
                         }
                     }
                     RootEffect::LoadSessions { request_id, .. } if runtime.local.is_some() => {
-                        let update = match local::sessions::list(&runtime.workspace) {
-                            Ok(sessions) => app.update(AppEvent::SessionsLoaded {
+                        // Scanning rollouts and journals reads the disk; keep it off the input loop.
+                        let workspace = runtime.workspace.clone();
+                        let cancellation = CancellationToken::new();
+                        runtime
+                            .session_list_cancellations
+                            .insert((pane, request_id), cancellation.clone());
+                        runtime.connection.spawn(async move {
+                            let list = tokio::task::spawn_blocking(move || {
+                                local::sessions::list(&workspace).map_err(|error| format!("{error:#}"))
+                            });
+                            ConnectionResult::LocalSessions {
                                 pane,
                                 request_id,
-                                sessions,
-                            }),
-                            Err(error) => app.update(AppEvent::SessionListFailed {
-                                pane,
-                                request_id,
-                                error: format!("Could not load local sessions: {error:#}"),
-                            }),
-                        };
-                        absorb(update, &mut effects, scheduler);
+                                result: tokio::select! {
+                                    () = cancellation.cancelled() => None,
+                                    result = list => Some(result.map_err(|error| error.to_string()).and_then(|result| result)),
+                                },
+                            }
+                        });
                     }
                     RootEffect::LoadSessions { request_id, .. } => {
                         let client = runtime.client.clone();

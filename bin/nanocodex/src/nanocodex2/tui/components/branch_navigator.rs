@@ -125,13 +125,8 @@ impl BranchNavigator {
             }
             branch.thread.clone()
         };
-        match branches::switch(&self.launch, &target) {
-            Ok(()) => OverlayOutcome::Close,
-            Err(error) => {
-                self.error = Some(error);
-                OverlayOutcome::Consumed
-            }
-        }
+        branches::switch(&self.launch, &target);
+        OverlayOutcome::Close
     }
 
     fn commit_edit(&mut self, text: String) -> OverlayOutcome {
