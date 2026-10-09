@@ -171,12 +171,10 @@ impl SettingsCommand {
                 (Some("login"), Some(name), None) => Self::Feature(
                     crate::nanocodex2::tui::features::FeatureCommand::McpLogin(name.to_owned()),
                 ),
-                (Some("reload"), Some(name), None) => {
-                    Self::Feature(crate::nanocodex2::tui::features::FeatureCommand::McpReload(
-                        Some(name.to_owned()),
-                    ))
-                }
-                _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload <server>".into()),
+                (Some("reload"), name, None) => Self::Feature(
+                    crate::nanocodex2::tui::features::FeatureCommand::McpReload(name.map(str::to_owned)),
+                ),
+                _ => Self::Invalid("Usage: /mcp login <server> or /mcp reload [server]".into()),
             }),
             // FEATURE-HOOK: wp2 local /btw collapse/split and the branch navigator
             "/collapse" | "/split" | "/branches" => Some(if parts.next().is_some() {
@@ -196,14 +194,21 @@ impl SettingsCommand {
             "/voice" if input.trim_start()[command.len()..].trim() == "list" => {
                 Some(Self::Voice(crate::nanocodex2::voice::Command::List))
             }
-            "/voice" => Some(
-                match crate::nanocodex2::voice::Command::parse(
-                    input.trim_start()[command.len()..].trim(),
-                ) {
+            "/voice" => {
+                // FEATURE-HOOK: wp4 arguments the managed grammar rejects may still be
+                // local Realtime controls (e.g. platform voices); the driver shows the
+                // managed error when no local agent handles them.
+                let arguments = input.trim_start()[command.len()..].trim();
+                Some(match crate::nanocodex2::voice::Command::parse(arguments) {
                     Ok(command) => Self::Voice(command),
-                    Err(error) => Self::Invalid(error),
-                },
-            ),
+                    Err(error) if arguments.split_whitespace().count() != 1 => Self::Invalid(error),
+                    Err(_) => Self::Feature(
+                        crate::nanocodex2::tui::features::FeatureCommand::RealtimeVoice(
+                            arguments.to_owned(),
+                        ),
+                    ),
+                })
+            }
             "/model" => {
                 let Some(argument) = parts.next() else {
                     return Some(Self::OpenModel);

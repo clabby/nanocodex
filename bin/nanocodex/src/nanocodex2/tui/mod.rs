@@ -4587,7 +4587,13 @@ async fn apply_update(
                             local.with_features(|features, cx| features.command(pane, &command, cx))
                         });
                         if !handled {
-                            absorb(app.update(AppEvent::NotifyError { pane, error: "This command needs a local agent (run ncl)".into() }), &mut effects, scheduler);
+                            let error = match &command {
+                                features::FeatureCommand::RealtimeVoice(arguments) => crate::nanocodex2::voice::Command::parse(arguments)
+                                    .err()
+                                    .unwrap_or_else(|| "This /voice command needs a local agent (run ncl)".into()),
+                                _ => "This command needs a local agent (run ncl)".into(),
+                            };
+                            absorb(app.update(AppEvent::NotifyError { pane, error }), &mut effects, scheduler);
                         }
                     }
                     RootEffect::Voice(command) if runtime.local.is_some() => {
