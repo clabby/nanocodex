@@ -102,6 +102,15 @@ fn channel_version() -> String {
     format!("{}{suffix}", build.version)
 }
 
+/// `debug` for unoptimized builds, `nightly` for optimized nightly-tagged
+/// builds and `release` otherwise.
+fn profile() -> &'static str {
+    match build().profile {
+        "release" if is_nightly() => "nightly",
+        profile => profile,
+    }
+}
+
 fn short_sha() -> &'static str {
     git_sha().map_or("unknown", |sha| sha.get(..sha.len().min(10)).unwrap_or(sha))
 }
@@ -118,7 +127,7 @@ pub(crate) fn semver() -> &'static str {
             "{}+{}.{}",
             channel_version(),
             short_sha(),
-            build().profile
+            profile()
         ))
     })
 }
@@ -138,7 +147,7 @@ pub(crate) fn long() -> &'static str {
         if let Some(sha) = git_sha() {
             lines.push(format!("Commit SHA: {sha}"));
         }
-        lines.push(format!("Build Profile: {}", build().profile));
+        lines.push(format!("Build Profile: {}", profile()));
         if let Some(identity) = hand_identity() {
             lines.push(format!("Hand Identity: {identity}"));
         }
