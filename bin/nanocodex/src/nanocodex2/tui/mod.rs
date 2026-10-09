@@ -2224,13 +2224,13 @@ async fn reconnect_agent(
 }
 
 /// Renderer telemetry and completion notifications shared by every TUI driver.
-pub(crate) struct Wp3Hooks {
+pub(crate) struct Presentation {
     stream: telemetry::StreamTelemetry,
     view: telemetry::ViewTelemetry,
     pub(crate) notifier: notification::Notifier,
 }
 
-impl Wp3Hooks {
+impl Presentation {
     pub(crate) fn new() -> Self {
         Self {
             stream: telemetry::StreamTelemetry::default(),
@@ -2341,11 +2341,16 @@ async fn run_inner(
     let mut app = AppNode::new(Theme::default(), workspace.clone(), root);
     let mut reload: Option<crate::nanocodex2::reload::Registration> = None;
     let mut reload_requested = false;
-    let _observability = telemetry::install_observability();
+    let _observability = if local_launch.is_none() {
+        telemetry::install_observability()
+    } else {
+        // The local command owns its configured logging/OTLP guard.
+        None
+    };
     let mut terminal = TerminalSession::enter().await.map_err(terminal_error)?;
     let mut input = EventStream::new();
     let mut scheduler = RenderScheduler::new(STREAM_FRAME_INTERVAL, Instant::now());
-    let mut wp3 = Wp3Hooks::new();
+    let mut presentation = Presentation::new();
     let (btw_events, mut btw_updates) = mpsc::unbounded_channel();
     let is_local = local_launch.is_some();
     let mut runtime = DriverRuntime {
@@ -2765,7 +2770,7 @@ async fn run_inner(
                     }
                 })
                 .map_err(terminal_error)?;
-            wp3.presented(&app, &mut terminal, &runtime.agent_id, render_started, draw);
+            presentation.presented(&app, &mut terminal, &runtime.agent_id, render_started, draw);
             runtime.screen.size.send_if_modified(|size| {
                 let current = app.screen_size();
                 if *size == current {
@@ -3051,7 +3056,7 @@ async fn run_inner(
                     .transpose()
                     .map_err(terminal_error)?
                     .ok_or_else(|| terminal_error(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")))?;
-                wp3.notifier.observe_event(&event);
+                presentation.notifier.observe_event(&event);
                 // SECURITY: intercept BEFORE ordinary AppEvent, clipboard,
                 // screen, composer, shell, debug/control, export or history.
                 if let Some(flow) = &mut runtime.secure_input {
@@ -3123,7 +3128,7 @@ async fn run_inner(
             }, if runtime.managed_events_open => {
                 match event {
                     Some(event) => {
-                        wp3.received(&runtime.agent_id, telemetry::Received::managed(&event));
+                        presentation.received(&runtime.agent_id, telemetry::Received::managed(&event));
                         if let Some(bridge) = &runtime.control_bridge { let mut value=serde_json::to_value(&event).unwrap_or_default(); value["session_id"]=serde_json::json!(runtime.agent_id); bridge.publish("managed.event",value); }
                         runtime.observed_cursor.clone_from(&event.cursor);
                         if let Some(request_id) = event.data.turn_id() {

@@ -6,47 +6,6 @@
 //! decided here through [`Capabilities`], so menus, completion, help and command
 //! dispatch hide or reject the same features consistently.
 
-use nanocodex_managed::ManagedClient;
-
-use super::local::agent::LocalBackend;
-
-/// A user-visible feature that exists only on some backends.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum Capability {
-    /// Available on every backend.
-    Always,
-    Share,
-    Sites,
-    Vault,
-    SecureInput,
-    Screen,
-    AutoRoute,
-    Done,
-    Connectors,
-    Bug,
-    /// Managed session list, search and resume (/attach, Ctrl+R picker source).
-    ManagedSessions,
-    /// Managed /btw fork through the account service.
-    ManagedBtw,
-    /// Local /btw fork through the agent handle.
-    LocalBtw,
-    Reload,
-    Handoff,
-    ReviewDownload,
-    Routing,
-    /// ElevenLabs/managed voice protocol.
-    VoiceManaged,
-    /// OpenAI Realtime voice from the local agent configuration.
-    VoiceRealtime,
-    Mcp,
-    Branches,
-    CollapseSplit,
-    ClaudeHost,
-    Eval,
-    /// Local session source for the resume picker.
-    LocalSessions,
-}
-
 /// The feature set of one running backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(
@@ -144,36 +103,6 @@ impl Capabilities {
         local_sessions: true,
     };
 
-    pub(crate) const fn has(self, capability: Capability) -> bool {
-        match capability {
-            Capability::Always => true,
-            Capability::Share => self.share,
-            Capability::Sites => self.sites,
-            Capability::Vault => self.vault,
-            Capability::SecureInput => self.secure_input,
-            Capability::Screen => self.screen,
-            Capability::AutoRoute => self.autoroute,
-            Capability::Done => self.done,
-            Capability::Connectors => self.connectors,
-            Capability::Bug => self.bug,
-            Capability::ManagedSessions => self.managed_sessions,
-            Capability::ManagedBtw => self.managed_btw,
-            Capability::LocalBtw => self.local_btw,
-            Capability::Reload => self.reload,
-            Capability::Handoff => self.handoff,
-            Capability::ReviewDownload => self.review_download,
-            Capability::Routing => self.routing,
-            Capability::VoiceManaged => self.voice_managed,
-            Capability::VoiceRealtime => self.voice_realtime,
-            Capability::Mcp => self.mcp,
-            Capability::Branches => self.branches,
-            Capability::CollapseSplit => self.collapse_split,
-            Capability::ClaudeHost => self.claude_host,
-            Capability::Eval => self.eval,
-            Capability::LocalSessions => self.local_sessions,
-        }
-    }
-
     /// Shared policy for typed commands, action search and shortcut help.
     pub(crate) fn command_available(self, input: &str) -> bool {
         let command = input
@@ -217,47 +146,5 @@ impl Capabilities {
 impl Default for Capabilities {
     fn default() -> Self {
         Self::MANAGED
-    }
-}
-
-/// The agent service behind the unified driver.
-pub(crate) enum Backend {
-    /// A durable account-managed agent reached through the managed API.
-    Managed(ManagedClient),
-    /// A local, in-process agent built from `ncl` flags.
-    Local(Box<LocalBackend>),
-}
-
-impl Backend {
-    pub(crate) fn managed(&self) -> Option<&ManagedClient> {
-        match self {
-            Self::Managed(client) => Some(client),
-            Self::Local(_) => None,
-        }
-    }
-
-    pub(crate) fn local(&self) -> Option<&LocalBackend> {
-        match self {
-            Self::Managed(_) => None,
-            Self::Local(local) => Some(local),
-        }
-    }
-
-    pub(crate) fn local_mut(&mut self) -> Option<&mut LocalBackend> {
-        match self {
-            Self::Managed(_) => None,
-            Self::Local(local) => Some(local),
-        }
-    }
-
-    pub(crate) const fn is_local(&self) -> bool {
-        matches!(self, Self::Local(_))
-    }
-
-    pub(crate) fn capabilities(&self) -> Capabilities {
-        match self {
-            Self::Managed(_) => Capabilities::MANAGED,
-            Self::Local(local) => local.capabilities(),
-        }
     }
 }
