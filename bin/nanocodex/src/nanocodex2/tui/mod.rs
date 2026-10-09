@@ -2257,6 +2257,10 @@ async fn run_inner(
         client: client.clone(),
         local: local_launch.map(local::LocalState::new),
         feature_overlay: None,
+        feature_instructions: HashMap::new(),
+        feature_completions: HashMap::new(),
+        feature_turns: HashSet::new(),
+        local_voice_status: None,
         pending_voice: None,
         voice_selection: Default::default(),
         voice_tasks: JoinSet::new(),
@@ -4285,9 +4289,6 @@ async fn apply_feature_update(
             scheduler.request_immediate(Instant::now());
             return Ok(false);
         }
-        FeatureUpdate::ReplaceAgent(_)
-        | FeatureUpdate::OpenPane(_)
-        | FeatureUpdate::ClosePane(_)
         FeatureUpdate::SubmitPrompt(prompt) => {
             let pane = main(prompt.pane);
             let submission = Submission::text(prompt.display);
