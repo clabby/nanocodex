@@ -13,7 +13,18 @@ node bin/nanocodex/tests/update_local_e2e.mjs target/debug/nanocodex target/debu
 
 Install layout: `versions/<key>/nanocodex` is the CLI and `versions/<key>/nanocodex2`
 is the Hand (release asset `nanocodex2-<triple>`, or a locally built
-`nanocodex-hand`); service records keep the file name `nanocodex2`. For a CLI
+`nanocodex-hand`); service records keep the file name `nanocodex2`. A Hand that reports a
+Hand Identity is stored once under `hand-versions/<identity>/` and linked from every
+version with that identity, so a CLI-only update keeps the Hand's path and bytes.
+On macOS the Hand also runs from a signed bundle,
+`hand-versions/<identity>/Nanocodex.app` (linked as `versions/<key>/Nanocodex.app`):
+releases ship it as `nanocodex-app-aarch64-apple-darwin.tar.gz`, local and source
+pairs are wrapped and signed with identifier `com.nanocodex.hand` using the identity
+named by `NANOCODEX_CODESIGN_IDENTITY`, else the single installed Developer ID
+Application identity, else ad hoc. The first verified bundle stored for an
+identity is kept, so re-signed copies of an unchanged Hand never
+replace it. An installed standalone Hand with the same identity stays in place
+until an explicit `--restart-hand` moves the service into the bundle. For a CLI
 containing both command trees, `bin/{nanocodex,nanocodex2,nc,ncl}` all link
 `../current/nanocodex` and argv[0] selects the tree (`ncl` is local). Older
 pairs keep `bin/nanocodex2` and `nc` on their managed `nanocodex2`. Windows

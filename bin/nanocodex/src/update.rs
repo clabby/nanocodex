@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::version;
 
+mod app;
 mod automatic;
 mod local;
 mod source;
@@ -442,7 +443,11 @@ impl Update {
         let voice_name = voice::asset_name(binary_asset_name()?);
         let checksum_manifest =
             download(&client, find_asset(&release, CHECKSUMS_ASSET)?, false).await?;
-        let voice_asset = optional_voice_asset(&release, &checksum_manifest, &voice_name)?;
+        let voice_asset = optional_release_asset(&release, &checksum_manifest, &voice_name)?;
+        let app_asset = match app::asset_name() {
+            Some(name) => optional_release_asset(&release, &checksum_manifest, name)?,
+            None => None,
+        };
         let voice_checksum = voice_asset
             .map(|asset| checksum_for(&checksum_manifest, &asset.name))
             .transpose()?;
@@ -454,6 +459,7 @@ impl Update {
         if !self.force
             && cached
             && (voice_asset.is_none() || store.is_cached_voice(&key, voice_checksum.as_deref())?)
+            && (app_asset.is_none() || store.has_hand_app(&key)?)
         {
             if !activate_coordinated(&store, &key, self.background, self.restart_hand).await? {
                 return Ok(());
@@ -502,8 +508,21 @@ impl Update {
             }
             Ok(None)
         };
-        let (contents, companion_contents, voice_contents, guest_contents) =
-            tokio::try_join!(cli_download, hand_download, voice_download, guest_download)?;
+        let app_download = async {
+            match app_asset {
+                Some(asset) => download_verified(&client, asset, &checksum_manifest, true)
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            }
+        };
+        let (contents, companion_contents, voice_contents, guest_contents, app_contents) = tokio::try_join!(
+            cli_download,
+            hand_download,
+            voice_download,
+            guest_download,
+            app_download
+        )?;
         let hand_identity = identity_of_hand_bytes(&store, &companion_contents).await?;
         store.install_bundle_with_hand(
             &key,
@@ -513,6 +532,9 @@ impl Update {
             guest_contents.as_deref(),
             voice_contents.as_deref(),
         )?;
+        if let Some(archive) = &app_contents {
+            install_release_app(&store, &key, archive, hand_identity.as_deref()).await?;
+        }
         if !activate_coordinated(&store, &key, self.background, self.restart_hand).await? {
             return Ok(());
         }
@@ -911,7 +933,8 @@ async fn activate_coordinated(
     restart_hand: bool,
 ) -> Result<bool> {
     store.validate_activation(key)?;
-    let companion = store.version_dir(key).join(HAND_FILE);
+    // On macOS this is the version's signed Nanocodex.app when it has one.
+    let companion = store.hand_executable(key);
     // A bundle without a Hand, or whose Hand bytes equal the Hand already in
     // use, changes only the CLI: the Hand service is neither switched nor
     // restarted. Corrupt Hand bytes still fail closed.
@@ -936,7 +959,8 @@ async fn activate_coordinated(
             false
         }
     };
-    let hand_unchanged = hand_present && hand_unchanged(store, key, &companion, installed).await?;
+    let hand_unchanged =
+        hand_present && hand_unchanged(store, key, &companion, installed, restart_hand).await?;
     let switch_hand = installed && hand_present && !hand_unchanged;
     if installed && !switch_hand {
         if hand_present {
@@ -947,6 +971,7 @@ async fn activate_coordinated(
     }
     if switch_hand && cfg!(target_os = "macos") {
         crate::hand_service::validate_candidate(&companion).await?;
+        warn_signing_change(&companion).await;
     }
     #[cfg(target_os = "linux")]
     if switch_hand {
@@ -1066,11 +1091,16 @@ async fn activate_coordinated(
 /// Hand. Equal bytes or an equal reported Hand identity both count; an
 /// identity covers every source input of the Hand, so rebuilding only the CLI
 /// never switches or restarts the Hand.
+///
+/// An installed standalone Hand whose identity equals a bundled candidate stays
+/// in place during CLI-only updates; only an explicit Hand restart moves the
+/// service into the signed `Nanocodex.app` (once, as a Hand switch).
 async fn hand_unchanged(
     store: &VersionStore,
     key: &str,
     candidate: &Path,
     installed: bool,
+    adopt_bundle: bool,
 ) -> Result<bool> {
     let Ok(candidate_bytes) = fs::read(candidate) else {
         return Ok(false);
@@ -1082,7 +1112,11 @@ async fn hand_unchanged(
     } else if let Some(active) = store.active()? {
         current.push(store.version_dir(&active).join(HAND_FILE));
     }
+    let bundled = app::bundle_of(candidate).is_some();
     for path in current {
+        if adopt_bundle && bundled && app::bundle_of(&path).is_none() {
+            continue;
+        }
         // Byte comparison after a size check; verified bundles already carry
         // checksums, and hashing here would only add another full pass.
         if fs::metadata(&path).is_ok_and(|metadata| metadata.len() == candidate_bytes.len() as u64)
@@ -1112,6 +1146,70 @@ async fn identity_of_hand_bytes(store: &VersionStore, hand: &[u8]) -> Result<Opt
     let path = probe.path().join(HAND_FILE);
     store::atomic_write(&path, hand, true)?;
     Ok(local::probe_hand_identity(&path).await)
+}
+
+/// Store a verified release `Nanocodex.app` for a version whose Hand reports
+/// an identity, after proving the bundled Hand is that same Hand. A release
+/// Hand without an identity keeps its standalone form.
+async fn install_release_app(
+    store: &VersionStore,
+    key: &str,
+    archive: &[u8],
+    identity: Option<&str>,
+) -> Result<()> {
+    let Some(identity) = identity else {
+        eprintln!("warning: this release Hand reports no identity; keeping the standalone Hand");
+        return Ok(());
+    };
+    let probe = tempfile::Builder::new()
+        .prefix(".app-probe-")
+        .tempdir_in(store.root())
+        .wrap_err("failed to stage the Nanocodex.app identity probe")?;
+    app::extract(archive, probe.path())?;
+    let bundled = local::probe_hand_identity(&probe.path().join(app::EXECUTABLE)).await;
+    if bundled.as_deref() != Some(identity) {
+        bail!(
+            "the release Nanocodex.app Hand reports identity {} instead of {identity}; refusing a mismatched bundle",
+            bundled.as_deref().unwrap_or("none")
+        );
+    }
+    #[cfg(unix)]
+    store.install_hand_app(key, archive)?;
+    #[cfg(not(unix))]
+    let _ = key;
+    Ok(())
+}
+
+/// macOS development pairs run from a locally signed `Nanocodex.app`, like a
+/// release, so privacy grants attach to the bundle identifier rather than to
+/// a raw build output. An unchanged Hand identity reuses its stored bundle.
+fn wrap_development_app(store: &VersionStore, key: &str) -> Result<()> {
+    if !cfg!(target_os = "macos")
+        || store.hand_identity_of(key).is_none()
+        || !store.is_cached_bundle(key, false)?
+    {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    store.wrap_hand_app(key, env!("CARGO_PKG_VERSION"))?;
+    Ok(())
+}
+
+/// macOS privacy grants follow the signing team. Say so before switching from
+/// a Developer ID Hand to one signed by another team or ad hoc.
+async fn warn_signing_change(candidate: &Path) {
+    let Ok(Some(installed)) = installed_hand_executable().await else {
+        return;
+    };
+    let previous = app::team_of(&installed);
+    let next = app::team_of(candidate);
+    if previous.is_some() && previous != next {
+        eprintln!(
+            "warning: the new Hand is signed by {} instead of team {}; macOS will ask again for Screen Recording and Accessibility",
+            next.as_deref().unwrap_or("an ad hoc signature"),
+            previous.as_deref().unwrap_or_default()
+        );
+    }
 }
 
 #[async_trait::async_trait]
@@ -1334,6 +1432,7 @@ async fn install_local_binary(
         }
         None => store.install(&key, &contents)?,
     }
+    wrap_development_app(store, &key)?;
     let activated = activate_coordinated(store, &key, false, restart_hand).await?;
     // Preserve the previous selection if validation or the handover fails.
     // The update lock fences background staging until this record is durable.
@@ -1424,6 +1523,7 @@ async fn install_source(
         None,
         None,
     )?;
+    wrap_development_app(store, &key)?;
     let activated = activate_coordinated(store, &key, false, restart_hand).await?;
     // Preserve the previous selection if validation or the handover fails.
     // The update lock fences background staging until this record is durable.
@@ -1684,7 +1784,10 @@ fn find_asset<'a>(release: &'a Release, name: &str) -> Result<&'a ReleaseAsset> 
         })
 }
 
-fn optional_voice_asset<'a>(
+/// An optional asset (voice runtime, macOS app bundle) is used only with its
+/// checksum; advertising either without the other fails closed. Releases that
+/// predate the asset lack both.
+fn optional_release_asset<'a>(
     release: &'a Release,
     manifest: &[u8],
     name: &str,
@@ -1699,7 +1802,7 @@ fn optional_voice_asset<'a>(
         checksum_for(manifest, name)?;
         return find_asset(release, name).map(Some);
     }
-    Ok(None) // Compatibility with releases that predate packaged voice.
+    Ok(None)
 }
 
 fn find_preferred_asset<'a>(
@@ -1976,20 +2079,20 @@ mod tests {
             assets: vec![],
         };
         assert!(
-            optional_voice_asset(&release, b"", &name)
+            optional_release_asset(&release, b"", &name)
                 .unwrap()
                 .is_none()
         );
         let manifest = format!("{}  {name}\n", "a".repeat(64));
-        assert!(optional_voice_asset(&release, manifest.as_bytes(), &name).is_err());
+        assert!(optional_release_asset(&release, manifest.as_bytes(), &name).is_err());
         release.assets.push(ReleaseAsset {
             id: 1,
             name: name.clone(),
             browser_download_url: "https://example.invalid/voice".into(),
         });
-        assert!(optional_voice_asset(&release, b"", &name).is_err());
+        assert!(optional_release_asset(&release, b"", &name).is_err());
         assert!(
-            optional_voice_asset(&release, manifest.as_bytes(), &name)
+            optional_release_asset(&release, manifest.as_bytes(), &name)
                 .unwrap()
                 .is_some()
         );

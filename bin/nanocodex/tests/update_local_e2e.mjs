@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -198,6 +198,25 @@ try {
   const key = localKey();
   const before = active();
   bundleBytes(join(store, 'versions', key), 'update --path CLI (sibling nanocodex-hand)');
+  // The Hand is stored once per Hand identity and serves the active CLI.
+  const storedHand = realpathSync(join(store, 'versions', key, 'nanocodex2'));
+  assert.equal(basename(dirname(dirname(storedHand))), 'hand-versions', 'Hand stored once per identity');
+  assert.match(run(storedHand, ['--local', '--help']).stdout, localHelp,
+    'a Hand stored under hand-versions forwards user commands to the active CLI');
+  const storedApp = join(store, 'versions', key, 'Nanocodex.app');
+  if (process.platform === 'darwin') {
+    // Development pairs run from a signed bundle beside the stored Hand.
+    const app = realpathSync(storedApp);
+    assert.equal(app, join(dirname(storedHand), 'Nanocodex.app'));
+    run('/usr/bin/codesign', ['--verify', '--strict', app]);
+    assert.match(run('/usr/bin/codesign', ['--display', '--verbose=2', app]).stderr,
+      /^Identifier=com\.nanocodex\.hand$/m);
+    run(join(app, 'Contents/MacOS/nanocodex2'), ['__device-hand', '--service-protocol']);
+    trace.push(`PASS signed development bundle ${app}`);
+  } else {
+    assert.ok(!existsSync(storedApp), 'only macOS bundles the Hand');
+  }
+  trace.push(`PASS stored Hand ${storedHand} forwards --local --help to the active CLI`);
   // An explicit --hand-binary elsewhere selects the same pair and key.
   const versionsBeforeExplicit = versions();
   update(['--path', cli, '--hand-binary', explicitHand]);
@@ -284,6 +303,9 @@ try {
   bundleBytes(join(store, 'versions', cliKey), 'CLI-only update carries the current Hand', installedHandPath ?? suppliedHand);
   if (process.platform === 'darwin') {
     assert.match(cliOnlyRun.stderr, /Hand is unchanged/);
+    assert.equal(realpathSync(join(store, 'versions', cliKey, 'Nanocodex.app')),
+      realpathSync(join(store, 'versions', key, 'Nanocodex.app')),
+      'a CLI-only update keeps the one signed Nanocodex.app');
     assert.equal(readFileSync(plist, 'utf8'), plistBefore, 'Hand owner definition unchanged');
   }
   // A full pair switches only the CLI when its Hand matches the installed
