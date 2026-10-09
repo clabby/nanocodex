@@ -3,7 +3,16 @@
 Run from the repository root with the CLI and Hand built from the same checkout:
 
 ```sh
-cargo build --locked --features nanocodex-bin/tempo
+# Plain debug development pair:
+cargo build --locked
+# The full release-identity journey below also needs explicit provenance.
+export VERGEN_GIT_SHA="$(git rev-parse HEAD)"
+export NANOCODEX_HAND_IDENTITY="$(python3 scripts/release/hand-source-identity.py compute \
+  --target "$(rustc -vV | sed -n 's/^host: //p')" --profile dev \
+  --report target/debug/hand-identity-inputs.json)"
+cargo build --locked
+python3 scripts/release/hand-source-identity.py verify \
+  --report target/debug/hand-identity-inputs.json --dep-info target/debug/nanocodex-hand.d
 # --source adds the minimal source-selector journeys on macOS, with a clean env.
 # Linux always checks historical/unsupported-source preflight rejection instead.
 # --old-updater PATH also installs the pair with a previously shipped two-binary

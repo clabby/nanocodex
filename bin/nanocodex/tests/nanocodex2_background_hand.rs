@@ -710,7 +710,7 @@ async fn late_computer_provider_preserves_daemon_and_running_shell() {
             .iter()
             .any(|entry| entry["definition"]["name"] == "mcp__cua_repl__js")
     );
-    let call = |id: &str, name: &str, input: Value| {
+    let call = |id: &str, name: &str, input: Value, expected_success: bool| {
         let (result, received) = oneshot::channel();
         state.calls.send(Call { frame: json!({"type":"call","session_id":AGENT,"call_id":id,
             "model":"gpt-6.1-sol", "name":name,"input":input,
@@ -722,11 +722,14 @@ async fn late_computer_provider_preserves_daemon_and_running_shell() {
                 .unwrap();
             eprintln!("LATE PROVIDER call: {frame}");
             assert_eq!(frame["outcome"]["status"], "completed", "{frame}");
-            assert_eq!(frame["outcome"]["output"]["success"], true, "{frame}");
+            assert_eq!(
+                frame["outcome"]["output"]["success"], expected_success,
+                "{frame}"
+            );
             frame
         }
     };
-    let preparing = call("preparing", "mcp__cua_repl__js", json!({})).await;
+    let preparing = call("preparing", "mcp__cua_repl__js", json!({}), false).await;
     let receipt = |frame: &Value| {
         serde_json::from_str::<Value>(
             frame["outcome"]["output"]["structured_result"]["content"][0]["text"]
@@ -735,8 +738,15 @@ async fn late_computer_provider_preserves_daemon_and_running_shell() {
         )
         .unwrap()
     };
-    assert_eq!(receipt(&preparing)["status"], "preparing");
-    let running = call("start-shell", "exec_command", json!({"cmd":"read answer; printf 'retained:%s' \"$answer\"", "workdir":home, "tty":true,"yield_time_ms":100,"login":false})).await;
+    // A published receipt with a missing executable is a startup error, not
+    // a successful preparation receipt. The same daemon must recover below.
+    assert!(
+        preparing["outcome"]["output"]["output"]
+            .as_str()
+            .unwrap()
+            .contains("Cannot start upstream Sky MCP provider")
+    );
+    let running = call("start-shell", "exec_command", json!({"cmd":"read answer; printf 'retained:%s' \"$answer\"", "workdir":home, "tty":true,"yield_time_ms":100,"login":false}), true).await;
     let session = running["outcome"]["output"]["structured_result"]["session_id"].clone();
     assert!(!session.is_null(), "{running}");
     std::fs::write(&provider, r#"#!/usr/bin/env python3
@@ -753,7 +763,7 @@ for line in sys.stdin:
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':out}),flush=True)
 "#).unwrap();
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let ready = call("ready", "mcp__cua_repl__js", json!({})).await;
+    let ready = call("ready", "mcp__cua_repl__js", json!({}), true).await;
     assert!(
         ready
             .to_string()
@@ -773,6 +783,7 @@ for line in sys.stdin:
         "action",
         "mcp__cua_repl__js",
         json!({"code":"single-action"}),
+        true,
     )
     .await;
     assert!(action.to_string().contains("single-action"), "{action}");
@@ -780,6 +791,7 @@ for line in sys.stdin:
         "finish-shell",
         "write_stdin",
         json!({"session_id":session,"chars":"ok\n","yield_time_ms":1000}),
+        true,
     )
     .await;
     assert!(done.to_string().contains("retained:ok"), "{done}");
