@@ -582,6 +582,10 @@ struct DriverRuntime {
     feature_completions: HashMap<TurnId, Vec<tokio::sync::oneshot::Sender<bool>>>,
     feature_turns: HashSet<TurnId>,
     local_voice_status: Option<crate::nanocodex2::voice_state::Status>,
+    // FEATURE-HOOK: wp1 a harness relaunch is in flight; prompts wait for it.
+    feature_relaunching: bool,
+    // A relaunch requested while another connection was in flight.
+    feature_relaunch_queued: bool,
     agent: Option<Nanocodex>,
     startup_attach: bool,
     pending_resume: Option<(tokio::task::AbortHandle, PaneId)>,
@@ -1602,7 +1606,7 @@ impl DriverRuntime {
     }
 
     fn start_submission(&mut self, pane: PaneId, id: TurnId, prompt: Submission) {
-        if self.recovery.is_some() {
+        if self.recovery.is_some() || self.feature_relaunching {
             self.pending_submission = Some((pane, id, prompt));
             return;
         }
@@ -3492,6 +3496,12 @@ async fn run_inner(
                                     root.set_capabilities(local.capabilities());
                                 }
                             }
+                            // FEATURE-HOOK: wp1 queued harness relaunch.
+                            if std::mem::take(&mut runtime.feature_relaunch_queued) {
+                                runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Default);
+                            } else {
+                                runtime.feature_relaunching = false;
+                            }
                             if matches!(purpose, ConnectionPurpose::Bug(_)) {
                                 runtime.detach_bug_source();
                             }
@@ -3667,6 +3677,12 @@ async fn run_inner(
                             runtime.start_history_prefetch(pane);
                         }
                         ConnectionResult::Agent { purpose, result: Err(failure) } => {
+                            // FEATURE-HOOK: wp1 a failed relaunch releases held prompts.
+                            if std::mem::take(&mut runtime.feature_relaunch_queued) {
+                                runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Default);
+                            } else {
+                                runtime.feature_relaunching = false;
+                            }
                             runtime.pending_voice = None;
                             request_render(app.update(AppEvent::VoiceStatus(runtime.voice_status())), &mut scheduler);
                             let message = format!("Could not connect to the managed agent: {}", failure.error);
@@ -4501,7 +4517,15 @@ async fn apply_feature_update(
                 return Ok(false);
             };
             local.launch = *launch;
-            runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Default);
+            // Prompts typed now belong to the selected harness: hold them until
+            // its agent is adopted. A relaunch during another connection waits
+            // for that connection so the newest launch is the one adopted.
+            runtime.feature_relaunching = true;
+            if runtime.connection.is_empty() {
+                runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Default);
+            } else {
+                runtime.feature_relaunch_queued = true;
+            }
             scheduler.request_immediate(Instant::now());
             return Ok(false);
         }
@@ -6599,6 +6623,8 @@ mod tests {
             feature_completions: HashMap::new(),
             feature_turns: HashSet::new(),
             local_voice_status: None,
+            feature_relaunching: false,
+            feature_relaunch_queued: false,
             agent: None,
             startup_attach: false,
             pending_resume: None,
