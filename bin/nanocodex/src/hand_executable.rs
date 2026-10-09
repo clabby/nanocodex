@@ -131,6 +131,16 @@ pub(crate) fn cli_binary() -> io::Result<PathBuf> {
         {
             candidates.push(version.join(file_name("nanocodex")));
         }
+        // A Hand stored once per identity (hand-versions/<identity>/nanocodex2
+        // or .../Nanocodex.app/Contents/MacOS/nanocodex2) serves the
+        // installation's active CLI.
+        if let Some(root) = running
+            .ancestors()
+            .find(|directory| directory.file_name().is_some_and(|name| name == "hand-versions"))
+            .and_then(Path::parent)
+        {
+            candidates.push(root.join("current").join(file_name("nanocodex")));
+        }
     }
     candidates
         .into_iter()
