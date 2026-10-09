@@ -4273,6 +4273,11 @@ async fn apply_feature_update(
             })
         }
         FeatureUpdate::OpenOverlay(overlay) => {
+            if overlay.discards_draft()
+                && let Some(root) = app.root_mut(PaneId::Main)
+            {
+                root.discard_draft();
+            }
             runtime.feature_overlay = Some(overlay);
             if let Some(local) = &mut runtime.local {
                 local.features.overlay_state(true);

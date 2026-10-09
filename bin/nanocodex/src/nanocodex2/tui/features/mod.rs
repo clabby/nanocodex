@@ -92,6 +92,10 @@ pub(crate) trait FeatureOverlay: Send {
     fn key(&mut self, key: KeyEvent) -> OverlayOutcome;
     /// Bracketed paste while open; ignored by default.
     fn paste(&mut self, _text: &str) {}
+    /// Whether opening this overlay discards the main composer draft.
+    fn discards_draft(&self) -> bool {
+        false
+    }
 }
 
 /// A side agent a feature asks the driver to show in its own pane.

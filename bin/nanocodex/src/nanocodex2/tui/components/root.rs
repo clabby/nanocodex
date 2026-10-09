@@ -981,6 +981,12 @@ impl RootNode {
         self.composer.component()
     }
 
+    /// FEATURE-HOOK: wp1 a modal Claude request discards the stale composer draft
+    /// so input typed for the previous UI state can never answer it (legacy parity).
+    pub(crate) fn discard_draft(&mut self) {
+        drop(self.composer.component_mut().take_draft());
+    }
+
     pub(crate) fn render_focused(
         &mut self,
         frame: &mut Frame<'_>,

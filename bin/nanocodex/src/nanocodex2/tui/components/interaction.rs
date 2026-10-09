@@ -359,6 +359,10 @@ impl FeatureOverlay for InteractionOverlay {
         OverlayOutcome::Consumed
     }
 
+    fn discards_draft(&self) -> bool {
+        true
+    }
+
     fn paste(&mut self, text: &str) {
         for character in text.chars().filter(|character| !character.is_control()) {
             if self.input.len() >= 8192 {
