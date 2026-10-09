@@ -800,7 +800,9 @@ impl RootNode {
         let max_subagents = self.subagents.max_subagents();
         let next_session_list = self.next_session_list;
         let model_catalog = std::mem::take(&mut self.model_catalog);
+        let capabilities = self.capabilities;
         *self = Self::new(workspace, thinking);
+        self.set_capabilities(capabilities);
         self.model_catalog = model_catalog;
         self.next_session_list = next_session_list;
         self.set_reasoning_modes(reasoning_mode, preferred_reasoning_mode);

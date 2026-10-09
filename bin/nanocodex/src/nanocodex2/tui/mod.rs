@@ -4501,6 +4501,33 @@ async fn apply_update(
                 }
             }
             AppEffect::Pane { pane, effect } => {
+                if runtime.local.is_some()
+                    && matches!(
+                        &effect,
+                        RootEffect::AutoRoute
+                            | RootEffect::Connectors(_)
+                            | RootEffect::Reload
+                            | RootEffect::SetDone(_)
+                            | RootEffect::Bug(_)
+                            | RootEffect::Vault(_)
+                            | RootEffect::SecureInput(_)
+                            | RootEffect::Share(_)
+                            | RootEffect::Sites(_)
+                            | RootEffect::ApproveVault(_)
+                            | RootEffect::Handoff
+                    )
+                {
+                    absorb(
+                        app.update(AppEvent::NotifyError {
+                            pane,
+                            error: backend::Capabilities::LOCAL.unavailable("This command"),
+                        }),
+                        &mut effects,
+                        scheduler,
+                    );
+                    continue;
+                }
+
                 if let RootEffect::CopyResponse(text) = effect {
                     let event = match clipboard::copy_text(&text) {
                         Ok(()) => AppEvent::NotifySuccess {
