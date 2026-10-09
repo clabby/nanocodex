@@ -48,6 +48,9 @@ class H(BaseHTTPRequestHandler):
             if item.get("role") == "user":
                 last = " ".join(p.get("text", "") for p in item.get("content", []) if isinstance(p, dict)); break
         word = next((w for w in last.replace("\n", " ").split(" ") if w.isupper() and "_" in w), "UNKNOWN")
+        if "SLOW_PROMPT" in last:
+            # Keeps the main turn running long enough to collapse a /btw into it.
+            time.sleep(8)
         payload = sse("ANSWER_" + word)
         self.send_response(200); self.send_header("content-type", "text/event-stream")
         self.send_header("content-length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
@@ -202,6 +205,23 @@ finally:
         wait(lambda s: "ANSWER_AFTER_CLOSE_PROMPT" in s, "main prompt after /close", 40)
         after = [b for b in requests[before:]]
         checks.append({"check": "/close closes the side pane; main keeps working", "ok": len(after) == 1 and "CLOSE_QUESTION" not in json.dumps(after[0].get("input", [])[-1:])})
+        # Legacy parity: /collapse while main is running steers the side exchange into that turn.
+        typ("SLOW_PROMPT"); keys("Enter")
+        end = time.monotonic() + 20
+        while time.monotonic() < end and not any("SLOW_PROMPT" in json.dumps(r.get("input", [])[-1:]) for r in requests):
+            time.sleep(0.2)
+        typ("/btw BUSY_SIDE"); keys("Enter")
+        wait(lambda s: "ANSWER_BUSY_SIDE" in s, "btw answer while main runs", 40)
+        before = len(requests)
+        typ("/collapse"); keys("Enter"); time.sleep(0.5); s = screen()
+        end = time.monotonic() + 40
+        steered = []
+        while time.monotonic() < end and not steered:
+            steered = [r for r in requests[before:] if "BUSY_SIDE" in json.dumps(r.get("input", [])) and "<btw_conversation>" in json.dumps(r.get("input", []))]
+            time.sleep(0.5)
+        s = wait(lambda s: "ANSWER_SLOW_PROMPT" in s, "slow main turn finishes", 40)
+        checks.append({"check": "/collapse while main runs steers the side exchange into that turn",
+                       "ok": bool(steered) and "SLOW_PROMPT" in json.dumps(steered[0].get("input", [])) and "not collapsed" not in s})
     except Exception as error:
         checks.append({"check": "btw/split/close", "ok": False, "error": str(error)})
     screen()
