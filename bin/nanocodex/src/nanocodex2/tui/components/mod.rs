@@ -40,7 +40,7 @@ pub(crate) use transcript::math;
     unused_imports,
     reason = "used by the local driver's --tool-calls flag"
 )]
-pub(crate) use transcript::{ToolCallsMode, set_initial_tool_calls};
+pub(crate) use transcript::set_initial_tool_calls;
 
 mod voice;
 

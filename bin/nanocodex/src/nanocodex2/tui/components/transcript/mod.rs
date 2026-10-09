@@ -1427,24 +1427,16 @@ fn tool_calls_from_env() -> (Option<bool>, bool) {
     }
 }
 
-/// Startup tool display chosen by a driver flag (ncl --tool-calls).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code, reason = "selected by the local driver's --tool-calls flag")]
-pub(crate) enum ToolCallsMode {
-    Expanded,
-    Folded,
-    Hidden,
-}
-
 static INITIAL_TOOL_CALLS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// Overrides NANOCODEX_TOOL_CALLS for transcripts created afterwards.
+/// Startup tool display from a driver flag (ncl --tool-calls). Overrides
+/// NANOCODEX_TOOL_CALLS for transcripts created afterwards.
 #[allow(dead_code, reason = "called by the local driver's --tool-calls flag")]
-pub(crate) fn set_initial_tool_calls(mode: ToolCallsMode) {
+pub(crate) fn set_initial_tool_calls(mode: crate::tool_calls::ToolCalls) {
     let value = match mode {
-        ToolCallsMode::Expanded => 1,
-        ToolCallsMode::Folded => 2,
-        ToolCallsMode::Hidden => 3,
+        crate::tool_calls::ToolCalls::Expanded => 1,
+        crate::tool_calls::ToolCalls::Folded => 2,
+        crate::tool_calls::ToolCalls::Hidden => 3,
     };
     INITIAL_TOOL_CALLS.store(value, std::sync::atomic::Ordering::Release);
 }
