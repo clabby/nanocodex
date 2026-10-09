@@ -242,6 +242,19 @@ pub trait CodeModeHost: Send + Sync + 'static {
     /// Starts a logical turn without cancelling cells retained by earlier turns.
     fn begin_turn(&self, _session_id: &str) {}
 
+    /// Relays nested updates of cells a completed turn left running without an
+    /// observer. For each such cell the host calls `observer(origin_call_id)` and
+    /// reports that cell's nested starts and completions to the returned observer
+    /// until the cell settles or a later wait takes over, delivering each update
+    /// once. Must not block; hosts without a relay keep the default, and their
+    /// cells report nested updates to the next wait.
+    fn detach_turn(
+        &self,
+        _session_id: &str,
+        _observer: &mut (dyn FnMut(&str) -> Box<dyn CodeModeObserver> + Send),
+    ) {
+    }
+
     /// Non-destructive early foreground yield. Custom hosts may conservatively
     /// retain timed observations by leaving this default implementation unchanged.
     fn preempt_turn<'a>(
