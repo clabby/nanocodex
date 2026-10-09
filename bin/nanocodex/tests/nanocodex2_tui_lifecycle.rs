@@ -822,6 +822,9 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
 
     let mut terminal = Terminal::start_with_command(&managed_origin, false, None, |command| {
         command.env_remove("NANOCODEX_API_KEY");
+        // Content-free startup stage timings go to the PTY transcript, so a
+        // stall before admission shows which stage never finished.
+        command.env("NANOCODEX_STARTUP_TIMING", "1");
         command.args([
             "--local",
             "--prompt",
@@ -870,13 +873,30 @@ async fn terminal_local_prompt_replies_once_and_rejects_account_commands_without
             serde_json::to_vec_pretty(&*observed.lock().unwrap()).unwrap(),
         )
         .unwrap();
-        // The CLI's own TUI logs live under the temporary HOME, which is
-        // removed with the terminal; keep them beside the screen evidence.
-        if let Ok(entries) = std::fs::read_dir(workspace.join(".local/state/nanocodex/logs")) {
-            let logs = artifact.join("logs");
-            std::fs::create_dir_all(&logs).unwrap();
+        // The CLI's own TUI logs and rollouts live under the temporary HOME,
+        // which is removed with the terminal; keep them beside the evidence.
+        let logs = artifact.join("logs");
+        let mut directories = vec![workspace.clone()];
+        while let Some(directory) = directories.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
             for entry in entries.flatten() {
-                let _ = std::fs::copy(entry.path(), logs.join(entry.file_name()));
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    directories.push(path);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "log" || extension == "jsonl")
+                {
+                    let name = path
+                        .strip_prefix(&workspace)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('/', "__");
+                    std::fs::create_dir_all(&logs).unwrap();
+                    let _ = std::fs::copy(&path, logs.join(name));
+                }
             }
         }
         std::fs::write(
