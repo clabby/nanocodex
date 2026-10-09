@@ -273,6 +273,10 @@ name = "claude_scheduler_monitor"
 path = "tests/claude_scheduler_monitor.rs"
 
 [[test]]
+name = "ncl_local_features"
+path = "tests/ncl_local_features.rs"
+
+[[test]]
 name = "claude_cross_workspace"
 path = "tests/claude_cross_workspace.rs"
 
