@@ -1268,3 +1268,4 @@ export function freezeJson(value) {
   }
   return value;
 }
+export { engineMemoryBytes } from "./browser/engine.mjs";
