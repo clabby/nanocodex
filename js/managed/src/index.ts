@@ -1,4 +1,5 @@
 import { adminRecoverySnapshot } from "./admin-recovery-snapshot";
+import { errorDiagnostics } from "./safe-error";
 import { resolveCompanyTeam } from "./company-teams";
 import { routeHandSharing, handShareAPIPath, handShareDocumentPath, handShareDocument } from "./hand-sharing-http";
 import { idempotentAgentId } from "nanocodex/cloudflare/managed-live";
@@ -455,6 +456,10 @@ const CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS = 60_000;
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
 const MAX_CLEANUP_RETRY_MS = 60_000;
+// Cleanup that keeps failing after the fast phase is not transient. Keep the
+// durable ownership, but retry hourly instead of hot-looping every minute.
+const FAST_CLEANUP_RETRY_ATTEMPTS = 6;
+const MAX_PERSISTENT_CLEANUP_RETRY_MS = 60 * 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
 const SESSION_CREATE_ID_ASSERTION = "x-nanocodex-create-session-id";
 // Interactive native clients opt in without changing strict live URL queries.
@@ -6070,7 +6075,7 @@ export class DurableAgentSession extends DurableComputerObject {
         await this.#beginDeletion();
         await this.#deleteOwnedSession();
       } catch (error) {
-        console.warn({ type: "managed.session_cleanup_pending", error_kind: errorKind(error) });
+        console.warn({ type: "managed.session_cleanup_pending", ...errorDiagnostics(error) });
         let retryAfter = 1;
         try {
           retryAfter = Math.ceil(await this.#scheduleCleanupRetry() / 1_000);
@@ -6206,7 +6211,7 @@ export class DurableAgentSession extends DurableComputerObject {
       try {
         await this.#deleteOwnedSession();
       } catch (error) {
-        console.warn({ type: "managed.session_alarm_cleanup_pending", error_kind: errorKind(error) });
+        console.warn({ type: "managed.session_alarm_cleanup_pending", ...errorDiagnostics(error) });
         await this.#scheduleCleanupRetry();
       }
       return;
@@ -6221,7 +6226,7 @@ export class DurableAgentSession extends DurableComputerObject {
       try {
         await this.#deleteOwnedSession();
       } catch (error) {
-        console.error({ type: "managed.abandoned_create_cleanup_pending", error_kind: errorKind(error) });
+        console.error({ type: "managed.abandoned_create_cleanup_pending", ...errorDiagnostics(error) });
         await this.#scheduleCleanupRetry();
       }
       return;
@@ -9688,7 +9693,7 @@ export class DurableAgentSession extends DurableComputerObject {
   #scheduleDeletion(): void {
     const task = this.#deleteOwnedSession();
     this.ctx.waitUntil(task.catch(async (error) => {
-      console.warn({ type: "managed.session_deletion_recovery_failed", error_kind: errorKind(error) });
+      console.warn({ type: "managed.session_deletion_recovery_failed", ...errorDiagnostics(error) });
       try { await this.#scheduleCleanupRetry(); } catch { /* Marker retains ownership. */ }
     }));
   }
@@ -9952,7 +9957,9 @@ export class DurableAgentSession extends DurableComputerObject {
   async #scheduleCleanupRetry(): Promise<number> {
     const previous = await this.ctx.storage.get<number>(CLEANUP_RETRY_ATTEMPT_KEY) ?? 0;
     const attempt = Math.min(30, previous + 1);
-    const cap = Math.min(MAX_CLEANUP_RETRY_MS, 1_000 * (2 ** attempt));
+    const cap = attempt <= FAST_CLEANUP_RETRY_ATTEMPTS
+      ? Math.min(MAX_CLEANUP_RETRY_MS, 1_000 * (2 ** attempt))
+      : Math.min(MAX_PERSISTENT_CLEANUP_RETRY_MS, MAX_CLEANUP_RETRY_MS * (2 ** (attempt - FAST_CLEANUP_RETRY_ATTEMPTS)));
     const random = crypto.getRandomValues(new Uint32Array(1))[0]! / 0x1_0000_0000;
     const delay = Math.ceil(cap / 2 + random * cap / 2);
     await this.ctx.storage.transaction(async (transaction) => {
