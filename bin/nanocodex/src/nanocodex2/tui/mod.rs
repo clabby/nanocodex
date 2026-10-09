@@ -1700,7 +1700,8 @@ impl DriverRuntime {
     }
 
     fn refresh_routing(&mut self) {
-        if self.agent_id.is_empty()
+        if self.local.is_some()
+            || self.agent_id.is_empty()
             || !self.routing_updates.is_empty()
             || !self.settings_updates.is_empty()
         {
@@ -1741,6 +1742,15 @@ impl DriverRuntime {
         let Some((pane, agent_id, mutation)) = self.settings_queue.pop_front() else {
             return;
         };
+        if self.local.is_some() {
+            let agent = self.agent.clone();
+            let current = self.settings;
+            self.settings_updates.spawn(async move {
+                let result = local::apply_settings(agent, current, mutation).await;
+                (pane, agent_id, mutation, result)
+            });
+            return;
+        }
         let client = self.client.clone();
         let was_routed = self.routing_enabled;
         let model = self.settings.model;
@@ -2224,7 +2234,12 @@ async fn run_inner(
     // Paint the hosted defaults immediately. New creation uses this same policy;
     // attach hydrates retained settings in connect_agent, where failures already
     // have retry semantics. Optional catalog discovery never gates startup.
-    let initial_settings = AgentSettings::default();
+    let initial_settings = local_launch
+        .as_ref()
+        .map(local::settings_from_launch)
+        .transpose()
+        .map_err(ManagedError::Configuration)?
+        .unwrap_or_default();
     let initial_effort = effort_from_thinking(initial_settings.thinking);
     let initial_reasoning_mode = reasoning_mode_from_managed(initial_settings.reasoning_mode);
     let mut root = RootNode::new(&workspace, initial_effort);
@@ -2236,6 +2251,9 @@ async fn run_inner(
     root.set_reasoning_modes(initial_reasoning_mode, initial_reasoning_mode);
     root.set_fast_mode(initial_settings.fast_mode);
     root.set_model(initial_settings.model);
+    if let Some(launch) = &local_launch {
+        root.set_model_catalog(local::model_catalog(launch));
+    }
 
     let mut app = AppNode::new(Theme::default(), workspace.clone(), root);
     let mut reload: Option<crate::nanocodex2::reload::Registration> = None;
@@ -2377,7 +2395,9 @@ async fn run_inner(
     // but wait off the input loop so it becomes available after contention clears.
     // Dropping the JoinSet also drops any uncollected registration and its lease.
     let mut reload_setup = JoinSet::new();
-    reload_setup.spawn_blocking(crate::nanocodex2::reload::register);
+    if !is_local {
+        reload_setup.spawn_blocking(crate::nanocodex2::reload::register);
+    }
     // Theme and tmux discovery must not delay the first editable frame. These
     // tasks never read stdin; the terminal event stream remains its sole owner.
     let mut presentation_setup = JoinSet::new();
@@ -2444,7 +2464,14 @@ async fn run_inner(
     #[cfg(unix)]
     let mut control_server = if nanocodex_tui_control::Server::enabled() {
         // FEATURE-HOOK: wp2 the local TUI registers as kind "native".
-        Some(nanocodex_tui_control::Server::start(if runtime.local.is_some() { "native" } else { "managed" }).map_err(terminal_error)?)
+        Some(
+            nanocodex_tui_control::Server::start(if runtime.local.is_some() {
+                "native"
+            } else {
+                "managed"
+            })
+            .map_err(terminal_error)?,
+        )
     } else {
         None
     };
@@ -3717,6 +3744,11 @@ async fn run_inner(
                         match outcome {
                             Ok(settings) => {
                                 runtime.settings = settings;
+                                if let Some(local) = &mut runtime.local {
+                                    if let Ok(model) = settings.model.as_str().parse() {
+                                        local.launch.args.select_tui_model(model, settings.thinking, settings.fast_mode);
+                                    }
+                                }
                                 if matches!(mutation, SettingsMutation::Complete(_)) && let Some(root) = app.root_mut(pane) {
                                     let mode = reasoning_mode_from_managed(settings.reasoning_mode);
                                     root.set_reasoning_modes(mode, mode);
@@ -3745,7 +3777,7 @@ async fn run_inner(
                             Err(error) => {
                                 // Switching from routing to native settings can require two
                                 // requests. Re-read retained settings if only the first applied.
-                                if let Ok(state) = runtime.client.state(&agent_id).await {
+                                if runtime.local.is_none() && let Ok(state) = runtime.client.state(&agent_id).await {
                                     runtime.settings = state.settings;
                                     if let Some(root) = app.root_mut(pane) {
                                         let mode = reasoning_mode_from_managed(state.settings.reasoning_mode);
@@ -4336,7 +4368,13 @@ async fn apply_feature_update(
             match runtime.local_switch(ConnectionPurpose::Resume(PaneId::Main), *launch) {
                 Ok(task) => runtime.pending_resume = Some((task, PaneId::Main)),
                 Err(error) => {
-                    request_render(app.update(AppEvent::NotifyError { pane: PaneId::Main, error }), scheduler);
+                    request_render(
+                        app.update(AppEvent::NotifyError {
+                            pane: PaneId::Main,
+                            error,
+                        }),
+                        scheduler,
+                    );
                 }
             }
             scheduler.request_immediate(Instant::now());
@@ -5647,7 +5685,11 @@ async fn apply_update(
                         runtime.queue_settings(pane, SettingsMutation::Thinking(thinking));
                     }
                     RootEffect::SetFastMode(enabled) => {
-                        if enabled && !runtime.settings.model.supports_fast_mode() {
+                        let supports_fast = if runtime.local.is_some() {
+                            runtime.settings.model.as_str().parse::<nanocodex::HarnessModel>()
+                                .is_ok_and(nanocodex::HarnessModel::supports_fast_mode)
+                        } else { runtime.settings.model.supports_fast_mode() };
+                        if enabled && !supports_fast {
                             absorb(app.update(AppEvent::NotifyError { pane, error: "Fast mode is unavailable for this model".into() }), &mut effects, scheduler);
                             continue;
                         }

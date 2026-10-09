@@ -2224,6 +2224,18 @@ impl RootNode {
         self.refresh_actions();
     }
 
+    fn supports_fast_mode(&self) -> bool {
+        let model = self.composer.component().model();
+        if self.capabilities.local {
+            model
+                .as_str()
+                .parse::<nanocodex::HarnessModel>()
+                .is_ok_and(nanocodex::HarnessModel::supports_fast_mode)
+        } else {
+            model.supports_fast_mode()
+        }
+    }
+
     fn action_availability(&self) -> ActionAvailability {
         ActionAvailability {
             capabilities: self.capabilities,
@@ -2233,9 +2245,10 @@ impl RootNode {
                 && self.queue.component().is_empty(),
             fork: self.can_fork(),
             fast_mode: self.composer.component().fast_mode(),
-            fast_mode_available: self.composer.component().model().supports_fast_mode(),
-            effort: self.thread == ThreadState::New
-                || self.composer.component().model().supports_fast_mode(),
+            fast_mode_available: self.supports_fast_mode(),
+            effort: self.capabilities.local
+                || self.thread == ThreadState::New
+                || self.supports_fast_mode(),
             voice_input: self.composer.component().model().oai().is_some(),
             model: self.thread == ThreadState::New,
             auto_route: self.thread == ThreadState::New
@@ -2480,8 +2493,7 @@ impl RootNode {
     }
 
     fn open_effort(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.thread != ThreadState::New
-            && !self.composer.component().model().supports_fast_mode()
+        if !self.capabilities.local && self.thread != ThreadState::New && !self.supports_fast_mode()
         {
             self.notification = Some(Notification::plain(
                 "This model’s effort is fixed after the first prompt; start a new session".into(),
@@ -2957,8 +2969,7 @@ impl RootNode {
     }
 
     fn apply_effort(&mut self, effort: ReasoningEffort, pro: bool) -> ComponentUpdate<RootEffect> {
-        if self.thread != ThreadState::New
-            && !self.composer.component().model().supports_fast_mode()
+        if !self.capabilities.local && self.thread != ThreadState::New && !self.supports_fast_mode()
         {
             self.notification = Some(Notification::plain(
                 "This model’s effort is fixed after the first prompt; start a new session".into(),
@@ -2988,7 +2999,15 @@ impl RootNode {
         } else {
             nanocodex::ReasoningMode::Standard
         };
-        if !model.supports_thinking(thinking) || !model.supports_reasoning_mode(mode) {
+        let supports_thinking = if self.capabilities.local {
+            model
+                .as_str()
+                .parse::<nanocodex::HarnessModel>()
+                .is_ok_and(|native| native.supports_thinking(thinking))
+        } else {
+            model.supports_thinking(thinking)
+        };
+        if !supports_thinking || !model.supports_reasoning_mode(mode) {
             self.notification = Some(Notification::plain(
                 "This model does not support the requested effort or Pro mode".into(),
                 Color::Red,
@@ -3441,7 +3460,7 @@ impl RootNode {
             },
             SettingsCommand::Fast(enabled) => {
                 let enabled = enabled.unwrap_or(!self.composer.component().fast_mode());
-                if enabled && !self.composer.component().model().supports_fast_mode() {
+                if enabled && !self.supports_fast_mode() {
                     self.notification = Some(Notification::plain(
                         "Fast mode is unavailable for this model".into(),
                         Color::Red,

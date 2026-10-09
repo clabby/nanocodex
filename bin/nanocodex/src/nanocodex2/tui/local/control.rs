@@ -111,7 +111,9 @@ pub(in crate::nanocodex2::tui) fn dispatch(
     let local_turn = runtime
         .local_managed_turns
         .iter()
-        .find(|(local, managed)| **managed == turn_id && !runtime.local_terminal_turns.contains(*local))
+        .find(|(local, managed)| {
+            **managed == turn_id && !runtime.local_terminal_turns.contains(*local)
+        })
         .map(|(local, _)| *local);
     match method.as_str() {
         "prompt" => {
@@ -157,13 +159,21 @@ pub(in crate::nanocodex2::tui) fn dispatch(
             let session = runtime.agent_id.clone();
             tasks.spawn(async move {
                 let result = if command.request.method == "steer" {
-                    let input = command.request.params["input"]["text"].as_str().unwrap_or("").to_owned();
+                    let input = command.request.params["input"]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_owned();
                     if input.trim().is_empty() {
                         rejected("empty_input")
                     } else {
-                        match control.steer_with_id(command.request.id.clone(), input).await {
+                        match control
+                            .steer_with_id(command.request.id.clone(), input)
+                            .await
+                        {
                             Ok(()) => accepted(json!({"turn_id": turn_id})),
-                            Err(nanocodex::NanocodexError::TurnNotSteerable) => rejected("turn_not_active"),
+                            Err(nanocodex::NanocodexError::TurnNotSteerable) => {
+                                rejected("turn_not_active")
+                            }
                             Err(error) => unknown(error),
                         }
                     }
@@ -191,16 +201,24 @@ pub(in crate::nanocodex2::tui) fn dispatch(
                     Err("set exactly one setting".to_owned())
                 } else if let Some(effort) = settings["effort"].as_str() {
                     match effort.parse::<Thinking>() {
-                        Ok(thinking) => agent.set_thinking(thinking).await.map(|()| current.thinking = thinking).map_err(|error| error.to_string()),
+                        Ok(thinking) => agent
+                            .set_thinking(thinking)
+                            .await
+                            .map(|()| current.thinking = thinking)
+                            .map_err(|error| error.to_string()),
                         Err(error) => Err(error),
                     }
                 } else if let Some(model) = settings["model"].as_str() {
                     match model.parse::<HarnessModel>() {
-                        Ok(model) => agent.set_harness_model(model).await.map(|()| {
-                            if let HarnessModel::Codex(model) = model {
-                                current.model = nanocodex_managed::ManagedModel::Oai(model);
-                            }
-                        }).map_err(|error| error.to_string()),
+                        Ok(model) => agent
+                            .set_harness_model(model)
+                            .await
+                            .map(|()| {
+                                if let HarnessModel::Codex(model) = model {
+                                    current.model = nanocodex_managed::ManagedModel::Oai(model);
+                                }
+                            })
+                            .map_err(|error| error.to_string()),
                         Err(error) => Err(error.to_string()),
                     }
                 } else {
@@ -209,9 +227,19 @@ pub(in crate::nanocodex2::tui) fn dispatch(
                 match outcome {
                     Ok(()) => {
                         bridge.settings_committed(settings.clone());
-                        (command, accepted(json!({"settings": settings})), Some(current), session)
+                        (
+                            command,
+                            accepted(json!({"settings": settings})),
+                            Some(current),
+                            session,
+                        )
                     }
-                    Err(message) => (command, json!({"status":"rejected","code":"invalid_settings","message":message}), None, session),
+                    Err(message) => (
+                        command,
+                        json!({"status":"rejected","code":"invalid_settings","message":message}),
+                        None,
+                        session,
+                    ),
                 }
             });
             None

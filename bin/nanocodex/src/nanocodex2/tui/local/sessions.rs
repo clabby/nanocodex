@@ -274,7 +274,13 @@ pub(crate) struct Built {
 /// Builds the local agent for `launch`, reopening its saved session if any.
 pub(crate) async fn build(launch: &LocalLaunch) -> Result<Built> {
     match &launch.resume {
-        Some(Resume::Codex(thread_id) | Resume::Branch { thread: Some(thread_id), .. }) => {
+        Some(
+            Resume::Codex(thread_id)
+            | Resume::Branch {
+                thread: Some(thread_id),
+                ..
+            },
+        ) => {
             let home = crate::config::default_codex_home()?;
             let session = RolloutConfig::new(&home)
                 .load_session(thread_id)

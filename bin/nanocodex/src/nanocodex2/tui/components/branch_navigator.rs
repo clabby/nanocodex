@@ -52,14 +52,25 @@ impl BranchNavigator {
         prompts: Vec<String>,
     ) -> Self {
         let (branch, focus) = {
-            let state = registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let branch = state
                 .current
                 .as_ref()
-                .and_then(|current| state.branches.iter().position(|branch| &branch.thread == current))
+                .and_then(|current| {
+                    state
+                        .branches
+                        .iter()
+                        .position(|branch| &branch.thread == current)
+                })
                 .unwrap_or(0);
             // A single-branch conversation starts on its prompts.
-            let focus = if state.branches.len() > 1 { Focus::Branches } else { Focus::Prompts };
+            let focus = if state.branches.len() > 1 {
+                Focus::Branches
+            } else {
+                Focus::Prompts
+            };
             (branch, focus)
         };
         let prompt = prompts.len().saturating_sub(1);
@@ -78,7 +89,10 @@ impl BranchNavigator {
     }
 
     fn branch_rows(&self) -> Vec<(String, String, bool)> {
-        let state = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state
             .branches
             .iter()
@@ -88,14 +102,21 @@ impl BranchNavigator {
                     .parent
                     .as_deref()
                     .map_or_else(String::new, |parent| format!(" from {}", short(parent)));
-                (branch.label.clone(), format!("{}{parent}", short(&branch.thread)), current)
+                (
+                    branch.label.clone(),
+                    format!("{}{parent}", short(&branch.thread)),
+                    current,
+                )
             })
             .collect()
     }
 
     fn switch_selected(&mut self) -> OverlayOutcome {
         let target = {
-            let state = self.registry.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(branch) = state.branches.get(self.branch) else {
                 return OverlayOutcome::Consumed;
             };
@@ -145,7 +166,10 @@ fn short(thread: &str) -> String {
 fn single_line(text: &str, width: usize) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if line.chars().count() > width {
-        let mut cut = line.chars().take(width.saturating_sub(3)).collect::<String>();
+        let mut cut = line
+            .chars()
+            .take(width.saturating_sub(3))
+            .collect::<String>();
         cut.push_str("...");
         cut
     } else {
@@ -175,25 +199,36 @@ impl FeatureOverlay for BranchNavigator {
             .colors(theme.accent(), theme.accent())
             .render(frame, area, theme);
         let rows = self.branch_rows();
-        let branch_height = u16::try_from(rows.len().saturating_add(1)).unwrap_or(u16::MAX).min(layout.body.height / 2);
+        let branch_height = u16::try_from(rows.len().saturating_add(1))
+            .unwrap_or(u16::MAX)
+            .min(layout.body.height / 2);
         let [branch_area, prompt_area, error_area] = Layout::vertical([
             Constraint::Length(branch_height),
             Constraint::Min(1),
             Constraint::Length(u16::from(self.error.is_some())),
         ])
         .areas(layout.body);
-        let focused = Style::default().fg(theme.accent()).add_modifier(Modifier::BOLD);
+        let focused = Style::default()
+            .fg(theme.accent())
+            .add_modifier(Modifier::BOLD);
         let muted = Style::default().fg(theme.muted());
         let mut lines = vec![Line::styled(
             "Branches",
-            if matches!(self.focus, Focus::Branches) { focused } else { muted },
+            if matches!(self.focus, Focus::Branches) {
+                focused
+            } else {
+                muted
+            },
         )];
         for (index, (label, detail, current)) in rows.iter().enumerate() {
             let selected = matches!(self.focus, Focus::Branches) && index == self.branch;
             let mark = if selected { "\u{203a} " } else { "  " };
             let now = if *current { " (current)" } else { "" };
             lines.push(Line::from(vec![
-                Span::styled(format!("{mark}{label}{now}"), if selected { focused } else { Style::default() }),
+                Span::styled(
+                    format!("{mark}{label}{now}"),
+                    if selected { focused } else { Style::default() },
+                ),
                 Span::styled(format!("  {detail}"), muted),
             ]));
         }
@@ -201,7 +236,11 @@ impl FeatureOverlay for BranchNavigator {
         let text_width = usize::from(prompt_area.width.saturating_sub(6));
         let mut lines = vec![Line::styled(
             "Prompts on this branch",
-            if matches!(self.focus, Focus::Branches) { muted } else { focused },
+            if matches!(self.focus, Focus::Branches) {
+                muted
+            } else {
+                focused
+            },
         )];
         if self.prompts.is_empty() {
             lines.push(Line::styled(
@@ -235,7 +274,10 @@ impl FeatureOverlay for BranchNavigator {
         }
         frame.render_widget(Paragraph::new(lines), prompt_area);
         if let Some(error) = &self.error {
-            frame.render_widget(Paragraph::new(Line::styled(error.clone(), Style::default().fg(Color::Red))), error_area);
+            frame.render_widget(
+                Paragraph::new(Line::styled(error.clone(), Style::default().fg(Color::Red))),
+                error_area,
+            );
         }
     }
 
@@ -246,7 +288,10 @@ impl FeatureOverlay for BranchNavigator {
         if let Focus::Editing { text, cursor } = &mut self.focus {
             match key.code {
                 KeyCode::Esc => self.focus = Focus::Prompts,
-                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT) => {
+                KeyCode::Enter
+                    if key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.modifiers.contains(KeyModifiers::ALT) =>
+                {
                     text.insert(*cursor, '\n');
                     *cursor += 1;
                 }
@@ -299,7 +344,9 @@ impl FeatureOverlay for BranchNavigator {
                 Focus::Branches => self.branch = (self.branch + 1).min(branches.saturating_sub(1)),
                 _ => self.prompt = (self.prompt + 1).min(self.prompts.len().saturating_sub(1)),
             },
-            KeyCode::Enter if matches!(self.focus, Focus::Branches) => return self.switch_selected(),
+            KeyCode::Enter if matches!(self.focus, Focus::Branches) => {
+                return self.switch_selected();
+            }
             KeyCode::Enter | KeyCode::Char('e') if matches!(self.focus, Focus::Prompts) => {
                 if let Some(prompt) = self.prompts.get(self.prompt) {
                     self.focus = Focus::Editing {

@@ -46,6 +46,7 @@ pub(crate) struct LocalConnection {
     pub(crate) session_id: String,
     pub(crate) workspace: PathBuf,
     pub(crate) settings: AgentSettings,
+    created: bool,
     /// Replayed history of a resumed session (empty for a fresh one).
     pub(in crate::nanocodex2::tui) history: super::history::HistoryWindow,
 }
@@ -61,7 +62,7 @@ impl LocalConnection {
             self.history,
             None,
             self.settings,
-            true,
+            self.created,
             super::ManagedActiveTurns::default(),
         )
     }
@@ -80,7 +81,9 @@ impl super::DriverRuntime {
             return Err("no local session".to_owned());
         };
         let launch = match session {
-            Some(id) => sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?,
+            Some(id) => {
+                sessions::relaunch(&local.launch, id).map_err(|error| format!("{error:#}"))?
+            }
             None => sessions::fresh(&local.launch),
         };
         self.local_switch(purpose, launch)
@@ -143,11 +146,9 @@ impl LocalState {
                 events,
                 session_id: backend.handle.session_id().to_string(),
                 workspace: backend.workspace.clone(),
-                settings: local_settings(&backend),
-                history: sessions::history_window(
-                    &backend.transcript,
-                    backend.handle.session_id(),
-                ),
+                settings: settings_from_launch(&backend.launch)?,
+                created: backend.launch.resume.is_none(),
+                history: sessions::history_window(&backend.transcript, backend.handle.session_id()),
             };
             let replaced = slot
                 .lock()
@@ -250,7 +251,11 @@ impl LocalState {
         if let Some(bridge) = self.bridge.take() {
             bridge.abort();
         }
-        let pending = self.slot.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let pending = self
+            .slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         if let Some((backend, bridge)) = pending {
             bridge.abort();
             backend.shutdown().await?;
@@ -262,17 +267,94 @@ impl LocalState {
     }
 }
 
-fn local_settings(backend: &LocalBackend) -> AgentSettings {
-    let defaults = AgentSettings::default();
-    let model = match backend.model {
-        HarnessModel::Codex(model) => ManagedModel::Oai(model),
-        // The picker shows the hosted default until WP1 maps Claude models.
-        HarnessModel::Claude(_) => defaults.model,
-    };
-    AgentSettings {
-        model,
-        thinking: backend.launch.args.thinking(),
-        fast_mode: backend.launch.args.fast_mode(),
-        ..defaults
+pub(crate) fn settings_from_launch(launch: &LocalLaunch) -> Result<AgentSettings, String> {
+    let model = launch
+        .args
+        .harness_model()
+        .map_err(|error| error.to_string())?;
+    Ok(AgentSettings {
+        model: model
+            .as_str()
+            .parse()
+            .map_err(|error| format!("{model}: {error}"))?,
+        thinking: launch.args.thinking(),
+        fast_mode: launch.args.fast_mode(),
+        reasoning_mode: launch.args.tui_reasoning_mode(),
+    })
+}
+
+pub(crate) fn model_catalog(launch: &LocalLaunch) -> Vec<nanocodex_managed::AvailableModel> {
+    use nanocodex::{HarnessFamily, ReasoningMode, Thinking};
+    HarnessModel::for_family(HarnessFamily::Codex)
+        .chain(
+            HarnessModel::for_family(HarnessFamily::Claude)
+                .filter(|_| launch.args.local_claude_available()),
+        )
+        .filter_map(|model| {
+            let id: ManagedModel = model.as_str().parse().ok()?;
+            Some(nanocodex_managed::AvailableModel {
+                id,
+                name: model.to_string(),
+                provider: model.family().to_string(),
+                thinking: Thinking::ALL
+                    .into_iter()
+                    .filter(|effort| model.supports_thinking(*effort))
+                    .collect(),
+                fast_mode: model.supports_fast_mode(),
+                reasoning_modes: vec![ReasoningMode::Standard],
+            })
+        })
+        .collect()
+}
+
+pub(super) async fn apply_settings(
+    agent: Option<Nanocodex>,
+    current: AgentSettings,
+    mutation: super::SettingsMutation,
+) -> Result<AgentSettings, nanocodex_managed::ManagedError> {
+    use super::SettingsMutation;
+    use nanocodex_managed::ManagedError;
+    let agent = agent
+        .ok_or_else(|| ManagedError::Configuration("Wait for the local agent to connect".into()))?;
+    let mut settings = current;
+    match mutation {
+        SettingsMutation::AutoRoute => {
+            return Err(ManagedError::Configuration(
+                Capabilities::LOCAL.unavailable("Automatic routing"),
+            ));
+        }
+        SettingsMutation::Thinking(thinking) => {
+            agent
+                .set_thinking(thinking)
+                .await
+                .map_err(super::super::agent_error)?;
+            settings.thinking = thinking;
+        }
+        SettingsMutation::FastMode(enabled) => {
+            agent
+                .set_fast_mode(enabled)
+                .await
+                .map_err(super::super::agent_error)?;
+            settings.fast_mode = enabled;
+        }
+        SettingsMutation::Complete(requested) => {
+            if requested.model != current.model
+                || requested.reasoning_mode != current.reasoning_mode
+            {
+                return Err(ManagedError::Configuration(
+                    "Change the local model before the first prompt with /model".into(),
+                ));
+            }
+            agent
+                .set_thinking(requested.thinking)
+                .await
+                .map_err(super::super::agent_error)?;
+            if let Err(error) = agent.set_fast_mode(requested.fast_mode).await {
+                let _ = agent.set_thinking(current.thinking).await;
+                return Err(super::super::agent_error(error));
+            }
+            settings = requested;
+        }
     }
+    Ok(settings)
 }
