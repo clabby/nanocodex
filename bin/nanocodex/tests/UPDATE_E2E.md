@@ -18,7 +18,25 @@ python3 scripts/release/hand-source-identity.py verify \
 # --old-updater PATH also installs the pair with a previously shipped two-binary
 # updater (copied read-only, e.g. ~/.nanocodex/updater/nanocodex).
 node bin/nanocodex/tests/update_local_e2e.mjs target/debug/nanocodex target/debug/nanocodex-hand --source
+# A plain `cargo build --locked` pair (no VERGEN_GIT_SHA/NANOCODEX_HAND_IDENTITY):
+node bin/nanocodex/tests/update_local_e2e.mjs target/debug/nanocodex target/debug/nanocodex-hand \
+  output/update-local-dev --development
 ```
+
+On a Linux host whose own system Hand is installed (`nanocodex-hand.service`,
+root-owned `/opt/nanocodex`), run the runner in a private user + mount namespace
+with an empty `/run`. The CLI then observes no systemd and no root-owned Hand
+root, so `hand status` reports no owner and nothing reaches the host service or
+real HOME; no host mount changes:
+
+```sh
+unshare --user --map-root-user --mount sh -c 'mount --make-rprivate / &&
+  mount -t tmpfs tmpfs /run &&
+  node bin/nanocodex/tests/update_local_e2e.mjs CLI HAND OUTPUT_DIR --development'
+```
+
+A user namespace alone cannot query the system bus, so `hand status` fails
+there; do not run the runner directly against a host with a live system Hand.
 
 Install layout: `versions/<key>/nanocodex` is the CLI and `versions/<key>/nanocodex2`
 is the Hand (release asset `nanocodex2-<triple>`, or a locally built
@@ -81,15 +99,20 @@ Covered public boundaries:
 
 - `update --path CLI` finds the sibling `nanocodex-hand`; `--hand-binary HAND`
   selects the same pair. Both probe the real binaries, validate matching full
-  revisions and cache CLI + Hand (as `nanocodex2`).
+  revisions and cache CLI + Hand (as `nanocodex2`). With `--development` the
+  pair reports no Commit SHA or Hand Identity; the updater instead verifies one
+  package version plus Hand service protocol 1, and stores the exact Hand bytes
+  as a checksummed regular file in the version (no `hand-identity`, no
+  `hand-versions`).
 - Hand decoupling: a CLI-only `update --path` (no Hand given or beside it)
   carries the active Hand bytes forward, and a pair whose Hand equals the active
   Hand, both activate immediately with an installed owner: nothing is staged,
   the synthetic plist is unchanged and the live Hand PID (read-only
   `launchctl print`) is identical before and after the whole run.
 - Entrypoints: after a real activation `bin/{nanocodex,nanocodex2,nc,ncl}` link
-  `../current/nanocodex`, each prints one `Commit SHA:` line, `ncl --help` shows
-  the local tree and the others the managed tree.
+  `../current/nanocodex`, each prints one `Commit SHA:` line (with
+  `--development`: the same package version/profile and no provenance lines),
+  `ncl --help` shows the local tree and the others the managed tree.
 - `--old-updater`: the old two-binary updater installs the pair, its own
   `bin/nanocodex`/`bin/nanocodex2` run it, and the new CLI then takes over the
   same cached pair without a Hand switch.
@@ -102,8 +125,10 @@ Covered public boundaries:
 - Linux: real Git fetch of a minimal historical branch must fail before Cargo
   because the fetched revision lacks the self-contained screen-helper contract;
   the prior active/pending pair and version set are preserved.
-- Nonzero candidate version-probe and mismatched revision rejection, missing
-  companion and invalid/conflicting selectors. The two rejection candidates are
+- Nonzero candidate version-probe and mismatched revision rejection (with
+  `--development`: a Hand answering service protocol 2, a different package
+  version, and a stamped Hand beside an unstamped CLI), missing
+  companion and invalid/conflicting selectors. The rejection candidates are
   deliberately executable input fixtures, not a Hand-service implementation.
 - Corrupted cached companion is rejected by real `update --apply`; active CLI
   stays unchanged and pending evidence is preserved.

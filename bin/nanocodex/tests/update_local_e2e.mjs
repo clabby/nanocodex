@@ -5,10 +5,13 @@
 // service: Darwin uses an unregistered synthetic plist and asserts the live Hand
 // PID is unchanged. --old-updater PATH also installs the pair with a previously
 // shipped two-binary updater (a read-only copy) before the new CLI takes over.
+// --development instead accepts a plain `cargo build` pair that records no
+// provenance (no Commit SHA, no Hand Identity): the updater verifies their shared
+// package version and Hand service protocol 1 and stores the exact Hand bytes.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,9 +23,12 @@ const oldUpdaterIndex = argv.indexOf('--old-updater');
 const suppliedOldUpdater = oldUpdaterIndex >= 0 ? resolve(argv[oldUpdaterIndex + 1] ?? '') : null;
 if (oldUpdaterIndex >= 0) argv.splice(oldUpdaterIndex, 2);
 const withSource = argv.includes('--source');
-const positional = argv.filter(arg => arg !== '--source');
+const development = argv.includes('--development');
+const positional = argv.filter(arg => arg !== '--source' && arg !== '--development');
 assert.ok(positional[0] && positional[1],
-  'usage: node bin/nanocodex/tests/update_local_e2e.mjs CLI HAND [OUTPUT_DIR] [--source] [--old-updater PATH]');
+  'usage: node bin/nanocodex/tests/update_local_e2e.mjs CLI HAND [OUTPUT_DIR] [--source] [--development] [--old-updater PATH]');
+assert.ok(!(development && suppliedOldUpdater),
+  '--old-updater installs release-provenance pairs; do not combine it with --development');
 const suppliedCli = resolve(positional[0]);
 const suppliedHand = resolve(positional[1]);
 const output = resolve(positional[2] ?? 'output/update-local-e2e');
@@ -85,6 +91,17 @@ const oneRevision = (stdout, what) => {
   assert.equal(lines.length, 1, `${what} --version must print exactly one Commit SHA line`);
   return lines[0].match(/^Commit SHA: ([0-9a-f]{40})$/i)?.[1].toLowerCase();
 };
+const packageVersion = stdout => stdout.match(/^\S+ Version: ([^\s+-]+)/m)?.[1];
+// A plain development build reports its package version and build profile but
+// no release provenance; that version/profile pair stands in for a revision.
+function plainBuild(stdout, what) {
+  assert.doesNotMatch(stdout, /^(Commit SHA|Hand Identity|Build Timestamp):/m,
+    `${what} --version must not report release provenance for a plain development build`);
+  const version = packageVersion(stdout);
+  assert.ok(version, `${what} --version must report a package version`);
+  return `${version} ${stdout.match(/^Build Profile: (\S+)$/m)?.[1] ?? 'unknown-profile'}`;
+}
+const provenance = (stdout, what) => development ? plainBuild(stdout, what) : oneRevision(stdout, what);
 // Help structure distinguishes the trees: the managed tree takes only a
 // command (no top-level options), while only the local tree has `auth`.
 const managedHelp = /^Usage: \S+ \[COMMAND\]$/m;
@@ -93,7 +110,7 @@ function checkAliases(root, revision, label) {
   for (const alias of ['nanocodex', 'nanocodex2', 'nc', 'ncl']) {
     const link = join(root, 'bin', alias);
     assert.equal(readlinkSync(link), join('..', 'current', 'nanocodex'), `${label}: bin/${alias} must link the CLI`);
-    assert.equal(oneRevision(run(link, ['--version']).stdout, `${label} bin/${alias}`), revision);
+    assert.equal(provenance(run(link, ['--version']).stdout, `${label} bin/${alias}`), revision);
   }
   const ncl = run(join(root, 'bin', 'ncl'), ['--help']).stdout;
   assert.match(ncl, localHelp, `${label}: ncl --help must show the local tree`);
@@ -103,7 +120,7 @@ function checkAliases(root, revision, label) {
     assert.match(help, managedHelp, `${label}: ${alias} --help must show the managed tree`);
     assert.doesNotMatch(help, localHelp, `${label}: ${alias} --help must not show the local tree`);
   }
-  trace.push(`PASS ${label}: bin/{nanocodex,nanocodex2,nc,ncl} -> ../current/nanocodex; each prints one Commit SHA ${revision}; ncl --help local tree, the others managed tree`);
+  trace.push(`PASS ${label}: bin/{nanocodex,nanocodex2,nc,ncl} -> ../current/nanocodex; each reports ${development ? 'plain build' : 'one Commit SHA'} ${revision}; ncl --help local tree, the others managed tree`);
 }
 function bundleBytes(directory, label, handBytes = suppliedHand) {
   assert.equal(digest(readFileSync(join(directory, 'nanocodex'))), digest(readFileSync(suppliedCli)), `${label}: CLI bytes`);
@@ -161,18 +178,28 @@ try {
   }
   const cliVersion = run(cli, ['--version']).stdout;
   const handVersion = run(hand, ['--version']).stdout;
-  const revision = oneRevision(cliVersion, 'CLI');
-  assert.ok(revision, 'CLI must expose full source revision');
-  const identity = version => {
-    const matches = [...version.matchAll(/^Hand Identity: ([0-9a-f]{64})$/gm)];
-    assert.equal(matches.length, 1, 'candidate must expose exactly one Hand content identity');
-    return matches[0][1];
-  };
-  assert.equal(identity(handVersion), identity(cliVersion),
-    'supply a real CLI + Hand with matching Hand source inputs');
-  assert.doesNotMatch(handVersion, /^Commit SHA:|^Build Timestamp:/m,
-    'Hand version must remain independent of CLI-only revisions');
-  trace.push(`real candidate pair revision: ${revision}; Hand identity: ${identity(handVersion)}; platform: ${process.platform}; fixture: ${fixture}`);
+  const revision = provenance(cliVersion, 'CLI');
+  if (development) {
+    plainBuild(handVersion, 'Hand');
+    assert.equal(packageVersion(handVersion), packageVersion(cliVersion),
+      'supply a real plain CLI + Hand built from one checkout (same package version)');
+    const protocol = JSON.parse(run(hand, ['__device-hand', '--service-protocol']).stdout);
+    assert.equal(protocol.serviceProtocol, 1, 'development Hand must answer service protocol 1');
+    assert.equal(protocol.handIdentity, null, 'plain development Hand must not invent an identity');
+    trace.push(`real plain development pair: ${revision}; Hand protocol ${JSON.stringify(protocol)}; CLI sha256 ${digest(readFileSync(cli))}; Hand sha256 ${digest(readFileSync(hand))}; platform: ${process.platform}; fixture: ${fixture}`);
+  } else {
+    assert.ok(revision, 'CLI must expose full source revision');
+    const identity = version => {
+      const matches = [...version.matchAll(/^Hand Identity: ([0-9a-f]{64})$/gm)];
+      assert.equal(matches.length, 1, 'candidate must expose exactly one Hand content identity');
+      return matches[0][1];
+    };
+    assert.equal(identity(handVersion), identity(cliVersion),
+      'supply a real CLI + Hand with matching Hand source inputs');
+    assert.doesNotMatch(handVersion, /^Commit SHA:|^Build Timestamp:/m,
+      'Hand version must remain independent of CLI-only revisions');
+    trace.push(`real candidate pair revision: ${revision}; Hand identity: ${identity(handVersion)}; platform: ${process.platform}; fixture: ${fixture}`);
+  }
 
   if (process.platform === 'darwin') {
     const escape = x => x.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -195,13 +222,26 @@ try {
 
   // (b) Real pair installation: the sibling nanocodex-hand is found without
   // --hand-binary; both probes run and their actual bytes are cached.
-  update(['--path', cli]);
+  const installed = update(['--path', cli]);
   const key = localKey();
   const before = active();
   bundleBytes(join(store, 'versions', key), 'update --path CLI (sibling nanocodex-hand)');
-  // The Hand is stored once per Hand identity and serves the active CLI.
   const storedHand = realpathSync(join(store, 'versions', key, 'nanocodex2'));
-  assert.equal(basename(dirname(dirname(storedHand))), 'hand-versions', 'Hand stored once per identity');
+  if (development) {
+    assert.match(installed.stderr, /Verified local development pair \S+ with Hand service protocol 1 \(no recorded source revision\)/);
+    // Without an identity the version keeps the exact verified Hand bytes,
+    // gated by their checksum; nothing is filed under hand-versions.
+    const version = join(store, 'versions', key);
+    assert.ok(!lstatSync(join(version, 'nanocodex2')).isSymbolicLink(), 'identity-less Hand is a regular file in its version');
+    assert.ok(!existsSync(join(version, 'hand-identity')), 'no Hand identity is invented');
+    assert.ok(!existsSync(join(store, 'hand-versions')), 'no identity-keyed Hand store');
+    assert.equal(readFileSync(join(version, 'nanocodex2.sha256'), 'utf8').trim(), digest(readFileSync(suppliedHand)));
+    assert.equal(readFileSync(join(version, 'nanocodex.sha256'), 'utf8').trim(), digest(readFileSync(suppliedCli)));
+    trace.push(`PASS development store: versions/${key}/nanocodex2 regular file with matching nanocodex2.sha256, no hand-identity, no hand-versions`);
+  } else {
+    // The Hand is stored once per Hand identity and serves the active CLI.
+    assert.equal(basename(dirname(dirname(storedHand))), 'hand-versions', 'Hand stored once per identity');
+  }
   assert.match(run(storedHand, ['--local', '--help']).stdout, localHelp,
     'a Hand stored under hand-versions forwards user commands to the active CLI');
   const storedApp = join(store, 'versions', key, 'Nanocodex.app');
@@ -372,14 +412,31 @@ try {
   assert.equal(active(), oldActive);
   assert.equal(pending(), oldPending);
   assert.match(update(['--auto', 'status']).stdout, new RegExp(`explicit selection ${key}`), 'failed install must preserve the prior hold');
-  const mismatched = join(fixture, 'pair', 'mismatched-probe');
-  const different = revision === '0'.repeat(40) ? '1'.repeat(40) : '0'.repeat(40);
-  writeFileSync(mismatched, `#!/bin/sh\nprintf 'nanocodex2 Version: fixture\\nCommit SHA: ${different}\\n'\n`, { mode: 0o755 });
-  const mismatch = update(['--path', cli, '--hand-binary', mismatched], 1);
-  assert.match(mismatch.stderr, /source revision .* differs from Hand/);
-  assert.deepEqual(versions(), snapshot);
-  assert.equal(active(), oldActive);
-  assert.equal(pending(), oldPending);
+  const rejectPair = (name, script, expected) => {
+    const candidate = join(fixture, 'pair', name);
+    writeFileSync(candidate, script, { mode: 0o755 });
+    const rejected = update(['--path', cli, '--hand-binary', candidate], 1);
+    assert.match(rejected.stderr, expected);
+    assert.deepEqual(versions(), snapshot, `${name} must not install a candidate version`);
+    assert.equal(active(), oldActive);
+    assert.equal(pending(), oldPending);
+  };
+  if (development) {
+    const version = packageVersion(cliVersion);
+    // Same package version but an incompatible Hand service protocol.
+    rejectPair('protocol-2-probe', `#!/bin/sh\ncase "$1" in\n--version) printf 'nanocodex-hand Version: ${version}\\n' ;;\n__device-hand) printf '{"serviceProtocol":2,"handIdentity":null}\\n' ;;\n*) exit 64 ;;\nesac\n`,
+      /does not support service protocol 1/);
+    rejectPair('other-version-probe', "#!/bin/sh\nprintf 'nanocodex-hand Version: 0.0.0-fixture\\n'\n",
+      /different package versions/);
+    // A stamped Hand cannot pair with an unstamped CLI.
+    rejectPair('stamped-probe', `#!/bin/sh\nprintf 'nanocodex-hand Version: ${version}\\nCommit SHA: ${'0'.repeat(40)}\\n'\n`,
+      /does not report an exact source revision/);
+    trace.push('PASS development rejections: protocol 2, different package version and mixed provenance leave versions/active/pending unchanged');
+  } else {
+    const different = revision === '0'.repeat(40) ? '1'.repeat(40) : '0'.repeat(40);
+    rejectPair('mismatched-probe', `#!/bin/sh\nprintf 'nanocodex2 Version: fixture\\nCommit SHA: ${different}\\n'\n`,
+      /source revision .* differs from Hand/);
+  }
   update(['--path', cli, '--branch', 'topic'], 1);
   update(['--pr', '0'], 1);
   update(['--path', cli, '--hand-binary', join(fixture, 'missing')], 1);
@@ -487,6 +544,7 @@ try {
   trace.push(`live Hand after (read-only launchctl print): ${livePidAfter}`);
   assert.equal(livePidAfter, livePidBefore, 'the real Hand must not be restarted');
   verdict = 'PASSED';
+  trace.push(`mode: ${development ? 'plain development pair (no recorded provenance)' : 'release-provenance pair'}`);
   trace.push('scope: real updater, real candidate probes/bundle bytes, staging, rejection and corruption; synthetic recovery records. NOT coverage: release HTTP downloads, running Hand handover/rollback, Windows execution, post-logout/reboot lifetime.');
   process.stdout.write(`local updater journeys passed; transcript: ${join(output, 'transcript.log')}\n`);
 } finally {
