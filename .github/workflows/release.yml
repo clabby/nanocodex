@@ -149,7 +149,10 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          cache-on-failure: false
       - uses: ./.github/actions/docker-hub-mirror
         if: matrix.target == 'x86_64-unknown-linux-gnu'
       - name: Prepare embedded Linux Wayland helpers
@@ -266,7 +269,10 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          cache-on-failure: false
       - name: Build Windows Hand payload
         shell: pwsh
         env:
@@ -353,7 +359,10 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          cache-on-failure: false
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:

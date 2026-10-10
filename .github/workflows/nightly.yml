@@ -73,7 +73,12 @@ jobs:
           key: nightly-${{ matrix.component }}-${{ matrix.target }}
           # Voice helpers have their own Cargo target directories.
           workspaces: ${{ matrix.workspaces }}
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          # sccache still keeps progress from a failed run: it uploads each
+          # compiled object under its own content key as soon as it is built.
+          cache-on-failure: false
       # rust-cache restores third-party dependencies but always rebuilds
       # workspace crates. sccache reuses unchanged workspace libraries across
       # runs; binaries and changed crates still compile from source.
@@ -329,7 +334,12 @@ jobs:
           key: nightly-windows-hand
           workspaces: |
             . -> target
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          # sccache still keeps progress from a failed run: it uploads each
+          # compiled object under its own content key as soon as it is built.
+          cache-on-failure: false
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
         with:
           version: v0.16.0
