@@ -6067,6 +6067,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-decisions"
+version = "0.6.7"
+dependencies = [
+ "async-trait",
+ "axum",
+ "nanocodex",
+ "nanocodex-oai-tools",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "nanocodex-durability"
 version = "0.6.7"
 dependencies = [

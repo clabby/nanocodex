@@ -1010,6 +1010,7 @@ while their pinned native/proxy dependencies are unavailable from crates.io.
 | [`nanocodex-oai-api`](crates/nanocodex-oai-api/README.md) | Stable, published | OpenAI auth, typed Responses and Realtime boundaries, persistent transports, managed context, retry, pricing, and Tower client. |
 | [`nanocodex-oai-tools`](crates/nanocodex-oai-tools/README.md) | Supported, publishable | OpenAI tool contracts, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
 | [`nanocodex-claude-tools`](crates/nanocodex-claude-tools/README.md) | Supported, publishable | Independent Claude-native file, notebook, task, Bash, web and host/MCP adapters; caller-owned permissions and effects. |
+| [`nanocodex-decisions`](crates/nanocodex-decisions/README.md) | Supported, publishable | Provider-neutral decision model interface, the OpenAI Decisions API client, and an installable `decide` tool. |
 | [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Supported, 0.6 registry release, optional | Task-tree lifecycle and the seven canonical child-agent tools above the core. |
 | [`nanocodex-observability`](crates/nanocodex-observability/README.md) | Stable, published, optional | Full-fidelity tracing and application-owned OpenTelemetry initialization. |
 | [`nanocodex` for JavaScript](js/nanocodex/README.md) | Published headless core binding; narrow source companions | Node/browser hosts around the Rust/WASM agent, plus React hooks, Vite integration, and optional terminal presentation under [`js/`](js/README.md). Agent lifecycle remains headless and caller-owned. |
@@ -1060,6 +1061,7 @@ crates/
 ├── nanocodex-oai-api/          OpenAI protocol, context, transport, Tower
 ├── nanocodex-oai-tools/        OpenAI tools, Code Mode, MCP, process runtime
 ├── nanocodex-claude-tools/     independent Claude-native capability adapters
+├── nanocodex-decisions/        decision model interface, OpenAI Decisions, decide tool
 ├── nanocodex-claude/           Anthropic Messages protocol and agent backend
 ├── nanocodex-agent/            owned agent lifecycle
 ├── nanocodex-subagents/        optional task-tree extension
