@@ -229,10 +229,12 @@ import {
 } from "./connector-status";
 import {
   DurableEventLog,
+  MAX_HISTORY_PAGE_BYTES,
   MAX_HISTORY_PAGE_SIZE,
   parseCursor,
   type DurableEvent,
   type DurableEventTail,
+  type HistoryBounds,
 } from "./durable-events";
 import { persistEventStreamFailure } from "./event-stream-failure";
 import { watchManagedAgentFamilyEvents } from "./agent-event-watcher";
@@ -5931,9 +5933,25 @@ export class DurableAgentSession extends DurableComputerObject {
       if (!Number.isSafeInteger(limit) || limit > MAX_HISTORY_PAGE_SIZE) {
         return json({ error: "invalid_history_page" }, { status: 400 });
       }
+      // Opt-in byte bounds for model-facing readers: max_bytes replaces the
+      // page budget and events above max_event_bytes arrive as unhydrated
+      // truncated stand-ins that keep their cursors.
+      const bound = (name: string, minimum: number, maximum: number): number | undefined | null => {
+        const raw = url.searchParams.get(name);
+        if (raw === null) return undefined;
+        const value = /^[1-9][0-9]{0,9}$/.test(raw) ? Number(raw) : Number.NaN;
+        return value >= minimum && value <= maximum ? value : null;
+      };
+      const maxBytes = bound("max_bytes", 1_024, MAX_HISTORY_PAGE_BYTES);
+      const maxEventBytes = bound("max_event_bytes", 256, 64 * 1024 * 1024);
+      if (maxBytes === null || maxEventBytes === null)
+        return json({ error: "invalid_history_page" }, { status: 400 });
+      const bounds: HistoryBounds | undefined = maxBytes === undefined && maxEventBytes === undefined ? undefined
+        : { ...(maxBytes === undefined ? {} : { maxBytes }), ...(maxEventBytes === undefined ? {} : { maxEventBytes }) };
+      const boundsTag = bounds === undefined ? "" : `-bytes-${maxBytes ?? "default"}-${maxEventBytes ?? "any"}`;
       // Cursor and archive ownership are small indexed reads. Revalidation
       // must happen before loading, decoding, or serializing event payloads.
-      const historyTag = () => `W/"history-v2-${this.#sessionId()}-${after === undefined ? `before-${before ?? "latest"}` : `after-${after}`}-${limit}-${this.#eventArchive.latestCursor(this.#eventLog)}-${this.#eventArchive.archivedThrough()}"`;
+      const historyTag = () => `W/"history-v2-${this.#sessionId()}-${after === undefined ? `before-${before ?? "latest"}` : `after-${after}`}-${limit}${boundsTag}-${this.#eventArchive.latestCursor(this.#eventLog)}-${this.#eventArchive.archivedThrough()}"`;
       const etag = historyTag();
       const cacheHeaders = {
         "cache-control": "private, no-cache",
@@ -5947,8 +5965,8 @@ export class DurableAgentSession extends DurableComputerObject {
       let page;
       try {
         page = after === undefined
-          ? await this.#eventArchive.history(this.#eventLog, before, limit)
-          : await this.#eventArchive.historyAfter(this.#eventLog, after, limit);
+          ? await this.#eventArchive.history(this.#eventLog, before, limit, bounds)
+          : await this.#eventArchive.historyAfter(this.#eventLog, after, limit, bounds);
       } catch (error) {
         return json({
           error: "event_archive_unavailable",
