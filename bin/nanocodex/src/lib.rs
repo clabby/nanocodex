@@ -282,6 +282,7 @@ pub fn cli_main(build: BuildInfo) -> ExitCode {
             }
         };
     }
+    update::repair_legacy_activation();
     match tree {
         Tree::Managed => nanocodex2::main(arguments),
         Tree::Local => local_main(arguments),

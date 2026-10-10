@@ -151,6 +151,26 @@ pub(crate) fn prepare_legacy_nightly_bootstrap() -> Result<()> {
     Ok(())
 }
 
+/// Repair entrypoints left by an older updater that activated this version.
+/// Uses the running executable's own installation, never NANOCODEX_DIR.
+pub(crate) fn repair_legacy_activation() {
+    #[cfg(unix)]
+    {
+        let Some(root) = crate::launcher::running_install_root() else {
+            return;
+        };
+        match VersionStore::at_root(root).repair_legacy_activation() {
+            Ok(true) => eprintln!(
+                "Repaired Nanocodex command links left by an older updater (nanocodex2, nc, ncl, nanocodex-hand, nc-hand)"
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("warning: could not repair Nanocodex command links: {error:#}");
+            }
+        }
+    }
+}
+
 /// Repair missing default scheduling only for an installed, managed CLI.
 pub(crate) fn ensure_default_automatic_updates() -> Result<()> {
     let store = VersionStore::discover()?;

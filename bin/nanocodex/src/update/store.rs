@@ -145,6 +145,11 @@ impl VersionStore {
         Ok(Self { root })
     }
 
+    #[cfg(unix)]
+    pub(super) fn at_root(root: PathBuf) -> Self {
+        Self { root }
+    }
+
     #[cfg(test)]
     pub(super) fn at(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -693,6 +698,43 @@ impl VersionStore {
         Ok(())
     }
 
+    /// Apply this version's entrypoint rules after an older updater activated
+    /// it. Pre-unified updaters link `bin/nanocodex2` to `../current/nanocodex2`
+    /// (in a unified version, the Hand daemon) and create no `nc`, `ncl`,
+    /// `nanocodex-hand` or `nc-hand`; this version's own activation never
+    /// links that name to the Hand. Only the running, active CLI repairs its
+    /// own installation, once: afterwards the trigger no longer matches, so a
+    /// normal start costs one readlink. Hand files, `current` and service
+    /// records are untouched. Returns whether the entrypoints were repaired.
+    #[cfg(unix)]
+    pub(super) fn repair_legacy_activation(&self) -> Result<bool> {
+        let entrypoint = self.root.join("bin").join(NANOCODEX2_BINARY_NAME);
+        let legacy = Path::new("../current").join(NANOCODEX2_BINARY_NAME);
+        let stale = || fs::read_link(&entrypoint).is_ok_and(|target| target == legacy);
+        if !stale() {
+            return Ok(false);
+        }
+        let Some(key) = self.active()? else {
+            return Ok(false);
+        };
+        let running = std::env::current_exe()?.canonicalize()?;
+        if self.binary_path(&key).canonicalize().ok() != Some(running) {
+            return Ok(false);
+        }
+        // A concurrent update owns the entrypoints; a later start repairs them.
+        let Ok(_lock) = self.update_lock() else {
+            return Ok(false);
+        };
+        if !stale() || self.active()?.as_deref() != Some(key.as_str()) {
+            return Ok(false);
+        }
+        self.install_launcher()?;
+        self.sync_hand_aliases(&key)?;
+        // Last: this clears the trigger, so an earlier failure retries next start.
+        self.sync_nanocodex2_launcher(&key)?;
+        Ok(true)
+    }
+
     pub(super) fn active(&self) -> Result<Option<String>> {
         #[cfg(unix)]
         {
@@ -726,8 +768,40 @@ impl VersionStore {
 
     pub(super) fn promote_running_manager(&self) -> Result<()> {
         let contents = fs::read(std::env::current_exe()?)?;
-        atomic_write(&self.updater_path(), &contents, true)?;
-        self.write_updater_checksum(&contents)
+        self.publish_updater(&contents)
+    }
+
+    /// Publish `contents` as the updater. A repeated update that selects the
+    /// same manager keeps the existing file (its inode, mtime and receipt)
+    /// instead of rewriting the whole executable with identical bytes.
+    fn publish_updater(&self, contents: &[u8]) -> Result<()> {
+        let checksum = format!("{}\n", hex::encode(Sha256::digest(contents)));
+        let path = self.updater_path();
+        let executable = |metadata: &fs::Metadata| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 == 0o111
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = metadata;
+                true
+            }
+        };
+        let unchanged = fs::read_to_string(self.updater_checksum_path())
+            .is_ok_and(|receipt| receipt == checksum)
+            && fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.len() == contents.len() as u64
+                    && executable(&metadata)
+            })
+            && fs::read(&path).is_ok_and(|existing| existing == contents);
+        if unchanged {
+            return Ok(());
+        }
+        atomic_write(&path, contents, true)?;
+        atomic_write(&self.updater_checksum_path(), checksum.as_bytes(), false)
     }
 
     pub(super) fn promote_manager(&self, key: &str) -> Result<()> {
@@ -739,8 +813,7 @@ impl VersionStore {
         {
             let contents = fs::read(self.binary_path(key))
                 .wrap_err_with(|| format!("failed to read Nanocodex version {key}"))?;
-            atomic_write(&self.updater_path(), &contents, true)?;
-            self.write_updater_checksum(&contents)?;
+            self.publish_updater(&contents)?;
         }
 
         Ok(())
