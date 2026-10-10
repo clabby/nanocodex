@@ -26,7 +26,7 @@ use nanocodex::{
 };
 use nanocodex_durability::{DurableSession as PortableDurableSession, SqliteStore};
 
-use crate::browser::{BrowserArgs, ConfiguredBrowser};
+use crate::browser::BrowserArgs;
 use crate::login::load_managed_mcp_credential;
 use crate::managed_memory::{ConfiguredManagedMemory, MEMORY_INSTRUCTIONS};
 use crate::mcp::{ConfiguredMcp, McpArgs};
@@ -42,7 +42,7 @@ pub(crate) use claude::interaction::{
 pub(crate) use claude::scheduler::SessionScheduler;
 pub(crate) use claude::{prepare_rewind_branch, rewind_files};
 mod instructions;
-pub(crate) use instructions::{expand_session_user_skill, expand_user_skill};
+pub(crate) use instructions::expand_session_user_skill;
 
 pub(crate) struct ConfiguredAgent {
     pub(crate) claude_scheduler: Option<Arc<SessionScheduler>>,
@@ -55,7 +55,6 @@ pub(crate) struct ConfiguredAgent {
         Option<tokio::sync::mpsc::UnboundedReceiver<nanocodex_subagents::ScopedAgentUpdate>>,
     pub(crate) mpp_adapter: Option<MppAdapter>,
     pub(crate) mcp: Option<McpHandle>,
-    pub(crate) browser: Option<ConfiguredBrowser>,
     pub(crate) vm: Option<ConfiguredVm>,
     pub(crate) model: HarnessModel,
 }
@@ -154,7 +153,7 @@ pub(crate) struct AgentArgs {
     pub(crate) claude_resume: Option<crate::native_sessions::ResumeSession>,
 
     /// Voice microphone shortcut, or none to use /voice mute only.
-    #[arg(long, env = "NANOCODEX_VOICE_MUTE_KEY", default_value = "ctrl+x", value_parser = crate::tui::voice::validate_key)]
+    #[arg(long, env = "NANOCODEX_VOICE_MUTE_KEY", default_value = "ctrl+x", value_parser = crate::nanocodex2::tui::voice_keys::validate_key)]
     pub(crate) voice_mute_key: String,
 
     /// Animate live voice captions; set false for reduced motion.
@@ -166,7 +165,7 @@ pub(crate) struct AgentArgs {
     /// Ctrl+O cycles through the modes. Hidden keeps only the conversation;
     /// the footer still shows the turn as Working until it ends.
     #[arg(long, env = "NANOCODEX_TOOL_CALLS", value_enum, default_value_t)]
-    pub(crate) tool_calls: crate::tui::ToolCalls,
+    pub(crate) tool_calls: crate::nanocodex2::tui::tool_calls::ToolCalls,
 
     #[command(flatten)]
     auth: AuthArgs,
@@ -355,8 +354,16 @@ impl AgentArgs {
         } else {
             model.default_thinking()
         });
-        self.fast_mode =
-            Some(model.family() == HarnessFamily::Codex && (!same_family || fast_mode));
+        self.fast_mode = Some(model.supports_fast_mode() && fast_mode);
+    }
+
+    /// Arguments for switching a running TUI to another saved session (/attach):
+    /// the resumed session supplies its own workspace and model.
+    pub(crate) fn for_session_switch(mut self) -> Self {
+        self.cwd = None;
+        self.model = None;
+        self.claude_resume = None;
+        self
     }
 
     pub(crate) fn resume_claude(
@@ -392,6 +399,12 @@ impl AgentArgs {
         self.cwd = Some(workspace);
         self.claude_resume = Some(session);
         Ok(self)
+    }
+
+    pub(crate) fn local_claude_available(&self) -> bool {
+        self.claude_api_key.is_some()
+            || self.claude_auth.has_saved_credentials()
+            || self.selected_harness().ok() == Some(HarnessFamily::Claude)
     }
 
     pub(crate) fn harness_model(&self) -> Result<HarnessModel> {
@@ -550,6 +563,10 @@ impl AgentArgs {
         self.browser.uses_persistent_profile()
     }
 
+    pub(crate) const fn tui_reasoning_mode(&self) -> ReasoningMode {
+        self.reasoning_mode
+    }
+
     pub(crate) fn thinking(&self) -> Thinking {
         self.selected_harness()
             .ok()
@@ -652,8 +669,6 @@ impl AgentArgs {
         } else {
             None
         };
-        // Browser interaction is supplied by CUA, including for the direct CLI.
-        let configured_browser = None;
         let mpp_enabled = self.mpp.is_enabled();
         if mpp_enabled && !matches!(responses_transport, ResponsesTransport::Https) {
             return Err(eyre!(
@@ -965,7 +980,6 @@ impl AgentArgs {
             subagent_updates,
             mpp_adapter,
             mcp: mcp_handle,
-            browser: configured_browser,
             vm: configured_vm,
             model: model.into(),
         })

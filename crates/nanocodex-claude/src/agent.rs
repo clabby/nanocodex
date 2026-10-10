@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 mod durable;
 mod images;
+mod shared;
 use crate::execution::{Admission, ClaudeExecutionPolicy, Step};
 pub use durable::rewind_checkpoint;
 use durable::{Cursor, Effect, Snapshot};
@@ -136,6 +137,39 @@ pub struct ClaudeToolInvocation {
     pub instruction_revision: Option<u64>,
     /// Embedding-private inherited tool context; never serialized to the model.
     pub host_context: Option<Arc<str>>,
+    /// Live nested Code Mode progress for `exec`/`wait` observations. Other
+    /// tools receive `None`; hosts without live updates may ignore it.
+    pub progress: Option<ClaudeToolProgress>,
+}
+/// One live nested Code Mode update reported while `exec`/`wait` runs.
+#[derive(Clone, Debug)]
+pub enum ClaudeNestedToolUpdate {
+    /// A nested call was admitted and may now run.
+    Started {
+        call_id: String,
+        name: String,
+        input: Value,
+    },
+    /// A nested call reached its terminal result. The value uses the fields
+    /// of a `_nanocodex_code.calls` receipt: `call_id`, `name`, `input`,
+    /// `output`, `structured_result`, `success`, `started_after_ns`,
+    /// `duration_ns` and `metadata`.
+    Completed(Value),
+}
+/// Ordered sink for live nested Code Mode updates. Delivery is best effort;
+/// the final `_nanocodex_code` receipt still settles any call it reports.
+#[derive(Clone)]
+pub struct ClaudeToolProgress(tokio::sync::mpsc::UnboundedSender<ClaudeNestedToolUpdate>);
+impl ClaudeToolProgress {
+    /// Publishes one update; a finished observation silently drops it.
+    pub fn update(&self, update: ClaudeNestedToolUpdate) {
+        let _ = self.0.send(update);
+    }
+}
+impl std::fmt::Debug for ClaudeToolProgress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ClaudeToolProgress")
+    }
 }
 /// Native Claude tool result, including the host's success status.
 pub struct ClaudeToolReply {
@@ -264,6 +298,25 @@ impl ClaudeTools {
             Arc::new(move |input, context| Box::pin(function(input, context))),
         ));
         self
+    }
+    /// Registers a tool written against the shared nanocodex [`Tool`] contract,
+    /// the same implementation a Responses agent installs in its `Tools`
+    /// registry.
+    ///
+    /// The tool receives this call's session, turn, call and host-context
+    /// identities, but no Responses history. Its output schema is appended to
+    /// the description because Claude definitions have no field for it, and
+    /// multimodal output reaches Claude as serialized JSON text.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for freeform, namespace and other non-function tools,
+    /// which Claude cannot call.
+    ///
+    /// [`Tool`]: nanocodex_oai_tools::Tool
+    pub fn shared_tool<T: nanocodex_oai_tools::Tool>(mut self, tool: T) -> Result<Self> {
+        self.tools.push(shared::bridge(tool)?);
+        Ok(self)
     }
 }
 type DynamicToolsFactory = Arc<dyn Fn() -> ClaudeTools + Send + Sync>;
@@ -1339,6 +1392,8 @@ impl ClaudeBuilder {
             sequence: AtomicU64::new(1),
             accepted_turns: AtomicU64::new(accepted_turns),
             steering: Mutex::new(HashMap::new()),
+            live_nested_starts: std::sync::Mutex::new(LiveNestedStarts::default()),
+            code_call_summaries: std::sync::Mutex::new(HashMap::new()),
         });
         *native_factory
             .state
@@ -1405,6 +1460,68 @@ fn event_image_reference(value: Option<&Value>) -> Value {
     } else {
         Value::Object(reference)
     }
+}
+
+/// Persisted presentation summary of one nested call: identity, tool, status
+/// and timing plus a small input. Outputs are never retained here.
+fn nested_call_summary(call: &Value) -> Option<Value> {
+    const INPUT_BYTES: usize = 512;
+    let call_id = call.get("call_id")?.as_str()?;
+    let name = call.get("name")?.as_str()?;
+    let input = call.get("input").filter(|input| !input.is_null());
+    let retained = input.filter(|input| bounded_json_len(input, INPUT_BYTES) <= INPUT_BYTES);
+    let parent = call_id.split_once("/code-").map(|(parent, _)| parent);
+    let mut summary = json!({
+        "call_id": call_id, "parent_call_id": parent, "name": name, "input": retained,
+        "status": if call.get("success").and_then(Value::as_bool) == Some(true) { "completed" } else { "failed" },
+        "duration_ns": call.get("duration_ns"),
+    });
+    if input.is_some() && retained.is_none() {
+        summary["input_truncated"] = Value::Bool(true);
+    }
+    Some(summary)
+}
+
+/// Approximate encoded JSON size that stops counting once it exceeds `limit`,
+/// so a large Write/Edit payload is never serialized just to be rejected.
+fn bounded_json_len(value: &Value, limit: usize) -> usize {
+    fn walk(value: &Value, total: &mut usize, limit: usize) {
+        if *total > limit {
+            return;
+        }
+        match value {
+            Value::Null | Value::Bool(_) => *total += 5,
+            Value::Number(_) => *total += 20,
+            Value::String(text) => *total += text.len() + 2,
+            Value::Array(items) => {
+                *total += 2;
+                for item in items {
+                    walk(item, total, limit);
+                    *total += 1;
+                    if *total > limit {
+                        return;
+                    }
+                }
+            }
+            Value::Object(fields) => {
+                *total += 2;
+                for (key, item) in fields {
+                    *total += key.len() + 4;
+                    walk(item, total, limit);
+                    if *total > limit {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let mut total = 0;
+    walk(value, &mut total, limit);
+    total
+}
+
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Bounded nested Code Mode tool.result payload fields.
@@ -1917,6 +2034,14 @@ struct Conversation {
     admitted_tool_ids: HashSet<String>,
     #[serde(default)]
     recovery_notices: Vec<String>,
+    // Non-secret presentation summaries of nested Code Mode calls per committed
+    // exec/wait tool_use, so resumed transcripts can rebuild their child cards.
+    // Never sent to the provider; bounded to the newest rounds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    code_calls: Vec<Value>,
+    // Older rounds evicted from `code_calls` by its round/byte budget.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    code_calls_omitted_rounds: u64,
     messages: Vec<Message>,
     summary: String,
     active_context_tokens: u64,
@@ -1930,6 +2055,32 @@ struct Conversation {
     container: Option<String>,
 }
 impl Conversation {
+    const CODE_CALL_ROUNDS: usize = 256;
+    const CODE_CALLS_PER_ROUND: usize = 64;
+    // Explicit history budget for all retained rounds (~1 MiB of JSON).
+    const CODE_CALL_BYTES: usize = 1024 * 1024;
+
+    /// Retains one round's nested-call summaries within explicit call, round
+    /// and byte budgets. Truncation is recorded (`omitted_calls` per round,
+    /// `code_calls_omitted_rounds` overall) so a resumed view stays honest.
+    fn retain_code_calls(&mut self, tool_use_id: &str, mut calls: Vec<Value>) {
+        let omitted = calls.len().saturating_sub(Self::CODE_CALLS_PER_ROUND);
+        calls.truncate(Self::CODE_CALLS_PER_ROUND);
+        let mut round = json!({"tool_use_id": tool_use_id, "calls": calls});
+        if omitted > 0 {
+            round["omitted_calls"] = json!(omitted);
+        }
+        self.code_calls.push(round);
+        let size = |round: &Value| bounded_json_len(round, usize::MAX);
+        let mut total = self.code_calls.iter().map(size).sum::<usize>();
+        while self.code_calls.len() > Self::CODE_CALL_ROUNDS
+            || (total > Self::CODE_CALL_BYTES && !self.code_calls.is_empty())
+        {
+            total = total.saturating_sub(size(&self.code_calls.remove(0)));
+            self.code_calls_omitted_rounds = self.code_calls_omitted_rounds.saturating_add(1);
+        }
+    }
+
     const fn allows_auto_compaction(&self) -> bool {
         !self.auto_compaction_suppressed
             && (self.rapid_compactions < 2 || self.rounds_since_compaction >= 3)
@@ -2219,7 +2370,7 @@ impl AgentFactory for ClaudeNativeFactory {
                 .map_err(|_| unsupported("Claude fork boundary lock poisoned"))?
                 .clone();
             let mut snapshot = if let Some(snapshot) = dispatch {
-                snapshot
+                Arc::unwrap_or_clone(snapshot)
             } else {
                 let conversation = state.conversation.lock().await;
                 if state.stopped.load(Ordering::SeqCst) {
@@ -2331,7 +2482,7 @@ impl AgentFactory for ClaudeNativeFactory {
 // The parent keeps its conversation lock throughout dispatch. Publishing a
 // separate immutable pre-batch boundary allows native callback forks without
 // admitting the still-running batch or inventing tool-result receipts.
-struct DispatchForkBoundary<'a>(&'a std::sync::RwLock<Option<Snapshot>>);
+struct DispatchForkBoundary<'a>(&'a std::sync::RwLock<Option<Arc<Snapshot>>>);
 impl Drop for DispatchForkBoundary<'_> {
     fn drop(&mut self) {
         *self.0.write().expect("fork boundary lock") = None;
@@ -2430,11 +2581,12 @@ struct State {
     parallel_safe_tools: HashSet<String>,
     conversation: Mutex<Conversation>,
     // Native context before the active tool batch; callbacks must not lock conversation.
-    dispatch_fork: std::sync::RwLock<Option<Snapshot>>,
+    dispatch_fork: std::sync::RwLock<Option<Arc<Snapshot>>>,
     // Latest committed boundary of the running turn: its start, then each tool
     // batch. Residency/durability checkpoints read it while the turn holds
     // `conversation`, so a child can resume without replaying finished rounds.
-    round_boundary: std::sync::RwLock<Option<Snapshot>>,
+    /// Shares one allocation with [`Self::dispatch_fork`] while tools run.
+    round_boundary: std::sync::RwLock<Option<Arc<Snapshot>>>,
     policy: Option<Arc<dyn ClaudeExecutionPolicy>>,
     admission: Mutex<()>,
     idle: Notify,
@@ -2446,6 +2598,140 @@ struct State {
     sequence: AtomicU64,
     accepted_turns: AtomicU64,
     steering: Mutex<HashMap<BackendTurnKey, TurnSteering>>,
+    // Nested Code Mode calls whose start was published live but whose result
+    // has not been published yet. A yielded exec can finish them in a later wait.
+    live_nested_starts: std::sync::Mutex<LiveNestedStarts>,
+    // Nested-call summaries of finished exec/wait calls awaiting their round commit.
+    code_call_summaries: std::sync::Mutex<HashMap<String, Vec<Value>>>,
+}
+/// Bounded set of open live nested starts, oldest evicted first.
+#[derive(Default)]
+struct LiveNestedStarts {
+    open: HashSet<String>,
+    order: std::collections::VecDeque<String>,
+}
+impl LiveNestedStarts {
+    const LIMIT: usize = 4096;
+    fn insert(&mut self, call_id: &str) -> bool {
+        if self.open.contains(call_id) {
+            return false;
+        }
+        while self.open.len() >= Self::LIMIT {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.open.remove(&oldest);
+        }
+        if self.order.len() >= Self::LIMIT * 2 {
+            let open = &self.open;
+            self.order.retain(|id| open.contains(id));
+        }
+        self.open.insert(call_id.to_owned());
+        self.order.push_back(call_id.to_owned());
+        true
+    }
+    fn remove(&mut self, call_id: &str) -> bool {
+        self.open.remove(call_id)
+    }
+}
+/// Live nested calls started by one exec/wait observation. Calls that a
+/// yielded cell still runs are released for a later wait; any other open call
+/// is settled as outcome-unknown when the observation fails or is dropped.
+struct LiveNestedCalls<'a> {
+    state: &'a State,
+    events: &'a AgentEventPublisher,
+    model_call_index: u32,
+    fallback_parent: &'a str,
+    open: Vec<(String, String, Instant)>,
+    completed: HashSet<String>,
+    // Summaries of calls settled as unknown, for the persisted round summary.
+    unknown: Vec<Value>,
+}
+impl LiveNestedCalls<'_> {
+    const UNKNOWN: &'static str = "Code Mode observation ended before this nested call reported a result; it may still be running or may have finished. Outcome unknown: do not assume it did not run or automatically repeat it.";
+    fn parent(&self, call_id: &str) -> String {
+        call_id
+            .split_once("/code-")
+            .map_or(self.fallback_parent, |(parent, _)| parent)
+            .to_owned()
+    }
+    fn publish(&mut self, update: ClaudeNestedToolUpdate) {
+        match update {
+            ClaudeNestedToolUpdate::Started {
+                call_id,
+                name,
+                input,
+            } => {
+                if self.completed.contains(&call_id)
+                    || !self
+                        .state
+                        .live_nested_starts
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(&call_id)
+                {
+                    return;
+                }
+                let parent = self.parent(&call_id);
+                self.state.emit(
+                    self.events,
+                    AgentEventKind::ToolCall,
+                    json!({
+                        "call_id": call_id, "tool": name, "arguments": input,
+                        "model_call_index": self.model_call_index, "parent_call_id": parent,
+                    }),
+                );
+                self.open.push((call_id, name, Instant::now()));
+            }
+            ClaudeNestedToolUpdate::Completed(call) => {
+                let Some(call_id) = call.get("call_id").and_then(Value::as_str) else {
+                    return;
+                };
+                if self.completed.contains(call_id) {
+                    return;
+                }
+                let parent = json!(self.parent(call_id));
+                self.state.publish_nested_receipt(
+                    self.events,
+                    self.model_call_index,
+                    &call,
+                    &parent,
+                );
+                self.open.retain(|(open, _, _)| open != call_id);
+                self.completed.insert(call_id.to_owned());
+            }
+        }
+    }
+    /// The cell still runs: its open calls finish in a later observation.
+    fn release_running(&mut self) {
+        self.open.clear();
+    }
+    /// The observation ended without this call's receipt. The nested
+    /// operation may still run or may have finished: report that truthfully,
+    /// and keep its start open so a later wait can still publish the result.
+    fn settle_unknown(&mut self) {
+        for (call_id, tool, began) in std::mem::take(&mut self.open) {
+            let parent = self.parent(&call_id);
+            self.state.emit(
+                self.events,
+                AgentEventKind::ToolResult,
+                json!({
+                    "call_id": call_id, "tool": tool, "status": "unknown",
+                    "duration_ns": began.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                    "started_after_ns": null, "result": {"text": Self::UNKNOWN},
+                    "outcome_unknown": true, "parent_call_id": parent,
+                }),
+            );
+            self.unknown.push(json!({
+                "call_id": call_id, "parent_call_id": parent, "name": tool, "status": "unknown",
+            }));
+        }
+    }
+}
+impl Drop for LiveNestedCalls<'_> {
+    fn drop(&mut self) {
+        self.settle_unknown();
+    }
 }
 #[derive(Default)]
 struct Cancellation {
@@ -2547,6 +2833,10 @@ impl From<NanocodexError> for ResponseFailure {
 struct ResponseOutcome {
     message: crate::MessageResponse,
     upgrade: Option<durable::CodeOnlyUpgrade>,
+    /// The response came from a settled durable receipt. Its tool calls may
+    /// have been dispatched before an owner loss; a fresh response's calls
+    /// cannot have been.
+    replayed: bool,
 }
 struct ResponseContext<'a> {
     disable_tools: bool,
@@ -2581,6 +2871,59 @@ impl State {
             .map(|resolve| json!(resolve(&self.session_id)))
             .or_else(|| self.system_blocks.as_ref().map(|blocks| json!(blocks)))
             .or_else(|| (!self.system.is_empty()).then(|| json!(self.system)))
+    }
+    /// Publishes one nested Code Mode receipt, adding its start first unless
+    /// a live update already published it.
+    fn publish_nested_receipt(
+        &self,
+        events: &AgentEventPublisher,
+        model_call_index: u32,
+        call: &Value,
+        parent: &Value,
+    ) {
+        let (Some(call_id), Some(tool)) = (
+            call.get("call_id").and_then(Value::as_str),
+            call.get("name").and_then(Value::as_str),
+        ) else {
+            return;
+        };
+        let started = self
+            .live_nested_starts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(call_id);
+        if !started {
+            self.emit(
+                events,
+                AgentEventKind::ToolCall,
+                json!({
+                    "call_id": call_id, "tool": tool, "arguments": call.get("input"),
+                    "model_call_index": model_call_index, "parent_call_id": parent,
+                }),
+            );
+        }
+        let mut payload = nested_event_result(call);
+        payload.extend([
+            ("call_id".to_owned(), json!(call_id)),
+            ("tool".to_owned(), json!(tool)),
+            (
+                "status".to_owned(),
+                json!(
+                    if call.get("success").and_then(Value::as_bool) == Some(true) {
+                        "completed"
+                    } else {
+                        "failed"
+                    }
+                ),
+            ),
+            ("duration_ns".to_owned(), json!(call.get("duration_ns"))),
+            (
+                "started_after_ns".to_owned(),
+                json!(call.get("started_after_ns")),
+            ),
+            ("parent_call_id".to_owned(), parent.clone()),
+        ]);
+        self.emit(events, AgentEventKind::ToolResult, Value::Object(payload));
     }
     fn emit(&self, events: &AgentEventPublisher, kind: AgentEventKind, mut payload: Value) {
         if let Some(payload) = payload.as_object_mut() {
@@ -2730,7 +3073,7 @@ impl State {
     }
     async fn response(
         &self,
-        messages: Vec<Message>,
+        messages: &[Message],
         tools: Vec<ClaudeToolSpec>,
         cancel: &Cancellation,
         events: Option<&AgentEventPublisher>,
@@ -2784,8 +3127,17 @@ impl State {
             .template
             .cloned()
             .unwrap_or_else(|| self.request_template(self.speed()));
-        request.messages = messages;
-        separate_tool_references(&mut request.messages);
+        // The request owns a copy of the transcript only while it is encoded
+        // and sent. Streaming can last minutes; holding it for the whole round
+        // trip doubled each concurrently running agent's conversation memory.
+        let mut suffix: Vec<Message> = Vec::new();
+        let fill = |request: &mut MessagesRequest, suffix: &[Message]| {
+            request.messages = Vec::with_capacity(messages.len() + suffix.len());
+            request.messages.extend_from_slice(messages);
+            request.messages.extend_from_slice(suffix);
+            separate_tool_references(&mut request.messages);
+        };
+        fill(&mut request, &suffix);
         request.tools = tools;
         request.container = context.container.map(str::to_owned);
         if request.diagnostics.is_some() {
@@ -2805,7 +3157,7 @@ impl State {
         let admitted = match &context.effect {
             Some(effect) => {
                 effect
-                    .begin(
+                    .begin_encoded(
                         "model",
                         client.durable_request(&request).map_err(provider_error)?,
                     )
@@ -2824,6 +3176,7 @@ impl State {
                 return Ok(ResponseOutcome {
                     message: response,
                     upgrade: None,
+                    replayed: true,
                 });
             }
             Step::Execute if needs_upgrade => {
@@ -2852,6 +3205,7 @@ impl State {
             request
                 .messages
                 .push(Message::text(Role::User, &upgrade.notice));
+            suffix.push(Message::text(Role::User, &upgrade.notice));
             // Retain uncertainty from the retired request even if the strict
             // replacement fails or is cancelled before producing a response.
             recovery = Some(ServerRecovery {
@@ -2860,7 +3214,7 @@ impl State {
             });
             if let Some(effect) = &replacement_effect
                 && let Step::Replay(value) = effect
-                    .begin(
+                    .begin_encoded(
                         "model",
                         client.durable_request(&request).map_err(provider_error)?,
                     )
@@ -2871,6 +3225,7 @@ impl State {
                 return Ok(ResponseOutcome {
                     message: response,
                     upgrade: Some(upgrade.clone()),
+                    replayed: true,
                 });
             }
         }
@@ -2880,6 +3235,7 @@ impl State {
         let max_attempts = if context.disable_tools { 3 } else { 5 };
         let mut attempt = 0;
         let mut dispatched: Option<u64> = None;
+        request.messages = Vec::new();
         loop {
             if cancel.flag.load(Ordering::SeqCst) {
                 return Err(ResponseFailure {
@@ -2900,12 +3256,16 @@ impl State {
             // Pre-send work (durable admission, output gate, request build)
             // is the part of time-to-first-event spent before the provider fetch.
             dispatched.get_or_insert_with(&elapsed_ns);
+            // Rebuild the identical admitted request; preparation already
+            // fixed its system blocks, and the transcript is unchanged.
+            fill(&mut request, &suffix);
             let opened = tokio::select! {
                 result = client.stream(&request) => result,
                 () = cancel.cancelled() => return Err(ResponseFailure {
                     error: NanocodexError::TurnCancelled, recovery,
                 }),
             };
+            request.messages = Vec::new();
             let result = match opened {
                 Err(error) => Err(error),
                 Ok(mut stream) => {
@@ -2987,6 +3347,7 @@ impl State {
                     return Ok(ResponseOutcome {
                         message: response,
                         upgrade,
+                        replayed: false,
                     });
                 }
                 Err(error) => error,
@@ -3079,7 +3440,7 @@ impl State {
         // Publish the pre-turn boundary before mutating; a checkpoint taken
         // during this turn must never wait for the turn to release its lock.
         if let Ok(boundary) = self.snapshot(&conversation).await {
-            *self.round_boundary.write().expect("round boundary lock") = Some(boundary);
+            *self.round_boundary.write().expect("round boundary lock") = Some(Arc::new(boundary));
         }
         let mut result = self
             .run_locked(&mut conversation, &request, speed, &cancel)
@@ -3344,7 +3705,7 @@ impl State {
         messages.push(Message::text(Role::User, COMPACTION_INSTRUCTIONS));
         let response = self
             .response(
-                messages,
+                &messages,
                 tools.clone(),
                 cancel,
                 None,
@@ -3626,22 +3987,58 @@ impl State {
             call_id: id.to_owned(),
             instruction_revision: cursor.instruction_revision,
             host_context: self.host_context.clone(),
+            progress: None,
         };
-        let (content, is_error, metadata, structured_result) =
-            match handler(input.clone(), invocation).await {
-                Ok(reply) => (
-                    reply.content,
-                    reply.is_error,
-                    reply.metadata,
-                    reply.structured_result,
-                ),
-                Err(reason) if reason == ClaudeTools::HOST_INTERRUPTED => {
-                    return Err(durable::recovery_error(
-                        "Claude tool host execution interrupted",
-                    ));
+        // Code Mode observations stream nested starts and results while the
+        // cell runs, exactly like the Codex driver. The final receipt below
+        // remains authoritative for anything the host did not report live.
+        let mut live = LiveNestedCalls {
+            state: self,
+            events,
+            model_call_index: index,
+            fallback_parent: id,
+            open: Vec::new(),
+            completed: HashSet::new(),
+            unknown: Vec::new(),
+        };
+        let outcome = if matches!(name, "exec" | "wait") {
+            let (sender, mut updates) = tokio::sync::mpsc::unbounded_channel();
+            let mut invocation = invocation;
+            invocation.progress = Some(ClaudeToolProgress(sender));
+            let call = handler(input.clone(), invocation);
+            tokio::pin!(call);
+            let outcome = loop {
+                tokio::select! {
+                    biased;
+                    Some(update) = updates.recv() => live.publish(update),
+                    outcome = &mut call => break outcome,
                 }
-                Err(reason) => (ToolResultContent::Text(reason), true, None, None),
             };
+            while let Ok(update) = updates.try_recv() {
+                live.publish(update);
+            }
+            outcome
+        } else {
+            handler(input.clone(), invocation).await
+        };
+        let (content, is_error, metadata, structured_result) = match outcome {
+            Ok(reply) => (
+                reply.content,
+                reply.is_error,
+                reply.metadata,
+                reply.structured_result,
+            ),
+            Err(reason) if reason == ClaudeTools::HOST_INTERRUPTED => {
+                live.settle_unknown();
+                return Err(durable::recovery_error(
+                    "Claude tool host execution interrupted",
+                ));
+            }
+            Err(reason) => {
+                live.settle_unknown();
+                (ToolResultContent::Text(reason), true, None, None)
+            }
+        };
         // The handler returned a settled result; the normal event below is the
         // terminal one. A host interruption above leaves the guard open.
         started.open = false;
@@ -3654,46 +4051,49 @@ impl State {
                 .and_then(|value| value.get("_nanocodex_code"))
             && let Some(calls) = code.get("calls").and_then(Value::as_array)
         {
+            let parent = json!(code.get("origin_call_id"));
             for call in calls {
-                let (Some(call_id), Some(tool)) = (
-                    call.get("call_id").and_then(Value::as_str),
-                    call.get("name").and_then(Value::as_str),
-                ) else {
+                // Live updates already published this receipt.
+                if call
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|call_id| live.completed.contains(call_id))
+                {
                     continue;
-                };
-                self.emit(
-                    events,
-                    AgentEventKind::ToolCall,
-                    json!({
-                        "call_id": call_id, "tool": tool, "arguments": call.get("input"),
-                        "model_call_index": index, "parent_call_id": code.get("origin_call_id"),
-                    }),
-                );
-                let mut payload = nested_event_result(call);
-                payload.extend([
-                    ("call_id".to_owned(), json!(call_id)),
-                    ("tool".to_owned(), json!(tool)),
-                    (
-                        "status".to_owned(),
-                        json!(
-                            if call.get("success").and_then(Value::as_bool) == Some(true) {
-                                "completed"
-                            } else {
-                                "failed"
-                            }
-                        ),
-                    ),
-                    ("duration_ns".to_owned(), json!(call.get("duration_ns"))),
-                    (
-                        "started_after_ns".to_owned(),
-                        json!(call.get("started_after_ns")),
-                    ),
-                    (
-                        "parent_call_id".to_owned(),
-                        json!(code.get("origin_call_id")),
-                    ),
-                ]);
-                self.emit(events, AgentEventKind::ToolResult, Value::Object(payload));
+                }
+                self.publish_nested_receipt(events, index, call, &parent);
+            }
+        }
+        // A yielded cell keeps its open calls for a later wait (hosts that omit
+        // `running` are treated as still running). A finished cell, or a reply
+        // without a Code Mode receipt, cannot report them any more.
+        if metadata
+            .as_ref()
+            .and_then(|value| value.get("_nanocodex_code"))
+            .is_some_and(|code| code.get("running").and_then(Value::as_bool) != Some(false))
+        {
+            live.release_running();
+        }
+        live.settle_unknown();
+        if matches!(name, "exec" | "wait") {
+            let mut calls = metadata
+                .as_ref()
+                .and_then(|value| value.get("_nanocodex_code"))
+                .and_then(|code| code.get("calls"))
+                .and_then(Value::as_array)
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .filter_map(nested_call_summary)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            calls.append(&mut live.unknown);
+            if !calls.is_empty() {
+                self.code_call_summaries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(id.to_owned(), calls);
             }
         }
         let mut payload =
@@ -3994,7 +4394,7 @@ impl State {
             }
             let response = self
                 .response(
-                    pending.clone(),
+                    &pending,
                     cursor.template.tools.clone(),
                     cancel,
                     Some(&request.events),
@@ -4033,6 +4433,12 @@ impl State {
                     return Err(failure.error);
                 }
             };
+            // Only a replayed response can carry Code Mode calls admitted by a
+            // lost owner. A response generated in this execution starts a
+            // fresh round whose exec cells have never run anywhere.
+            if !response.replayed && cursor.recovered_code_index == Some(index) {
+                cursor.recovered_code_index = None;
+            }
             if let Some(upgrade) = response.upgrade {
                 cursor.template.tools = upgrade.code_only_tools;
                 self.classify_code_only_tools(&mut cursor);
@@ -4241,9 +4647,15 @@ impl State {
             }
             // Capture the fork boundary before reserving this unfinished batch's
             // call identities. The child receives completed history and its guards.
-            let mut fork_snapshot = self.snapshot(conversation).await?;
+            // Snapshot without cloning the superseded transcript first: the
+            // boundary's messages are the pending round.
+            let committed = std::mem::take(&mut conversation.messages);
+            let fork_snapshot = self.snapshot(conversation).await;
+            conversation.messages = committed;
+            let mut fork_snapshot = fork_snapshot?;
             fork_snapshot.conversation.messages = pending.clone();
             fork_snapshot.conversation.summary.clear();
+            let fork_snapshot = Arc::new(fork_snapshot);
             // Reserve identities before invoking any handler. Compaction may
             // discard their transcript, but must not make an old effect callable
             // again. This protection is session-local, not crash-durable.
@@ -4366,6 +4778,10 @@ impl State {
             }
             drop(fork_boundary);
             let has_tool_calls = !tool_calls.is_empty();
+            let code_call_ids = tool_calls
+                .iter()
+                .map(|(id, _, _, _)| id.to_string())
+                .collect::<Vec<_>>();
             pending.push(Message {
                 role: Role::Assistant,
                 content: response.content,
@@ -4378,6 +4794,17 @@ impl State {
                 // before returning cancellation or making another provider call.
                 // Process-restart durability still belongs to the embedding host.
                 conversation.messages = pending.clone();
+                {
+                    let mut summaries = self
+                        .code_call_summaries
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for id in &code_call_ids {
+                        if let Some(calls) = summaries.remove(id) {
+                            conversation.retain_code_calls(id, calls);
+                        }
+                    }
+                }
                 conversation.previous_message_id = previous_message_id.clone();
                 conversation.summary.clear();
                 conversation.pending_continuation = true;
@@ -4398,7 +4825,8 @@ impl State {
                 // This round is now committed history: expose it to checkpoints
                 // taken while the next provider call holds the conversation.
                 if let Ok(boundary) = self.snapshot(conversation).await {
-                    *self.round_boundary.write().expect("round boundary lock") = Some(boundary);
+                    *self.round_boundary.write().expect("round boundary lock") =
+                        Some(Arc::new(boundary));
                 }
                 if interrupted {
                     return Err(NanocodexError::TurnCancelled);
@@ -4767,7 +5195,8 @@ impl LifecycleBackend for Driver {
                                 .ok()
                                 .and_then(|boundary| boundary.clone())
                         });
-                    if let Some(mut snapshot) = boundary {
+                    if let Some(snapshot) = boundary {
+                        let mut snapshot = Arc::unwrap_or_clone(snapshot);
                         if state.stopped.load(Ordering::SeqCst) {
                             return Err(NanocodexError::AgentStopped);
                         }
@@ -4873,7 +5302,7 @@ impl LifecycleBackend for Driver {
                         let (id, admission) = policy.admit(candidate, input, automatic).await?;
                         request.request_id = Some(id.clone());
                         request.events = request.events.with_turn_id(id.clone());
-                        let terminal = match admission {
+                        let mut terminal = match admission {
                             Admission::Completed { output, .. } => {
                                 Some(durable::replay(id.clone(), output))
                             }
@@ -4883,6 +5312,23 @@ impl LifecycleBackend for Driver {
                             Admission::Cancelled => Some(Err(NanocodexError::TurnCancelled)),
                             Admission::Execute | Admission::Resume => None,
                         };
+                        if terminal.is_none()
+                            && let Err(error) = policy.begin_attempt(id.clone()).await
+                        {
+                            // A queued turn admitted behind an unfinished earlier
+                            // operation cannot start until that one settles. Its
+                            // cancellation must not wait for it: no attempt began,
+                            // so the durable state can retire it without a checkpoint.
+                            let cancelled = request.cancel_on_admission
+                                && error.execution_policy_disposition()
+                                    == Some(nanocodex_agent::ExecutionPolicyDisposition::Retry)
+                                && policy.cancel_unstarted(id.clone()).await.unwrap_or(false);
+                            if !cancelled {
+                                let _ = policy.release(id).await;
+                                return Err(error);
+                            }
+                            terminal = Some(Err(NanocodexError::TurnCancelled));
+                        }
                         if let Some(result) = terminal {
                             state.accepted_turns.fetch_add(1, Ordering::SeqCst);
                             let (status, kind) = match &result {
@@ -4911,10 +5357,6 @@ impl LifecycleBackend for Driver {
                                 request_id: Some(id),
                                 result: Box::pin(async move { result }),
                             });
-                        }
-                        if let Err(error) = policy.begin_attempt(id.clone()).await {
-                            let _ = policy.release(id).await;
-                            return Err(error);
                         }
                         request.prompt = match crate::prompt::freeze_admitted(request.prompt, policy.as_ref(), &id).await {
                             Ok(prompt) => prompt,

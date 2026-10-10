@@ -59,7 +59,6 @@ jobs:
           ./scripts/check-docs.sh
 
       - name: Test installer
-        if: ${{ false }}
         run: ./scripts/test-install.sh
 
   prepare-release:
@@ -150,7 +149,12 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          cache-on-failure: false
+      - uses: ./.github/actions/docker-hub-mirror
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
       - name: Prepare embedded Linux Wayland helpers
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
@@ -164,27 +168,46 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
           STABLE_GIT_COMMIT: ${{ github.sha }}
         run: |
-          cargo build --locked --release \
-            --package nanocodex-bin --bin nanocodex --features tempo \
+          # Release-stage Hand identity: computed from the Hand package closure
+          # before compiling, verified against the Hand's Cargo dep-info after.
+          features=nanocodex-bin/tempo
+          payload=()
+          if [[ -n "${NANOCODEX_LINUX_SCREEN_BUNDLE:-}" ]]; then
+            # Distributable Linux Hands embed the helper payload named above.
+            features+=",nanocodex-hand-daemon/embedded-screen-helpers"
+            payload=(--payload "linux-screen-helpers=$NANOCODEX_LINUX_SCREEN_BUNDLE")
+          fi
+          NANOCODEX_HAND_IDENTITY="$(scripts/release/hand-source-identity.py compute \
+            --target ${{ matrix.target }} --profile release --features "$features" \
+            ${payload[@]+"${payload[@]}"} --report "$RUNNER_TEMP/hand-identity-inputs.json")"
+          export NANOCODEX_HAND_IDENTITY
+          echo "Hand source identity: $NANOCODEX_HAND_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
+          cargo build --locked --release --timings \
+            --package nanocodex-bin --package nanocodex-hand-daemon --features "$features" \
             --target ${{ matrix.target }}
-          cargo build --locked --release \
-            --package nanocodex2-bin --bin nanocodex2 \
-            --target ${{ matrix.target }}
+          scripts/release/hand-source-identity.py verify \
+            --report "$RUNNER_TEMP/hand-identity-inputs.json" \
+            --dep-info "target/${{ matrix.target }}/release/nanocodex-hand.d"
       - name: Verify shipped Linux Hand screen payload
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
         run: |
           python3 scripts/tests/linux-screen-helpers-bundle.py \
-            --binary "target/${{ matrix.target }}/release/nanocodex2" \
+            --binary "target/${{ matrix.target }}/release/nanocodex-hand" \
             "$NANOCODEX_LINUX_SCREEN_BUNDLE"
-      - name: Sign macOS VM hand host
+      - name: Sign the macOS Hand and Nanocodex.app
         if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_DEVELOPER_ID_TEAM_ID: ${{ secrets.MACOS_DEVELOPER_ID_TEAM_ID }}
         run: |
-          codesign --force --sign - \
-            --entitlements nanocodex-vm.entitlements \
-            "target/${{ matrix.target }}/release/nanocodex2"
-          codesign --verify --strict "target/${{ matrix.target }}/release/nanocodex2"
+          # Only the Hand starts libkrun VMM children and holds macOS privacy
+          # grants; the CLI keeps the default linker signature.
+          scripts/release/macos-sign-hand.sh \
+            "target/${{ matrix.target }}/release/nanocodex-hand" "${GITHUB_REF_NAME#v}" signed-hand
+          echo "macOS Hand signature: $(cat signed-hand/SIGNING)" >> "$GITHUB_STEP_SUMMARY"
       - uses: ./.github/actions/voice-release
         env:
           STABLE_GIT_COMMIT: ${{ github.sha }}
@@ -196,8 +219,18 @@ jobs:
         run: |
           mkdir dist
           cp "voice-dist/nanocodex-voice-${{ matrix.target }}.tar.gz" dist/
+          # nanocodex-* is the CLI; nanocodex2-* keeps the companion name for the Hand.
           cp "target/${{ matrix.target }}/release/nanocodex" "dist/${{ matrix.artifact }}"
-          cp "target/${{ matrix.target }}/release/nanocodex2" "dist/${{ matrix.companion }}"
+          if [[ -d signed-hand ]]; then
+            cp signed-hand/nanocodex2 "dist/${{ matrix.companion }}"
+            cp signed-hand/nanocodex-app-aarch64-apple-darwin.tar.gz dist/
+          else
+            cp "target/${{ matrix.target }}/release/nanocodex-hand" "dist/${{ matrix.companion }}"
+          fi
+          signing=unsigned
+          if [[ -f signed-hand/SIGNING ]]; then signing="$(cat signed-hand/SIGNING)"; fi
+          scripts/release/hand-identity.sh "target/${{ matrix.target }}/release/nanocodex" \
+            "${{ matrix.target }}" "$signing" dist
           gzip -n -9 -c "dist/${{ matrix.artifact }}" \
             > "dist/${{ matrix.artifact }}.gz"
           gzip -n -9 -c "dist/${{ matrix.companion }}" \
@@ -207,6 +240,15 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/*
           if-no-files-found: error
+      # Per-crate compile critical path for profiling; never a release asset.
+      - name: Retain Cargo build timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-timings-${{ matrix.target }}
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 30
 
   build-windows-hand:
     name: build Windows Hand installer
@@ -227,7 +269,10 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          cache-on-failure: false
       - name: Build Windows Hand payload
         shell: pwsh
         env:
@@ -235,16 +280,14 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
           STABLE_GIT_COMMIT: ${{ github.sha }}
         run: |
-          cargo build --locked --release --package nanocodex-bin --bin nanocodex --features tempo
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked --release --package nanocodex2-bin --bin nanocodex2
+          cargo build --locked --release --timings --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign payload when Authenticode is configured
         shell: pwsh
         run: >-
           ./windows/hand/sign.ps1 -Path @(
             "./target/release/nanocodex.exe",
-            "./target/release/nanocodex2.exe"
+            "./target/release/nanocodex-hand.exe"
           )
       - name: Build and sign one-click installer
         shell: pwsh
@@ -254,7 +297,7 @@ jobs:
           $version = $env:RELEASE_VERSION.TrimStart("v")
           ./windows/hand/build.ps1 `
             -Nanocodex ./target/release/nanocodex.exe `
-            -Nanocodex2 ./target/release/nanocodex2.exe `
+            -Nanocodex2 ./target/release/nanocodex-hand.exe `
             -Version $version `
             -NumericVersion $version
           ./windows/hand/sign.ps1 -Path ./dist/windows-hand/nanocodex-hand-setup-x86_64.exe
@@ -262,12 +305,20 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item target/release/nanocodex.exe dist/windows-hand/nanocodex-x86_64-pc-windows-msvc.exe
-          Copy-Item target/release/nanocodex2.exe dist/windows-hand/nanocodex2-x86_64-pc-windows-msvc.exe
+          Copy-Item target/release/nanocodex-hand.exe dist/windows-hand/nanocodex2-x86_64-pc-windows-msvc.exe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nanocodex-hand-x86_64-pc-windows-msvc
           path: dist/windows-hand/*
           if-no-files-found: error
+      - name: Retain Cargo build timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-timings-windows-hand
+          path: target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 30
 
   publish-crates:
     name: publish crates.io packages
@@ -308,7 +359,10 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          cache-on-failure: false
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -327,7 +381,6 @@ jobs:
           pnpm --filter nanocodex pack --pack-destination "$PWD/dist/npm"
           pnpm --filter nanocodex-vite pack --pack-destination "$PWD/dist/npm"
       - name: Test publishable packages
-        if: ${{ false }}
         run: |
           pnpm --filter nanocodex-tools test
           pnpm --filter nanocodex test
@@ -396,10 +449,28 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      # Release assets only (the Linux, macOS and Windows nanocodex-* artifacts);
+      # build telemetry artifacts are never published.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
+          pattern: nanocodex-*
           path: dist
           merge-multiple: true
+      - name: Test Hand reuse against a fake release store
+        shell: bash
+        run: scripts/release/test-reuse-unchanged-hand.sh
+      - name: Republish an unchanged Hand
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Compare with the latest published stable release.
+          previous=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          if [[ "$previous" == "$GITHUB_REF_NAME" ]]; then previous=""; fi
+          scripts/release/reuse-unchanged-hand.sh dist "$previous"
       - name: Generate checksums
         shell: bash
         run: |

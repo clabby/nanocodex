@@ -3,7 +3,8 @@
 
 //! Empty transcript decoration, animated alongside live UI activity.
 
-use crate::{config::ReasoningEffort, tui::theme::Theme};
+use crate::nanocodex2::tui::theme::ThemeExt as _;
+use crate::nanocodex2::{config::ReasoningEffort, tui::theme::Theme};
 use ratatui::{
     Frame,
     layout::{Position, Rect},
@@ -22,7 +23,7 @@ const MAX_HEIGHT: u16 = 9;
 const HORIZONTAL_MARGIN: u16 = 4;
 const VERTICAL_MARGIN: u16 = 2;
 const PIXELS: [&str; 4] = ["░", "▒", "▓", "█"];
-const WORDMARK: &str = "nanocodex2";
+const WORDMARK: &str = "nanocodex";
 
 pub(super) struct EmptyLogo {
     started_at: Instant,

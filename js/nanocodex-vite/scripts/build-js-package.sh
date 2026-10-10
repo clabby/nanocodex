@@ -66,9 +66,10 @@ cleanup() {
 trap cleanup EXIT
 
 cache_helper="js/nanocodex-vite/scripts/wasm-output-cache.mjs"
-# Downstream Turbo caches key on nanocodex#build inputs, which must cover every WASM source.
-node "$cache_helper" check-turbo
-# Exit 1 is a cache miss; any other failure means the input set is unresolvable.
+# The check also proves turbo.json hashes every WASM input into nanocodex#build,
+# so cached downstream Worker bundles cannot replay stale WASM after a Rust edit.
+# Exit 1 is a cache miss; any other failure means the input set is unresolvable
+# or not covered by Turbo.
 cache_status=0
 node "$cache_helper" check "$build_mode" || cache_status=$?
 if [[ "$cache_status" -eq 0 ]]; then
@@ -98,17 +99,33 @@ if [[ "$build_mode" == release ]]; then
     echo "missing Binaryen dependency for the Nanocodex release WASM build" >&2
     exit 1
   fi
-  # The npm package runs Binaryen compiled to JavaScript (~100 s for -Oz). A
-  # native wasm-opt of the same release writes byte-identical output in ~16 s,
-  # so NANOCODEX_WASM_OPT may name one; any version mismatch keeps the package.
-  if [[ -n "${NANOCODEX_WASM_OPT:-}" ]]; then
-    binaryen_version="$("$binaryen" --version)"
-    if [[ -x "$NANOCODEX_WASM_OPT" ]] \
-      && [[ "$("$NANOCODEX_WASM_OPT" --version 2>/dev/null)" == "$binaryen_version" ]]; then
-      binaryen="$NANOCODEX_WASM_OPT"
-    else
-      echo "NANOCODEX_WASM_OPT is not $binaryen_version; using the npm Binaryen package" >&2
+  binaryen_version="$("$binaryen" --version)"
+  native_binaryen="${NANOCODEX_WASM_OPT:-}"
+  if [[ -z "$native_binaryen" ]]; then
+    native_binaryen="$(node js/nanocodex-vite/scripts/native-binaryen.mjs)" || native_binaryen=""
+  fi
+  if [[ -n "$native_binaryen" && -x "$native_binaryen" ]] \
+    && [[ "$("$native_binaryen" --version 2>/dev/null)" == "$binaryen_version" ]]; then
+    binaryen="$native_binaryen"
+    # wasm-opt runs after Cargo, while dependent JS tasks wait on it. Use half
+    # the online CPUs (3..8) to leave room for concurrent builds and interactive
+    # use; output is identical for any worker count. Callers can explicitly
+    # choose a different positive native Binaryen worker count.
+    if [[ -z "${BINARYEN_CORES:-}" ]]; then
+      online_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 6)"
+      [[ "$online_cpus" =~ ^[1-9][0-9]*$ ]] || online_cpus=6
+      BINARYEN_CORES=$((online_cpus / 2))
+      if ((BINARYEN_CORES < 3)); then BINARYEN_CORES=3; fi
+      if ((BINARYEN_CORES > 8)); then BINARYEN_CORES=8; fi
     fi
+    export BINARYEN_CORES
+    if [[ ! "$BINARYEN_CORES" =~ ^[1-9][0-9]*$ ]]; then
+      echo "BINARYEN_CORES must be a positive integer" >&2
+      exit 1
+    fi
+    echo "Using native $binaryen_version ($BINARYEN_CORES workers)"
+  else
+    echo "Compatible native Binaryen unavailable; using pinned npm $binaryen_version" >&2
   fi
 fi
 fingerprint="$({
@@ -117,6 +134,7 @@ fingerprint="$({
   printf 'worker-bundler-v1-simd\n'
   # A source-cache miss must not bless bindings made by older generation policy.
   for generator in "$script_path" "$cache_helper" \
+    js/nanocodex-vite/scripts/native-binaryen.mjs \
     js/nanocodex-vite/scripts/wasm-memory-views.mjs \
     js/nanocodex/scripts/deduplicate-wasm.mjs \
     js/nanocodex/scripts/write-package-types.mjs \
@@ -147,18 +165,31 @@ fi
 generated_dir="$(mktemp -d)"
 worker_bindings="$generated_dir/worker"
 mkdir "$worker_bindings"
+# The targets write disjoint directories. Join every generator before
+# validating or publishing a stamp, including when one of them fails.
+bindgen_pids=()
 wasm-bindgen "$wasm_artifact" \
   --target nodejs \
   --out-dir js/nanocodex/pkg-node \
-  --out-name nanocodex
+  --out-name nanocodex &
+bindgen_pids+=("$!")
 wasm-bindgen "$wasm_artifact" \
   --target web \
   --out-dir js/nanocodex/pkg-web \
-  --out-name nanocodex
+  --out-name nanocodex &
+bindgen_pids+=("$!")
 wasm-bindgen "$wasm_artifact" \
   --target bundler \
   --out-dir "$worker_bindings" \
-  --out-name nanocodex
+  --out-name nanocodex &
+bindgen_pids+=("$!")
+bindgen_status=0
+for pid in "${bindgen_pids[@]}"; do
+  wait "$pid" || bindgen_status=1
+done
+if [[ "$bindgen_status" -ne 0 ]]; then
+  exit "$bindgen_status"
+fi
 cmp "$worker_bindings/nanocodex_bg.wasm" js/nanocodex/pkg-web/nanocodex_bg.wasm
 cp "$worker_bindings/nanocodex_bg.js" js/nanocodex/pkg-web/nanocodex_bg.js
 cp "$worker_bindings/nanocodex.js" js/nanocodex/pkg-web/nanocodex_worker.js

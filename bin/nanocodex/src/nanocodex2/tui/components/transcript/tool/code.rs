@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{Presentation, format_bytes};
-use crate::tui::{
+use crate::nanocodex2::tui::{
     theme::Theme,
     transcript::{ToolEntry, code_mode_output_text},
 };
@@ -13,11 +13,10 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
     if tool.family() == "wait" {
         return wait(tool, width, theme, expanded);
     }
-    let source = tool.arguments.as_str().unwrap_or_else(|| {
-        tool.arguments
-            .get("input")
-            .and_then(Value::as_str)
-            .unwrap_or("<source unavailable>")
+    let source = tool.arguments.as_str().or_else(|| {
+        ["code", "input"]
+            .into_iter()
+            .find_map(|key| tool.arguments.get(key).and_then(Value::as_str))
     });
     let result = tool.code_display_result.as_ref().or(tool.result.as_ref());
     let emitted = result.map_or(0, emitted_count);
@@ -34,10 +33,13 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
     if !expanded {
         return presentation;
     }
-    let details =
-        super::super::markdown::render(&format!("```javascript\n{source}\n```"), width, theme)
-            .lines;
-    let mut presentation = presentation.unselectable_details(details);
+    let mut presentation = presentation;
+    if let Some(source) = source.filter(|source| !source.trim().is_empty()) {
+        let details =
+            super::super::markdown::render(&format!("```javascript\n{source}\n```"), width, theme)
+                .lines;
+        presentation = presentation.unselectable_details(details);
+    }
     if let Some(result) = result {
         if let Some(items) = result.as_array() {
             for item in items {
@@ -50,6 +52,63 @@ pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: boo
     let size = result.map_or(0, |result| result.to_string().len());
     let noun = if emitted == 1 { "output" } else { "outputs" };
     presentation.footer(format!("{emitted} {noun} · {}", format_bytes(size)))
+}
+
+/// First human-readable emitted line of a Code Mode cell, without its status
+/// envelope, for the compact batch header. Structured payloads (a JSON value,
+/// or one label token directly followed by JSON, such as a printed tool
+/// receipt) stay in the expanded cell output and never become the header note.
+/// Resumed cells lack child results, so echoed receipts cannot be removed as
+/// exact child echoes there.
+pub(super) fn first_emitted_line(tool: &ToolEntry) -> Option<String> {
+    let result = tool.code_display_result.as_ref().or(tool.result.as_ref())?;
+    let items = match result {
+        Value::Array(items) => items.iter().collect::<Vec<_>>(),
+        other => vec![other],
+    };
+    items.into_iter().find_map(|item| {
+        let text = item
+            .as_str()
+            .or_else(|| item.get("text").and_then(Value::as_str))?;
+        let output = code_mode_output_text(text);
+        if structured_payload(output.trim()) {
+            return None;
+        }
+        output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !structured_line(line))
+            .map(super::super::markdown::sanitize)
+    })
+}
+
+/// Largest emitted text parsed to recognize a structured payload.
+const MAX_NOTE_JSON_BYTES: usize = 64 * 1024;
+
+/// A JSON object or array: parsed when small, recognized by its opening
+/// object key when large or truncated by event bounds.
+fn structured_payload(text: &str) -> bool {
+    if !text.starts_with(['{', '[']) {
+        return false;
+    }
+    if text.starts_with("{\"") || text.starts_with("[{") || text.starts_with("[\"") {
+        return true;
+    }
+    text.len() <= MAX_NOTE_JSON_BYTES
+        && serde_json::from_str::<Value>(text)
+            .is_ok_and(|value| value.is_object() || value.is_array())
+}
+
+/// A structured payload, optionally behind one label token such as
+/// `RESULT:` or `MARKER_`, with no human text around it.
+fn structured_line(line: &str) -> bool {
+    let Some(start) = line.find(['{', '[']) else {
+        return false;
+    };
+    let label = &line[..start];
+    label.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':' | '.')
+    }) && structured_payload(&line[start..])
 }
 
 fn emitted_count(result: &Value) -> usize {
@@ -143,7 +202,7 @@ fn wait(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presenta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::transcript::ToolState;
+    use crate::nanocodex2::tui::transcript::ToolState;
     use serde_json::json;
 
     #[test]

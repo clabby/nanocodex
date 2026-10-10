@@ -2747,7 +2747,6 @@ checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
- "futures-core",
  "mio",
  "parking_lot",
  "rustix 0.38.44",
@@ -5831,6 +5830,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-signer",
  "alloy-signer-local",
+ "anyhow",
  "arboard",
  "arcbox-ext4",
  "async-trait",
@@ -5840,19 +5840,23 @@ dependencies = [
  "chrono-tz",
  "clap",
  "criterion",
- "crossterm 0.28.1",
+ "crossterm 0.29.0",
+ "dark-light",
  "dotenvy",
  "eyre",
  "flate2",
  "fs2",
  "futures-util",
  "hex",
+ "hkdf",
  "ignore",
  "image",
  "indicatif",
  "jsonschema",
  "mpp",
  "nanocodex",
+ "nanocodex-agent",
+ "nanocodex-bin-shared",
  "nanocodex-browser",
  "nanocodex-cli-auth",
  "nanocodex-computer",
@@ -5860,27 +5864,35 @@ dependencies = [
  "nanocodex-egress",
  "nanocodex-eval",
  "nanocodex-eval-adapters",
+ "nanocodex-managed",
  "nanocodex-oai-tools",
  "nanocodex-observability",
  "nanocodex-subagents",
  "nanocodex-tui-control",
+ "nanocodex-tui-render",
  "nanocodex-vm",
  "nanocodex-voice",
+ "nanocodex-voice-native",
+ "nanocodex-voice-protocol",
  "nanousd",
  "nix 0.31.3",
+ "opusic-c",
+ "p256",
  "percent-encoding",
+ "png 0.18.1",
  "portable-pty",
- "pulldown-cmark 0.10.3",
  "rand 0.9.5",
- "ratatex",
- "ratatui 0.29.0",
+ "ratatui 0.30.2",
+ "ratatui-image 11.0.6",
  "regex",
  "reqwest",
  "rusqlite",
+ "rustls",
  "self-replace",
  "semver 1.0.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sha2 0.11.0",
  "shlex 2.0.1",
  "syntect",
@@ -5891,14 +5903,48 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.30.0",
+ "tokio-util",
  "toml",
  "tracing",
  "two-face",
  "unicode-segmentation",
  "unicode-width 0.2.0",
+ "url",
  "uuid",
- "vergen",
+ "vt100",
+ "webrtc",
+ "whoami 1.6.1",
  "yansi",
+ "zeroize",
+]
+
+[[package]]
+name = "nanocodex-bin-shared"
+version = "0.6.7"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "memchr",
+ "nanocodex",
+ "nanocodex-cli-auth",
+ "nanocodex-computer",
+ "nanocodex-managed",
+ "nanocodex-observability",
+ "nanocodex-remote",
+ "nix 0.31.3",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6018,6 +6064,22 @@ dependencies = [
  "sha2 0.11.0",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "nanocodex-decisions"
+version = "0.6.7"
+dependencies = [
+ "async-trait",
+ "axum",
+ "nanocodex",
+ "nanocodex-oai-tools",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -6210,6 +6272,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-hand-daemon"
+version = "0.6.7"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "dotenvy",
+ "flate2",
+ "fs2",
+ "futures-util",
+ "hex",
+ "image",
+ "kvm-ioctls",
+ "nanocodex",
+ "nanocodex-bin-shared",
+ "nanocodex-cli-auth",
+ "nanocodex-computer",
+ "nanocodex-hand",
+ "nanocodex-managed",
+ "nanocodex-oai-tools",
+ "nanocodex-remote",
+ "nanocodex-screen-supervisor",
+ "nanocodex-vm",
+ "nix 0.31.3",
+ "png 0.18.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shlex 2.0.1",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "webrtc",
+ "whoami 1.6.1",
+]
+
+[[package]]
 name = "nanocodex-managed"
 version = "0.6.7"
 dependencies = [
@@ -6292,6 +6401,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "http",
+ "httpdate",
  "image",
  "nanocodex-oai-api",
  "nanocodex-oai-tools-macros",
@@ -6396,6 +6506,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-screen-supervisor"
+version = "0.6.7"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nanocodex-subagents"
 version = "0.6.7"
 dependencies = [
@@ -6432,6 +6550,30 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "nanocodex-tui-render"
+version = "0.6.7"
+dependencies = [
+ "crossterm 0.29.0",
+ "image",
+ "png 0.18.1",
+ "pulldown-cmark",
+ "ratatex",
+ "ratatui 0.29.0",
+ "ratatui 0.30.2",
+ "ratatui-image 11.0.6",
+ "rayon",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
+ "url",
 ]
 
 [[package]]
@@ -6540,83 +6682,6 @@ dependencies = [
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "nanocodex2-bin"
-version = "0.6.7"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "arboard",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "criterion",
- "crossterm 0.29.0",
- "dark-light",
- "dotenvy",
- "eyre",
- "flate2",
- "fs2",
- "futures-util",
- "hex",
- "hkdf",
- "image",
- "kvm-ioctls",
- "nanocodex",
- "nanocodex-agent",
- "nanocodex-cli-auth",
- "nanocodex-computer",
- "nanocodex-hand",
- "nanocodex-managed",
- "nanocodex-oai-tools",
- "nanocodex-observability",
- "nanocodex-remote",
- "nanocodex-subagents",
- "nanocodex-tui-control",
- "nanocodex-vm",
- "nanocodex-voice-native",
- "nanocodex-voice-protocol",
- "nix 0.31.3",
- "opusic-c",
- "p256",
- "percent-encoding",
- "png 0.18.1",
- "portable-pty",
- "pulldown-cmark 0.13.4",
- "ratatui 0.30.2",
- "ratatui-image 11.0.6",
- "rayon",
- "reqwest",
- "rustls",
- "semver 1.0.28",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sha2 0.11.0",
- "shlex 2.0.1",
- "syntect",
- "sysinfo",
- "tar",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tokio-util",
- "toml",
- "tracing",
- "unicode-segmentation",
- "unicode-width 0.2.0",
- "url",
- "uuid",
- "vergen",
- "vt100",
- "webrtc",
- "whoami 1.6.1",
- "zeroize",
 ]
 
 [[package]]
@@ -8166,17 +8231,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "pulldown-cmark"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76979bea66e7875e7509c4ec5300112b316af87fa7a252ca91c448b32dfe3993"
-dependencies = [
- "bitflags 2.13.1",
- "memchr",
- "unicase",
 ]
 
 [[package]]
@@ -11923,18 +11977,6 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
-
-[[package]]
-name = "vergen"
-version = "8.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2990d9ea5967266ea0ccf413a4aa5c42a93dbcfda9cb49a97de6931726b12566"
-dependencies = [
- "anyhow",
- "cfg-if",
- "rustversion",
- "time",
-]
 
 [[package]]
 name = "version_check"

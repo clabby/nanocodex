@@ -11,7 +11,7 @@ import type { VaultFieldResolution } from "./browser-vault-injection";
 import { routeNativeInputDiscovery } from "./native-input-discovery";
 import { receiveManagedPreview, type PreviewBridgeEnv } from "./preview-bridge.ts";
 import { cleanupGmailInbox } from "./gmail-firehose-cleanup";
-import { observeClaudeRelease } from "./claude-lifecycle.mjs";
+import { engineMemoryBytes, observeClaudeRelease } from "./claude-lifecycle.mjs";
 import { mcpPayment } from "nanocodex/tempo";
 import { Claude } from 'nanocodex/worker';
 import { createManagedClaudeTools } from './claude-tools';
@@ -229,10 +229,12 @@ import {
 } from "./connector-status";
 import {
   DurableEventLog,
+  MAX_HISTORY_PAGE_BYTES,
   MAX_HISTORY_PAGE_SIZE,
   parseCursor,
   type DurableEvent,
   type DurableEventTail,
+  type HistoryBounds,
 } from "./durable-events";
 import { persistEventStreamFailure } from "./event-stream-failure";
 import { watchManagedAgentFamilyEvents } from "./agent-event-watcher";
@@ -1416,6 +1418,42 @@ function sameManagedSubagentDescriptor(
     && row.task === descriptorDigest(descriptor.task);
 }
 
+/** Lifecycle rejection with a stable, content-free reason for host logs. */
+class ManagedSubagentLifecycleError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "ManagedSubagentLifecycleError";
+    this.code = code;
+  }
+}
+
+const SUBAGENT_STATUS_STATES = ["pending", "running", "completed", "failed", "interrupted", "closing", "closed"];
+const STALE_STATUS_REPORT_LIMIT = 256;
+/**
+ * Children whose stale status was already reported. Module scope survives
+ * Durable Object reconstruction within an isolate, where every rebuild
+ * restores the same children and replays their status.
+ */
+const staleStatusReports = new Set<string>();
+
+/**
+ * A status can outlive the binding it describes: the child was released or
+ * closed, the session deleted its bindings, or a later bind replaced the
+ * spawning-turn context. Status is observational and grants no authority, so
+ * such an update is dropped with one structured warning per child instead of
+ * failing every later update.
+ */
+function dropStaleSubagentStatus(rootSessionId: string, sessionId: string, reason: string): undefined {
+  const key = `${rootSessionId}:${sessionId}:${reason}`;
+  if (!staleStatusReports.has(key)) {
+    if (staleStatusReports.size >= STALE_STATUS_REPORT_LIMIT) staleStatusReports.clear();
+    staleStatusReports.add(key);
+    console.warn({ type: "managed.subagent_status_dropped", reason, root_session_id: rootSessionId, session_id: sessionId });
+  }
+  return undefined;
+}
+
 /** Managed half of the private live Cloudflare subagent lifecycle. */
 export function applyManagedSubagentLifecycle(
   storage: DurableObjectStorage,
@@ -1441,12 +1479,20 @@ export function applyManagedSubagentLifecycle(
   const retained = bindings.authorizations.get(sessionId);
   if (type === "status") {
     if (Object.keys(event).some(key => !["type", "rootSessionId", "sessionId", "descriptor", "hostContextRef", "status"].includes(key))
-      || retained === undefined || retained.root_session_id !== rootSessionId
-      || retained.host_context_ref !== hostContextRef
-      || !sameManagedSubagentDescriptor(retained, managedSubagentDescriptor(event.descriptor))
       || !event.status || typeof event.status !== "object" || Array.isArray(event.status)
-      || !["pending", "running", "completed", "failed", "interrupted", "closing", "closed"].includes((event.status as { state: string }).state)) {
-      throw new Error("managed subagent status does not match live authorization");
+      || !SUBAGENT_STATUS_STATES.includes((event.status as { state: string }).state)) {
+      throw new ManagedSubagentLifecycleError("invalid_subagent_status", "invalid managed subagent status");
+    }
+    const descriptor = managedSubagentDescriptor(event.descriptor);
+    if (descriptor.sessionId !== sessionId) {
+      throw new ManagedSubagentLifecycleError("subagent_status_authority_mismatch", "managed subagent status does not match live authorization");
+    }
+    if (retained === undefined) return dropStaleSubagentStatus(rootSessionId, sessionId, "binding_missing");
+    if (retained.root_session_id !== rootSessionId || !sameManagedSubagentDescriptor(retained, descriptor)) {
+      throw new ManagedSubagentLifecycleError("subagent_status_authority_mismatch", "managed subagent status does not match live authorization");
+    }
+    if (retained.host_context_ref !== hostContextRef) {
+      return dropStaleSubagentStatus(rootSessionId, sessionId, "host_context_superseded");
     }
     // Completion retains the child's authority and history for follow-up. The
     // host may use its original binding to continue an idle root conversation.
@@ -1457,7 +1503,7 @@ export function applyManagedSubagentLifecycle(
       || retained === undefined
       || retained.root_session_id !== rootSessionId
       || retained.host_context_ref !== hostContextRef) {
-      throw new Error("managed subagent release does not match live authorization");
+      throw new ManagedSubagentLifecycleError("subagent_release_mismatch", "managed subagent release does not match live authorization");
     }
     bindings.authorizations.delete(sessionId);
     bindings.routes.delete(sessionId);
@@ -1470,13 +1516,13 @@ export function applyManagedSubagentLifecycle(
   }
   const descriptor = managedSubagentDescriptor(event.descriptor);
   if (descriptor.sessionId !== sessionId) {
-    throw new Error("managed subagent session does not match its descriptor");
+    throw new ManagedSubagentLifecycleError("subagent_descriptor_mismatch", "managed subagent session does not match its descriptor");
   }
   if (retained !== undefined) {
     if (retained.root_session_id !== rootSessionId
       || retained.host_context_ref !== hostContextRef
       || !sameManagedSubagentDescriptor(retained, descriptor)) {
-      throw new Error("managed subagent binding conflicts with live authorization");
+      throw new ManagedSubagentLifecycleError("subagent_binding_conflict", "managed subagent binding conflicts with live authorization");
     }
     return;
   }
@@ -1486,19 +1532,19 @@ export function applyManagedSubagentLifecycle(
       "SELECT authorization_json FROM managed_turns WHERE id = ?",
       hostContextRef,
     ).toArray()[0];
-    if (turn === undefined) throw new Error("managed subagent authorization turn is missing");
+    if (turn === undefined) throw new ManagedSubagentLifecycleError("subagent_authorization_turn_missing", "managed subagent authorization turn is missing");
     authorizationJson = JSON.stringify(parseTurnAuthorization(turn.authorization_json));
   } else {
     const parent = [...bindings.authorizations.values()].find(row =>
       row.root_session_id === rootSessionId && row.agentId === descriptor.parentAgentId);
     if (parent === undefined || parent.host_context_ref !== hostContextRef) {
-      throw new Error("managed nested subagent authorization parent is missing");
+      throw new ManagedSubagentLifecycleError("subagent_parent_missing", "managed nested subagent authorization parent is missing");
     }
     authorizationJson = JSON.stringify(parseTurnAuthorization(parent.authorization_json));
   }
   if (descriptor.sessionId === rootSessionId || [...bindings.authorizations.values()].some(row =>
     row.root_session_id === rootSessionId && row.agentId === descriptor.agentId)) {
-    throw new Error("managed subagent identity conflicts with live authorization");
+    throw new ManagedSubagentLifecycleError("subagent_identity_conflict", "managed subagent identity conflicts with live authorization");
   }
   bindings.authorizations.set(descriptor.sessionId, {
     ...descriptor,
@@ -1665,13 +1711,22 @@ function isConnectorConnectionSelection(
   ));
 }
 
+/** Isolate-wide WASM linear memory; absent before the engine initializes. */
+function memoryDimensions(): { wasm_memory_bytes?: number } {
+  try {
+    const bytes = engineMemoryBytes();
+    return bytes === undefined ? {} : { wasm_memory_bytes: bytes };
+  } catch { return {}; }
+}
+
 function isUniqueStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string")
     && new Set(value).size === value.length;
 }
 
 const SAFE_OBSERVATION_FIELDS = new Set([
-  "request_id", "turn_id", "failure_phase", "replay_mode", "replayed", "next_attempt", "max_attempts",
+  "request_id", "turn_id", "failed_turn_id", "interrupted_turns", "retry_source", "reopen_agent",
+  "interrupted", "blocked", "turns", "wasm_memory_bytes", "failure_phase", "replay_mode", "replayed", "next_attempt", "max_attempts",
   "connection_generation", "runtime_generation", "model_call_index", "status_code", "retry_delay_ms", "duration_ms",
   "time_to_first_event_ms", "time_to_first_output_ms", "response_id",
   "opens_new_socket", "server_requested_delay",
@@ -3602,6 +3657,8 @@ async function routeVmHostToolAttachment(
   }
   if (!validated.ok) {
     await validated.body?.cancel();
+    // A released or forgotten allocation is permanent: VM runtimes stop on 410.
+    if (validated.status === 410) return json({ error: "attachment_revoked" }, { status: 410 });
     return json({ error: "not_found" }, { status: 404 });
   }
   let grant: VmHostAttachmentGrant;
@@ -4220,6 +4277,9 @@ export class DurableAgentSession extends DurableComputerObject {
   readonly #turns = new Map<string, Turn>();
   readonly #deliveredCancellationTurnIds = new Set<string>();
   readonly #reopenInterruptedTurnIds = new Set<string>();
+  // Runtime constructions by this object instance. 1 means the first runtime
+  // after the object (re)started; larger values are in-process rebuilds.
+  #agentConstructionCount = 0;
   readonly #eventTurnQueue: string[] = [];
   #eventTurnId?: string;
   readonly #pendingTurnIds = new Set<string>();
@@ -5757,8 +5817,14 @@ export class DurableAgentSession extends DurableComputerObject {
         // Re-discovering unrelated account tools delays every VM attachment.
         await performanceStage("attachment.router_ready", () => this.#ensureAgent({ reuseReady: true }));
       } catch (error) {
-        console.error({ type: "managed.tool_router_startup_failed", error_kind: errorKind(error) });
-        return json({ error: "tool_router_unavailable" }, { status: 503 });
+        // A conversation that can never start again (retired stored model,
+        // exported durability) must not keep its VM attachment retrying.
+        const terminal = this.#durabilityExported
+          || (error instanceof ManagedRequestError && error.code === "unsupported_stored_model");
+        console.error({ type: "managed.tool_router_startup_failed", terminal, ...errorDiagnostics(error) });
+        return terminal
+          ? json({ error: "agent_unavailable" }, { status: 410 })
+          : json({ error: "tool_router_unavailable" }, { status: 503, headers: { "retry-after": "5" } });
       }
       const expectedMachineId = request.headers.get("x-nanocodex-vm-machine-id") ?? undefined;
       const maximumLeaseExpiresAt = Number(
@@ -5867,9 +5933,25 @@ export class DurableAgentSession extends DurableComputerObject {
       if (!Number.isSafeInteger(limit) || limit > MAX_HISTORY_PAGE_SIZE) {
         return json({ error: "invalid_history_page" }, { status: 400 });
       }
+      // Opt-in byte bounds for model-facing readers: max_bytes replaces the
+      // page budget and events above max_event_bytes arrive as unhydrated
+      // truncated stand-ins that keep their cursors.
+      const bound = (name: string, minimum: number, maximum: number): number | undefined | null => {
+        const raw = url.searchParams.get(name);
+        if (raw === null) return undefined;
+        const value = /^[1-9][0-9]{0,9}$/.test(raw) ? Number(raw) : Number.NaN;
+        return value >= minimum && value <= maximum ? value : null;
+      };
+      const maxBytes = bound("max_bytes", 1_024, MAX_HISTORY_PAGE_BYTES);
+      const maxEventBytes = bound("max_event_bytes", 256, 64 * 1024 * 1024);
+      if (maxBytes === null || maxEventBytes === null)
+        return json({ error: "invalid_history_page" }, { status: 400 });
+      const bounds: HistoryBounds | undefined = maxBytes === undefined && maxEventBytes === undefined ? undefined
+        : { ...(maxBytes === undefined ? {} : { maxBytes }), ...(maxEventBytes === undefined ? {} : { maxEventBytes }) };
+      const boundsTag = bounds === undefined ? "" : `-bytes-${maxBytes ?? "default"}-${maxEventBytes ?? "any"}`;
       // Cursor and archive ownership are small indexed reads. Revalidation
       // must happen before loading, decoding, or serializing event payloads.
-      const historyTag = () => `W/"history-v2-${this.#sessionId()}-${after === undefined ? `before-${before ?? "latest"}` : `after-${after}`}-${limit}-${this.#eventArchive.latestCursor(this.#eventLog)}-${this.#eventArchive.archivedThrough()}"`;
+      const historyTag = () => `W/"history-v2-${this.#sessionId()}-${after === undefined ? `before-${before ?? "latest"}` : `after-${after}`}-${limit}${boundsTag}-${this.#eventArchive.latestCursor(this.#eventLog)}-${this.#eventArchive.archivedThrough()}"`;
       const etag = historyTag();
       const cacheHeaders = {
         "cache-control": "private, no-cache",
@@ -5883,8 +5965,8 @@ export class DurableAgentSession extends DurableComputerObject {
       let page;
       try {
         page = after === undefined
-          ? await this.#eventArchive.history(this.#eventLog, before, limit)
-          : await this.#eventArchive.historyAfter(this.#eventLog, after, limit);
+          ? await this.#eventArchive.history(this.#eventLog, before, limit, bounds)
+          : await this.#eventArchive.historyAfter(this.#eventLog, after, limit, bounds);
       } catch (error) {
         return json({
           error: "event_archive_unavailable",
@@ -6232,6 +6314,10 @@ export class DurableAgentSession extends DurableComputerObject {
         await this.#scheduleCleanupRetry();
       }
       return;
+    }
+    // A periodic sample precedes any isolate memory reset of owned work.
+    if (this.#agent && this.#turns.size > 0) {
+      this.#observe("managed.memory", { state: "alarm", turns: this.#turns.size, ...memoryDimensions() });
     }
     if (presentationPending(this.ctx.storage)) await this.#sidebarPresentation().flush();
     if (this.#operations.nextAlarm() !== undefined) await this.#operations.drain();
@@ -9198,6 +9284,14 @@ export class DurableAgentSession extends DurableComputerObject {
       return;
     }
     const admission = this.#admissionTasks.get(id);
+    if (admission && row.state === "cancelling" && row.dispatch_input_chunks === null) {
+      // Admission can wait behind a running turn (e.g. its startup context
+      // commits only between turns). Nothing was submitted to the Agent until
+      // the dispatch input is frozen, so no operation can run: settle now. The
+      // pending admission observes the terminal row and exits before freezing.
+      this.#commitManagedTurnTerminal(id, { type: "turn_cancelled", id });
+      return;
+    }
     if (admission) await admission;
     row = this.#managedTurn(id);
     if (!row || isTerminalState(row.state)) return;
@@ -10990,7 +11084,7 @@ export class DurableAgentSession extends DurableComputerObject {
           if (!this.#accountHostedTools) return undefined;
           const started = performance.now();
           try {
-            await this.#accountHostedTools.refreshMachine(id, context, computer);
+            await this.#accountHostedTools.refreshMachine(id, context, computer, computer, context.signal);
             observeHandCall("namespace.selected_lookup", name, started, "ok", context.callId,
               { thread_id: session.session_id, session_id: context.sessionId, turn_id: context.turnId, parent_call_id: context.parentCallId });
           } catch (error) {
@@ -11651,6 +11745,9 @@ export class DurableAgentSession extends DurableComputerObject {
       throw error;
     }
     this.#logCapacity("agent_constructed", {
+      object_agent_construction: ++this.#agentConstructionCount,
+      object_age_ms: Math.max(0, Date.now() - this.#constructorEnteredAtMs),
+      ...memoryDimensions(),
       account_mcp_refresh_ms: accountMcpRefreshMs,
       discovery_join_ms: roundMilliseconds(discoveryJoinMs),
       credential_binding_ms: roundMilliseconds(credentialBindingMs),
@@ -13031,10 +13128,28 @@ A direct subagent completed after the previous turn ended. Continue the current 
       this.#disposeManagedTurn(id, turn);
       if (!this.#deleting) {
         if (reopenAgent) await this.#reopenAgent(id);
+        this.#wakeBlockedSuccessors(id);
         this.#scheduleRecovery();
         await this.#scheduleNextAlarm();
       }
     }
+  }
+
+  /**
+   * Successors dispatched while this turn ran were rejected by Rust as
+   * blocked by its unfinished operation and parked on retry backoff (up to a
+   * minute). Once it is terminal they can begin, so retry them now.
+   */
+  #wakeBlockedSuccessors(id: string): void {
+    const row = this.#managedTurn(id);
+    if (!row || !isTerminalState(row.state)) return;
+    this.ctx.storage.sql.exec(
+      `UPDATE managed_turns SET retry_at = NULL, updated_at = ?
+       WHERE state IN ('accepted', 'cancelling') AND retry_at IS NOT NULL
+         AND instr(error, ?) > 0`,
+      Date.now(),
+      "is blocked by unfinished operation `" + id + "`",
+    );
   }
 
   #disposeManagedTurn(id: string, turn: Turn): void {
@@ -13053,6 +13168,12 @@ A direct subagent completed after the previous turn ended. Continue the current 
     if (resolution.kind === "retry" && resolution.blockedBy !== undefined) {
       this.#reconcilePendingOperation(resolution.blockedBy);
     }
+    // Retries are otherwise visible only in the durable event log; keep the
+    // reason next to runtime construction and reopen logs.
+    // Retry messages can carry tool or upstream text; log only classified flags.
+    if (resolution.kind === "retry") this.#observe("managed.turn_retry", { turn_id: id, retry_source: source,
+      reopen_agent: resolution.reopenAgent, interrupted: resolution.interrupted === true,
+      blocked: resolution.blockedBy !== undefined, ...memoryDimensions() }, "warn");
     const row = this.#managedTurn(id);
     return this.#commitManagedMessage(id, managedControlTransitionForResolution(
       id,
@@ -13867,10 +13988,13 @@ A direct subagent completed after the previous turn ended. Continue the current 
     // directory is authoritative, including reusable interrupted children.
     try {
       const { agents } = await Subagents.list(agent);
-      return agents.some(({ status }) => status.state === "pending"
-        || status.state === "running" || status.state === "closing"
-        // Default listing excludes interrupted children without recovery state.
-        || status.state === "interrupted");
+      // Interrupted children are resting: their conversations are journaled and
+      // they resume on a later message after reconstruction. Keeping the runtime
+      // resident for them would hold its WASM memory and a 60 s alarm forever.
+      // A restored child still awaiting its automatic resume is marked resuming.
+      return agents.some((child) => child.status.state === "pending"
+        || child.status.state === "running" || child.status.state === "closing"
+        || (child as { resuming?: boolean }).resuming === true);
     } catch {
       // A transient directory failure must not destroy work owned by this runtime.
       return this.#agent === agent;
@@ -13921,6 +14045,9 @@ A direct subagent completed after the previous turn ended. Continue the current 
   }
 
   async #reopenAgent(failedId: string): Promise<void> {
+    // Retiring the runtime interrupts every sibling turn and live Code Mode cell.
+    this.#observe("managed.agent_reopen", { failed_turn_id: failedId, interrupted_turns: Math.max(0, this.#turns.size - 1),
+      ...memoryDimensions() }, "warn");
     for (const siblingId of this.#turns.keys()) {
       if (siblingId !== failedId) this.#reopenInterruptedTurnIds.add(siblingId);
     }

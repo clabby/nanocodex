@@ -1,13 +1,37 @@
-//! Verify the source revision of an explicitly supplied local CLI/Hand pair.
+//! Verify explicitly supplied local binaries before installing them.
+//!
+//! A local CLI with a Hand (`--hand-binary` or a sibling `nanocodex-hand`) must
+//! come from one source tree: both report the same `Hand Identity` (the CLI
+//! reports the identity of the Hand built beside it), or, for builds that
+//! predate Hand identities, the same exact source revision. A CLI alone only
+//! needs a working probe.
 
 use std::{path::Path, time::Duration};
 
 use eyre::{Context, Result, bail, eyre};
 use tokio::process::Command;
 
-const REBUILD_PAIR: &str = "Rebuild nanocodex-bin and nanocodex2-bin from the same checkout, then pass their binaries with --path and --hand-binary. Use a release update to install historical release bundles.";
+const REBUILD_PAIR: &str = "Rebuild both executables from one checkout (cargo build) and pass target/<profile>/nanocodex with --path; the nanocodex-hand beside it (or --hand-binary) must come from the same checkout. Use a release update to install historical release bundles.";
 
-pub(super) async fn verify_pair(cli: &Path, companion: &Path) -> Result<()> {
+/// A CLI installed without a Hand only needs to execute its version probe.
+pub(super) async fn verify_single(binary: &Path) -> Result<()> {
+    let binary = binary
+        .canonicalize()
+        .wrap_err_with(|| format!("failed to locate local binary {}", binary.display()))?;
+    let version = version_output(&binary).await?;
+    match source_revision(&version) {
+        Some(revision) => eprintln!(
+            "Verified local binary {} at source revision {}",
+            binary.display(),
+            revision.to_ascii_lowercase()
+        ),
+        None => eprintln!("Verified local binary {}", binary.display()),
+    }
+    Ok(())
+}
+
+/// Returns the pair's Hand identity when both binaries report one.
+pub(super) async fn verify_pair(cli: &Path, companion: &Path) -> Result<Option<String>> {
     let cli = cli
         .canonicalize()
         .wrap_err_with(|| format!("failed to locate local CLI {}", cli.display()))?;
@@ -16,13 +40,81 @@ pub(super) async fn verify_pair(cli: &Path, companion: &Path) -> Result<()> {
         .wrap_err_with(|| format!("failed to locate local Hand {}", companion.display()))?;
     let (cli_version, companion_version) =
         tokio::try_join!(version_output(&cli), version_output(&companion))?;
+    if let Some(identity) = hand_identity(&companion_version) {
+        match hand_identity(&cli_version) {
+            Some(expected) if expected == identity => {
+                eprintln!(
+                    "Verified local Hand identity {identity}: CLI {}, Hand {}",
+                    cli.display(),
+                    companion.display(),
+                );
+                return Ok(Some(identity));
+            }
+            Some(expected) => bail!(
+                "local Hand identity {identity} differs from the Hand identity {expected} the CLI was built with. {REBUILD_PAIR}"
+            ),
+            None => bail!(
+                "local CLI does not report the Hand identity it was built with. {REBUILD_PAIR}"
+            ),
+        }
+    }
+    if source_revision(&cli_version).is_none() && source_revision(&companion_version).is_none() {
+        // Plain development builds record no release provenance. Verify the
+        // runtime contract the pair actually shares instead: one package
+        // version and the Hand service protocol. Without an identity, the
+        // store keeps the exact installed bytes as the Hand's receipt.
+        let version = package_version(&cli_version)
+            .filter(|version| package_version(&companion_version) == Some(*version))
+            .ok_or_else(|| {
+                eyre!("local CLI and Hand report different package versions. {REBUILD_PAIR}")
+            })?;
+        crate::hand_service::validate_candidate(&companion).await?;
+        eprintln!(
+            "Verified local development pair {version} with Hand service protocol 1 (no recorded source revision): CLI {}, Hand {}",
+            cli.display(),
+            companion.display(),
+        );
+        return Ok(None);
+    }
     let revision = matching_revision(&cli_version, &companion_version)?;
     eprintln!(
         "Verified local source revision {revision}: CLI {}, Hand {}",
         cli.display(),
         companion.display(),
     );
-    Ok(())
+    Ok(None)
+}
+
+/// Package version (without channel suffix) from a `Version: X` line.
+fn package_version(version: &str) -> Option<&str> {
+    let value = version
+        .lines()
+        .find_map(|line| line.split_once("Version: ").map(|(_, value)| value.trim()))?;
+    value
+        .split(['-', '+', ' '])
+        .next()
+        .filter(|value| !value.is_empty())
+}
+
+/// The deterministic Hand identity an executable reports, if any. Probe
+/// failures read as unknown: callers then compare bytes instead.
+pub(super) async fn probe_hand_identity(path: &Path) -> Option<String> {
+    let output = version_output(path).await.ok()?;
+    hand_identity(&output)
+}
+
+/// Exactly one `Hand Identity: <64 lowercase hex>` line.
+pub(super) fn hand_identity(version: &str) -> Option<String> {
+    let mut identities = version
+        .lines()
+        .filter_map(|line| line.strip_prefix("Hand Identity: "));
+    let identity = identities.next()?.trim();
+    (identities.next().is_none()
+        && identity.len() == 64
+        && identity
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| identity.to_owned())
 }
 
 async fn version_output(path: &Path) -> Result<String> {
@@ -119,7 +211,7 @@ mod tests {
         );
         let error = matching_revision(&cli, &companion).unwrap_err().to_string();
         assert!(error.contains("differs from Hand"));
-        assert!(error.contains("Rebuild nanocodex-bin and nanocodex2-bin"));
+        assert!(error.contains("Rebuild both executables from one checkout (cargo build)"));
     }
 
     #[test]

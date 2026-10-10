@@ -133,7 +133,8 @@ jobs:
         if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
         with:
           node-version: 24
-          cache: pnpm
+      - uses: ./.github/actions/js-dependency-cache
+        if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
       - run: pnpm install --frozen-lockfile
         if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
       - name: Check CUA bridge and native host lifecycle
@@ -150,9 +151,20 @@ jobs:
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true'
         # The ci profile serializes and retries these host IPC tests.
-        run: cargo nextest run --locked --profile ci -p nanocodex2-bin --bin nanocodex2 -E 'test(hand)'
-      - name: Build both public CLI journey executables
-        run: cargo build --locked -p nanocodex2-bin -p nanocodex-bin --bins
+        # Hand modules live in the Hand daemon and shared executable packages.
+        run: >-
+          cargo nextest run --locked --profile ci
+          -p nanocodex-bin -p nanocodex-bin-shared -p nanocodex-hand-daemon --lib
+          -E '(package(nanocodex-bin) & test(/^nanocodex2::/) & test(hand))
+          | ((package(nanocodex-bin-shared) | package(nanocodex-hand-daemon)) & test(hand))'
+      - name: Build the CLI and Hand journey executables
+        # Journeys that start the Hand by its installed nanocodex2 name get the
+        # nanocodex-hand binary there; it forwards CLI commands to nanocodex.
+        shell: bash
+        run: |
+          # The default workspace members are the CLI and the Hand daemon.
+          cargo build --locked --bins
+          cp target/debug/nanocodex-hand target/debug/nanocodex2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
@@ -160,8 +172,8 @@ jobs:
         run: |
           cargo test --locked -p nanocodex-managed --lib account_services
           cargo test --locked -p nanocodex-managed --lib phone_services
-          cargo test --locked -p nanocodex2-bin --test nanocodex2_connectors --test nanocodex2_vault
-          cargo test --locked -p nanocodex2-bin --bin nanocodex2 account_management_journeys
+          cargo test --locked -p nanocodex-bin --test nanocodex2_connectors --test nanocodex2_vault
+          cargo test --locked -p nanocodex-bin --lib account_management_journeys
       - name: Resolve the trusted loopback origin on macOS
         if: runner.os == 'macOS'
         run: printf '\n::1 nanocodex.localhost\n' | sudo tee -a /etc/hosts > /dev/null
@@ -190,7 +202,7 @@ jobs:
         if: needs.changes.outputs.tests == 'true'
         shell: bash
         run: |
-          NANOCODEX_DEVICE_TEST_BINARY="$(node -p 'require("node:path").resolve("target/debug/nanocodex2" + (process.platform === "win32" ? ".exe" : ""))')"
+          NANOCODEX_DEVICE_TEST_BINARY="$(node -p 'require("node:path").resolve("target/debug/nanocodex-hand" + (process.platform === "win32" ? ".exe" : ""))')"
           export NANOCODEX_DEVICE_TEST_BINARY
           node --test js/desktop-runtime/test/device-hand.integration.test.mjs js/desktop-runtime/test/device-hand-shutdown.test.mjs
 
@@ -287,7 +299,8 @@ jobs:
         if: needs.changes.outputs.tests == 'true'
         with:
           node-version: 24
-          cache: pnpm
+      - uses: ./.github/actions/js-dependency-cache
+        if: needs.changes.outputs.tests == 'true'
       - run: pnpm install --frozen-lockfile
         # Re-enable dependency setup together with the lifecycle tests.
         if: needs.changes.outputs.tests == 'true'
@@ -304,27 +317,29 @@ jobs:
         shell: pwsh
         env:
           NANOCODEX_COMPUTER: "off"
-        run: cargo nextest run --locked --profile ci --package nanocodex2-bin --bin nanocodex2
+        run: >-
+          cargo nextest run --locked --profile ci
+          --package nanocodex-bin --package nanocodex-bin-shared --package nanocodex-hand-daemon --lib
+          -E '(package(nanocodex-bin) & test(/^nanocodex2::/)) | package(nanocodex-bin-shared) | package(nanocodex-hand-daemon)'
       - name: Build the native controller and account Hand
         shell: pwsh
         env:
           NANOCODEX_COMPUTER: "off"
         run: |
-          cargo build --locked --package nanocodex-bin --bin nanocodex --features tempo
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked --package nanocodex2-bin --bin nanocodex2
+          cargo build --locked --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test native Windows Hand task policy
         shell: pwsh
         run: >-
-          cargo nextest run --locked --profile ci --package nanocodex-bin --bin nanocodex
+          cargo nextest run --locked --profile ci
+          --package nanocodex-bin --package nanocodex-bin-shared --package nanocodex-hand-daemon --lib
           -E 'test(windows_hand) | test(update::automatic::tests::windows_schedule)'
       - name: Run real CLI/app sharing against a local account server
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true'
         shell: bash
         run: |
-          NANOCODEX_DEVICE_TEST_BINARY="$(node -p 'require("node:path").resolve("target/debug/nanocodex2" + (process.platform === "win32" ? ".exe" : ""))')"
+          NANOCODEX_DEVICE_TEST_BINARY="$(node -p 'require("node:path").resolve("target/debug/nanocodex-hand" + (process.platform === "win32" ? ".exe" : ""))')"
           export NANOCODEX_DEVICE_TEST_BINARY
           node --test js/desktop-runtime/test/device-hand.integration.test.mjs js/desktop-runtime/test/device-hand-shutdown.test.mjs
       - name: Build the one-click installer
@@ -332,7 +347,7 @@ jobs:
         run: >-
           ./windows/hand/build.ps1
           -Nanocodex ./target/debug/nanocodex.exe
-          -Nanocodex2 ./target/debug/nanocodex2.exe
+          -Nanocodex2 ./target/debug/nanocodex-hand.exe
           -Version 0.0.0-ci
           -NumericVersion 0.0.0.0
 
@@ -397,7 +412,7 @@ jobs:
 
   vm-guest:
     needs: changes
-    # Add "hands" here when re-enabling the paused Docker Hand tests (nanocodex2).
+    # Add "hands" here when re-enabling the paused Docker Hand tests.
     if: needs.changes.outputs.vm == 'true'
     name: static Linux guest and Docker Hand (${{ matrix.arch }})
     strategy:
@@ -439,6 +454,13 @@ jobs:
           --features guest-runtime --target ${{ matrix.target }}
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          # Pull the BuildKit bootstrap image from mirror.gcr.io by digest.
+          # Docker Hub build images try mirror.gcr.io before Docker Hub.
+          driver-opts: image=mirror.gcr.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
       - name: Configure Docker Hand registry cache
         id: hand-cache
         shell: bash
@@ -502,7 +524,7 @@ jobs:
         if: needs.changes.outputs.tests == 'true'
         run: |
           cargo test --locked -p nanocodex-vm --test docker_live -- --ignored --nocapture
-          cargo test --locked -p nanocodex2-bin --test nanocodex2_managed docker_hand_live -- --ignored --nocapture
+          cargo test --locked -p nanocodex-bin --test nanocodex2_managed docker_hand_live -- --ignored --nocapture
         env:
           NANOCODEX_DOCKER_TEST_IMAGE: nanocodex-hand:ci
           NANOCODEX_DOCKER_HOST_SENTINEL: must-not-enter-the-container
@@ -512,7 +534,7 @@ jobs:
         run: |
           sudo unshare --mount --propagation private sh -eu -c '
             if test -e /dev/kvm; then mount --bind /dev/null /dev/kvm; fi
-            if target/debug/nanocodex2 hand --vm /nonexistent-root.ext4 > /tmp/hand-kvm-error 2>&1; then
+            if target/debug/nanocodex hand --vm /nonexistent-root.ext4 > /tmp/hand-kvm-error 2>&1; then
               cat /tmp/hand-kvm-error
               exit 1
             fi
@@ -578,9 +600,9 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          # Reused WASM outputs skip install, so no pnpm store exists to save.
-          cache: ${{ steps.wasm.outputs.hit != 'true' && 'pnpm' || '' }}
-          cache-dependency-path: pnpm-lock.yaml
+      # Reused WASM outputs skip install, so they need no pnpm store.
+      - uses: ./.github/actions/js-dependency-cache
+        if: steps.wasm.outputs.hit != 'true'
       - name: Check CI orchestration and timing reports
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true'
@@ -666,17 +688,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+      - uses: ./.github/actions/js-dependency-cache
+        with:
+          npm-examples: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nanocodex-wasm
           path: js/nanocodex
       - uses: ./.github/actions/turbo-cache
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.npm
-          key: npm-examples-${{ runner.os }}-${{ hashFiles('examples/privy/package-lock.json', 'examples/better-auth/package-lock.json') }}
       - name: Install JS consumer dependencies
         run: |
           pnpm install --frozen-lockfile
@@ -928,8 +947,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+      - uses: ./.github/actions/js-dependency-cache
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nanocodex-wasm

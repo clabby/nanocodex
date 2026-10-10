@@ -4,7 +4,7 @@
 
 ## Native CLI instructions and project context
 
-The shipped CLI (`nanocodex --claude` or `--harness claude`) composes original
+The shipped CLI (`ncl --claude` or `--harness claude`) composes original
 coding instructions for its installed tools. The model calls `exec` and `wait`;
 inside Code Mode, file tools retain their native names while shell and agent
 tools use the shared Codex names, schemas and handlers. Optional capabilities must follow the actual catalog.
@@ -145,6 +145,12 @@ retaining the correct parent and session. The host supplies any native callback
 bridge to those authorized lifecycle capabilities. Mixed-family children start
 clean conversations. `fork` remains native to the owning backend and does not
 translate history into another family.
+
+One implementation of the shared nanocodex `Tool` contract serves both
+families: install it in Codex's `Tools` and pass the same value to
+`ClaudeTools::shared_tool`. Claude receives a function definition with the
+tool's output schema appended to its description, and the tool receives the
+invocation's identities and host context but no Responses history.
 
 The registry can unload idle children at its residency limit. Rehydration sends
 the family's in-memory `ChildSnapshot` to the current construction recipe;

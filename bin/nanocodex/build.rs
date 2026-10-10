@@ -1,20 +1,26 @@
-mod build_version;
+//! Native helpers that Cargo cannot express as dependencies. Release
+//! provenance (commit, tag, Hand identity) is read by the executable entry
+//! points instead, and the Linux screen-helper payload is embedded by the
+//! `embedded-screen-helpers` feature, so this script reruns only when the
+//! macOS menu-bar source changes.
+
+use std::{env, path::PathBuf, process::Command};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("cargo:rerun-if-changed=build_version.rs");
-    build_version::emit()?;
-    build_hand_menu_bar()
-}
-
-fn build_hand_menu_bar() -> Result<(), Box<dyn std::error::Error>> {
-    use std::{env, path::PathBuf, process::Command};
     let source =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is unset")?)
             .join("../../macos/HandMenuBar/main.swift");
+    println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", source.display());
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        return Ok(());
+    let target_os = env::var("CARGO_CFG_TARGET_OS")?;
+    if target_os == "macos" {
+        build_hand_menu_bar(&source)?;
     }
+    Ok(())
+}
+
+/// Compiles the standalone Hand menu-bar helper that the macOS Hand embeds.
+fn build_hand_menu_bar(source: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let architecture = match env::var("CARGO_CFG_TARGET_ARCH")?.as_str() {
         "aarch64" => "arm64",
         "x86_64" => "x86_64",
@@ -31,7 +37,7 @@ fn build_hand_menu_bar() -> Result<(), Box<dyn std::error::Error>> {
             "-framework",
             "AppKit",
         ])
-        .arg(&source)
+        .arg(source)
         .arg("-o")
         .arg(&output)
         .status()?;

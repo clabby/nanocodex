@@ -3,14 +3,18 @@ exclude = ["third_party/codex-voice"]
 members = [
     "bin/nanocodex",
     "bin/nanocodex/tui-control",
-    "bin/nanocodex/nanocodex2",
+    "bin/nanocodex/tui-render",
+    "bin/nanocodex/screen-supervisor",
     "bin/nanocodex/account-auth",
+    "bin/nanocodex/hand",
+    "bin/nanocodex/shared",
     "bin/nanousd",
     "bin/nanousd-api",
     "crates/nanocodex",
     "crates/nanocodex-agent",
     "crates/nanocodex-claude",
     "crates/nanocodex-claude-tools",
+    "crates/nanocodex-decisions",
     "crates/nanocodex-managed",
     "crates/nanocodex-phone",
     "crates/nanocodex-hand",
@@ -36,9 +40,9 @@ members = [
     "js/nanocodex",
     "py/bindings",
 ]
-# Root Cargo commands target the public library facade. Use `just run` or
-# `cargo run -p nanocodex-bin --bin nanocodex` for the executable consumer.
-default-members = ["crates/nanocodex"]
+# A plain `cargo build` produces both executables, nanocodex and nanocodex-hand.
+# Select library packages with -p (for example `cargo test -p nanocodex`).
+default-members = ["bin/nanocodex", "bin/nanocodex/hand"]
 resolver = "2"
 
 [workspace.package]
@@ -76,7 +80,6 @@ chromiumoxide = "0.9.1"
 landlock = "0.4.4"
 clap = { version = "4.5.54", features = ["derive", "env"] }
 cpal = "0.16.0"
-crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
 criterion = { version = "0.7.0", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
 csv = "1.4.0"
 dotenvy = "0.15.7"
@@ -89,6 +92,7 @@ roxmltree = "0.21.1"
 getrandom = "0.4.3"
 hex = "0.4.3"
 http = "1.3.1"
+httpdate = "1.0.3"
 http-body-util = "0.1.3"
 hmac = "0.13.0"
 hudsucker = { version = "0.25.0", git = "https://github.com/gakonst/hudsucker", rev = "9a13609adc4b37b3e7fba28a320546bf672f0f4d", default-features = false, features = ["rcgen-ca", "ring", "rustls-client"] }
@@ -102,8 +106,10 @@ nanocodex = { version = "0.6.7", path = "crates/nanocodex" }
 nanocodex-agent = { version = "0.6.7", path = "crates/nanocodex-agent" }
 nanocodex-claude = { version = "0.6.7", path = "crates/nanocodex-claude" }
 nanocodex-claude-tools = { version = "0.6.7", path = "crates/nanocodex-claude-tools", default-features = false }
+nanocodex-decisions = { version = "0.6.7", path = "crates/nanocodex-decisions" }
 nanocodex-managed = { version = "0.6.7", path = "crates/nanocodex-managed" }
 nanocodex-cli-auth = { version = "0.6.7", path = "bin/nanocodex/account-auth" }
+nanocodex-bin-shared = { version = "0.6.7", path = "bin/nanocodex/shared" }
 nanocodex-durability = { version = "0.6.7", path = "crates/nanocodex-durability" }
 nanocodex-browser = { version = "0.6.7", path = "crates/nanocodex-browser" }
 nanocodex-computer = { version = "0.6.7", path = "crates/experimental/nanocodex-computer" }
@@ -143,7 +149,6 @@ pyo3 = "0.29.0"
 proc-macro-crate = "3"
 proc-macro2 = "1.0.106"
 quote = "1.0.46"
-ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 ratatex = "0.1.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-no-provider"] }
 reqwest-middleware = "0.5.2"
@@ -192,7 +197,6 @@ unicode-width = "0.2"
 url = "2.5.7"
 uuid = { version = "1", features = ["js", "serde", "v4", "v5", "v7"] }
 v8-heap-parser = "1.1.0"
-vergen = { version = "8", default-features = false }
 wasm-bindgen = "0.2.105"
 wasm-bindgen-futures = "0.4.55"
 web-time = "1.1.0"
@@ -207,17 +211,29 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-missing-const-for-fn = "warn"
-use-self = "warn"
-redundant-clone = "warn"
-large-enum-variant = "allow"
-result-large-err = "allow"
+missing_const_for_fn = "warn"
+use_self = "warn"
+redundant_clone = "warn"
+large_enum_variant = "allow"
+result_large_err = "allow"
 
 # Match Reth and Solar's fast edit-build cycle: retain useful backtraces and
 # source locations without emitting full local-variable debug information.
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+
+# Third-party crates carry no debug info in dev builds. Workspace crates keep
+# line tables, so panics and backtraces in Nanocodex code still report file and
+# line, while debug executables and shared targets stay smaller and link faster.
+[profile.dev.package."*"]
+debug = false
+
+# Hashing debug executables must not run each SHA intrinsic through unoptimized
+# SIMD wrappers. Optimize the small hashing dependency; workspace code stays
+# unoptimized with normal incremental compilation and useful backtraces.
+[profile.dev.package."sha2:0.11.0"]
+opt-level = 3
 
 # Display math runs during interactive debug builds. Keep the small native
 # parser/layout/raster stack optimized so a cold formula is ready in one frame.

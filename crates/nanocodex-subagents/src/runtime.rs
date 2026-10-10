@@ -49,6 +49,9 @@ pub(super) struct ChildSession {
     pub(super) output_validator: Validator,
     pub(super) output_schema: Value,
     pub(super) stored_runtime: Option<ChildSnapshot>,
+    /// The latest boundary is a durable journal record, loaded on rehydration
+    /// instead of being held in memory while the child is idle.
+    pub(super) journaled_runtime: bool,
     pub(super) next_instruction_revision: u64,
     pub(super) active_instruction_revision: Option<u64>,
     pub(super) steering: bool,
@@ -56,7 +59,7 @@ pub(super) struct ChildSession {
     pub(super) last_output: Option<Value>,
     pub(super) last_used: u64,
     pub(super) evicted: bool,
-    /// Automatic restart resumes since this child last finished a turn.
+    /// Consecutive automatic restart resumes without committed progress.
     pub(super) resume_attempts: u32,
     /// Bounded tool calls observed during the current or interrupted turn.
     pub(super) in_flight_calls: Vec<durable::InFlightCall>,
@@ -111,6 +114,8 @@ pub struct Registry {
     revision: watch::Sender<u64>,
     capacity: Capacity,
     max_resident: AtomicUsize,
+    /// Whether the host chose a residency limit instead of the default.
+    max_resident_explicit: std::sync::atomic::AtomicBool,
     residency_lock: tokio::sync::Mutex<()>,
     message_lock: tokio::sync::Mutex<()>,
     store: std::sync::RwLock<Option<Arc<dyn SubagentStore>>>,
@@ -126,6 +131,9 @@ pub struct Registry {
     pending_checkpoints: std::sync::Mutex<HashMap<String, usize>>,
     /// In-flight mid-turn checkpoint captures; `true` requests one more pass.
     progress_captures: std::sync::Mutex<HashMap<(String, AgentId), bool>>,
+    /// Children that finished a tool call in this runtime since their last
+    /// journaled progress checkpoint.
+    completed_tools: std::sync::Mutex<std::collections::HashSet<(String, AgentId)>>,
     pending_resume: std::sync::Mutex<HashMap<String, Vec<AgentId>>>,
     /// Terminal results each caller session already received from `wait`.
     wait_reported: std::sync::Mutex<HashMap<(String, AgentId), u64>>,
@@ -262,6 +270,10 @@ pub struct AgentDirectoryEntry {
     pub status: AgentStatus,
     pub can_message: bool,
     pub can_manage: bool,
+    /// A restored child whose automatic resume is not yet delivered: it is
+    /// interrupted now but about to run, so hosts must keep the runtime live.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resuming: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -614,7 +626,9 @@ impl RegistryState {
                 // also waits on that gate). Keep recoverable Interrupted entries
                 // discoverable during that interval and after a failed resume.
                 let recoverable_interrupted = matches!(session.status, AgentStatus::Interrupted)
-                    && (session.harness.is_some() || session.stored_runtime.is_some());
+                    && (session.harness.is_some()
+                        || session.stored_runtime.is_some()
+                        || session.journaled_runtime);
                 if !include_completed
                     && !matches!(session.status, AgentStatus::Pending | AgentStatus::Running)
                     && !recoverable_interrupted
@@ -622,7 +636,9 @@ impl RegistryState {
                     return None;
                 }
                 let can_message = caller != Some(id)
-                    && (session.harness.is_some() || session.stored_runtime.is_some())
+                    && (session.harness.is_some()
+                        || session.stored_runtime.is_some()
+                        || session.journaled_runtime)
                     && !matches!(
                         session.status,
                         AgentStatus::Pending | AgentStatus::Closing | AgentStatus::Closed
@@ -638,6 +654,7 @@ impl RegistryState {
                     status: session.status.clone(),
                     can_message,
                     can_manage,
+                    resuming: false,
                 })
             })
             .collect()
@@ -1076,6 +1093,7 @@ impl Registry {
             capacity: Capacity::new(max_concurrency),
             session_handles: std::sync::RwLock::new(HashMap::new()),
             max_resident: AtomicUsize::new(crate::DEFAULT_MAX_RESIDENT_SUBAGENTS),
+            max_resident_explicit: std::sync::atomic::AtomicBool::new(false),
             residency_lock: tokio::sync::Mutex::new(()),
             message_lock: tokio::sync::Mutex::new(()),
             store: std::sync::RwLock::new(None),
@@ -1086,6 +1104,7 @@ impl Registry {
             checkpoints: std::sync::Mutex::new(HashMap::new()),
             pending_checkpoints: std::sync::Mutex::new(HashMap::new()),
             progress_captures: std::sync::Mutex::new(HashMap::new()),
+            completed_tools: std::sync::Mutex::new(std::collections::HashSet::new()),
             pending_resume: std::sync::Mutex::new(HashMap::new()),
             wait_reported: std::sync::Mutex::new(HashMap::new()),
             idle_waits: std::sync::Mutex::new(HashMap::new()),
@@ -1195,6 +1214,12 @@ impl Registry {
     /// Install the store before spawning children, then call [`Self::restore`]
     /// for a recovered root before it uses subagent tools.
     pub fn set_store(self: &Arc<Self>, store: Arc<dyn SubagentStore>) {
+        // Durable children reload from their journal records, so idle ones need
+        // not keep whole conversations resident in memory-capped hosts.
+        if !self.max_resident_explicit.load(Ordering::Relaxed) {
+            self.max_resident
+                .store(crate::DURABLE_MAX_RESIDENT_SUBAGENTS, Ordering::Relaxed);
+        }
         *self
             .store
             .write()
@@ -1279,11 +1304,49 @@ impl Registry {
             .collect()
     }
 
-    fn record_checkpoint(&self, root_session_id: &str, id: AgentId, snapshot: ChildSnapshot) {
+    fn record_checkpoint(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+        snapshot: ChildSnapshot,
+    ) -> bool {
         // Encode once, outside the lock; journal writes only reference it.
         match durable::JournalCheckpoint::encode(&snapshot) {
-            Ok(checkpoint) => self.insert_checkpoint(root_session_id, id, checkpoint),
-            Err(error) => tracing::warn!(%error, "could not encode subagent checkpoint"),
+            Ok(checkpoint) => {
+                self.insert_checkpoint(root_session_id, id, checkpoint);
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not encode subagent checkpoint");
+                false
+            }
+        }
+    }
+
+    /// Loads a child's journaled boundary: its unsaved encoding, or the stored record.
+    async fn journal_snapshot(
+        &self,
+        root_session_id: &str,
+        id: AgentId,
+    ) -> std::io::Result<ChildSnapshot> {
+        let (key, pending) = self
+            .checkpoints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&(root_session_id.to_owned(), id))
+            .map(|checkpoint| (Arc::clone(&checkpoint.key), checkpoint.pending.clone()))
+            .ok_or_else(|| {
+                std::io::Error::other(format!("subagent {id} has no journaled checkpoint"))
+            })?;
+        match pending {
+            Some(json) => durable::decode_checkpoint(&json, &key),
+            None => {
+                let store = self
+                    .store_for(root_session_id)
+                    .ok_or_else(|| std::io::Error::other("no subagent store is installed"))?;
+                let json = store.load_record(root_session_id, &key).await?;
+                durable::decode_checkpoint(&json, &key)
+            }
         }
     }
 
@@ -1379,13 +1442,28 @@ impl Registry {
         let registry = Arc::clone(self);
         drop(platform::spawn(async move {
             loop {
+                // Taken before the snapshot, so the checkpoint includes that tool.
+                let progressed = registry
+                    .completed_tools
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&key);
                 let harness = registry.running_harness(&key.0, key.1).await;
                 if let Some(harness) = harness
                     && let Ok(snapshot) = harness.snapshot().await
                     && registry.running_harness(&key.0, key.1).await.is_some()
                 {
                     registry.record_checkpoint(&key.0, key.1, snapshot);
+                    if progressed {
+                        registry.reset_resume_attempts(&key.0, key.1).await;
+                    }
                     registry.changed();
+                } else if progressed {
+                    registry
+                        .completed_tools
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(key.clone());
                 }
                 let mut captures = registry
                     .progress_captures
@@ -1400,6 +1478,21 @@ impl Registry {
                 }
             }
         }));
+    }
+
+    /// A resumed child journaled a checkpoint after finishing a tool call in
+    /// this runtime. Its turn is advancing, so a later restart is a new loss
+    /// rather than the same one recurring: the consecutive budget starts over.
+    async fn reset_resume_attempts(&self, root_session_id: &str, id: AgentId) {
+        let mut state = self.state.lock().await;
+        if let Some(session) = state
+            .scopes
+            .get_mut(root_session_id)
+            .and_then(|scope| scope.sessions.get_mut(&id))
+            && session.active
+        {
+            session.resume_attempts = 0;
+        }
     }
 
     /// Journals bounded tool calls observed during a child's turn until the
@@ -1504,11 +1597,14 @@ impl Registry {
         }
         let mut agents = journal.agents;
         agents.sort_by_key(|agent| agent.descriptor.id);
-        // Load referenced conversations one at a time, before taking the state lock.
+        // Referenced conversations stay in the store until a child runs.
         let mut stored = HashMap::new();
-        for agent in &mut agents {
-            if let Some(checkpoint) = agent.hydrate(store.as_ref(), root_session_id).await? {
-                stored.insert(agent.descriptor.id, checkpoint);
+        for agent in &agents {
+            if let Some(key) = &agent.checkpoint_ref {
+                stored.insert(
+                    agent.descriptor.id,
+                    durable::JournalCheckpoint::stored(key.clone()),
+                );
             }
         }
         let mut report = RestoreReport::default();
@@ -1610,13 +1706,28 @@ impl Registry {
         self: &Arc<Self>,
         root_session_id: &str,
     ) -> Vec<(AgentId, std::io::Result<MessageReceipt>)> {
+        // Each id stays pending until its resume delivery settles, so the
+        // directory never shows a child about to run as resting in between.
         let ids = self
             .pending_resume
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(root_session_id)
+            .get(root_session_id)
+            .cloned()
             .unwrap_or_default();
         let mut results = Vec::with_capacity(ids.len());
+        let settle = |id: AgentId| {
+            let mut pending = self
+                .pending_resume
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(ids) = pending.get_mut(root_session_id) {
+                ids.retain(|pending| *pending != id);
+                if ids.is_empty() {
+                    pending.remove(root_session_id);
+                }
+            }
+        };
         for id in ids {
             // Restate the binding task: a resumed child must finish it, not
             // summarize partial progress as its result.
@@ -1654,6 +1765,9 @@ impl Registry {
                     message,
                 )
                 .await;
+            settle(id);
+            // Waiters treat a pending automatic resume as still running.
+            self.changed();
             results.push((id, result));
         }
         results
@@ -1694,6 +1808,7 @@ impl Registry {
     }
 
     pub fn set_max_resident(&self, limit: usize) {
+        self.max_resident_explicit.store(true, Ordering::Relaxed);
         self.max_resident.store(limit.max(1), Ordering::Relaxed);
     }
 
@@ -1850,6 +1965,7 @@ impl Registry {
                 output_validator: validator,
                 output_schema: serde_json::from_str(&schema).expect("compiled schema is JSON"),
                 stored_runtime: None,
+                journaled_runtime: false,
                 next_instruction_revision: 0,
                 active_instruction_revision: None,
                 steering: false,
@@ -2032,9 +2148,15 @@ impl Registry {
             };
             match harness.snapshot().await {
                 Ok(snapshot) => {
-                    if self.store_for(root_session_id).is_some() {
-                        self.record_checkpoint(root_session_id, id, snapshot.clone());
-                    }
+                    // A durable host reloads an evicted child from its journal
+                    // record; only non-durable hosts keep the snapshot in memory.
+                    let stored = if self.store_for(root_session_id).is_some()
+                        && self.record_checkpoint(root_session_id, id, snapshot.clone())
+                    {
+                        None
+                    } else {
+                        Some(snapshot)
+                    };
                     if let Some(session) = self
                         .state
                         .lock()
@@ -2043,7 +2165,8 @@ impl Registry {
                         .get_mut(root_session_id)
                         .and_then(|scope| scope.sessions.get_mut(&id))
                     {
-                        session.stored_runtime = Some(snapshot);
+                        session.journaled_runtime = stored.is_none();
+                        session.stored_runtime = stored;
                     }
                 }
                 Err(_) => {
@@ -2158,11 +2281,24 @@ impl Registry {
         include_self: bool,
     ) -> std::io::Result<Vec<AgentDirectoryEntry>> {
         self.await_restored(session_id).await?;
-        Ok(self
-            .state
+        let state = self.state.lock().await;
+        let mut entries = state.directory(session_id, include_completed, include_self);
+        let root = state.root_session_id(session_id).to_owned();
+        drop(state);
+        // A restored child whose automatic resume has not been delivered yet
+        // will run; mark it so hosts keep the runtime resident until then.
+        if let Some(resuming) = self
+            .pending_resume
             .lock()
-            .await
-            .directory(session_id, include_completed, include_self))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&root)
+        {
+            for entry in &mut entries {
+                entry.resuming = matches!(entry.status, AgentStatus::Interrupted)
+                    && resuming.contains(&entry.agent_id);
+            }
+        }
+        Ok(entries)
     }
 
     /// Keep weak factory capabilities, never a second owner of a child driver.
@@ -2209,8 +2345,10 @@ impl Registry {
                 {
                     break;
                 }
-                let Some(snapshot) = session.stored_runtime.clone() else {
-                    break;
+                let snapshot = match (&session.stored_runtime, session.journaled_runtime) {
+                    (Some(snapshot), _) => Some(snapshot.clone()),
+                    (None, true) => None,
+                    (None, false) => break,
                 };
                 let parent_session = session
                     .descriptor
@@ -2236,6 +2374,10 @@ impl Registry {
             (root, missing)
         };
         while let Some((id, parent_session, snapshot, host_context, schema, task)) = missing.pop() {
+            let snapshot = match snapshot {
+                Some(snapshot) => snapshot,
+                None => self.journal_snapshot(&root, id).await?,
+            };
             let parent = self
                 .session_handles
                 .read()
@@ -2469,10 +2611,28 @@ impl Registry {
         let mut revision = self.revision.subscribe();
         let deadline = Instant::now() + duration;
         loop {
-            let snapshot = self.state.lock().await.wait_snapshot(session_id, ids)?;
+            let (snapshot, root) = {
+                let state = self.state.lock().await;
+                let root = state.root_session_id(session_id).to_owned();
+                (state.wait_snapshot(session_id, ids)?, root)
+            };
+            // A restored child whose automatic resume is not yet delivered is
+            // about to run. Reporting it as interrupted let a waiting parent
+            // conclude it stopped and re-delegate the same work.
+            let resuming = self
+                .pending_resume
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&root)
+                .cloned()
+                .unwrap_or_default();
             let terminal = snapshot
                 .iter()
-                .filter(|(summary, _)| summary.status.is_wait_terminal())
+                .filter(|(summary, _)| {
+                    summary.status.is_wait_terminal()
+                        && !(matches!(summary.status, AgentStatus::Interrupted)
+                            && resuming.contains(&summary.agent_id))
+                })
                 .map(|(summary, revision)| {
                     (summary.agent_id, wait_mark(&summary.status, *revision))
                 })
@@ -2960,6 +3120,7 @@ impl ChildSession {
             output_validator: contract.validator,
             output_schema,
             stored_runtime,
+            journaled_runtime: false,
             next_instruction_revision,
             active_instruction_revision: None,
             steering: false,
@@ -3039,6 +3200,7 @@ pub(super) fn forward_events(
                 event.kind,
                 AgentEventKind::ModelCallStarted | AgentEventKind::ToolCall
             );
+            let completed_tool = event.kind == AgentEventKind::ToolResult;
             let kind = event.kind;
             let payload = matches!(kind, AgentEventKind::ToolCall | AgentEventKind::ToolResult)
                 .then(|| event.payload.clone());
@@ -3054,6 +3216,13 @@ pub(super) fn forward_events(
                 registry
                     .track_in_flight(&root_session_id, id, &kind, &payload)
                     .await;
+                if completed_tool {
+                    registry
+                        .completed_tools
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert((root_session_id.clone(), id));
+                }
                 if progress {
                     registry.capture_progress(&root_session_id, id);
                 }
@@ -3373,7 +3542,7 @@ mod tests {
             original.state.lock().await.scopes["root"]
                 .sessions
                 .values()
-                .any(|session| session.stored_runtime.is_some())
+                .any(|session| session.stored_runtime.is_some() || session.journaled_runtime)
         );
         original.close_all("root").await.unwrap();
         drop((original, control, updates));
@@ -3653,6 +3822,7 @@ mod tests {
             output_validator: test_contract().validator,
             output_schema: serde_json::from_str(&test_contract().schema).unwrap(),
             stored_runtime: None,
+            journaled_runtime: false,
             next_instruction_revision: 0,
             active_instruction_revision: None,
             steering: false,
@@ -3728,16 +3898,19 @@ mod tests {
         let session = state.scopes.get("root").unwrap().sessions.get(&id).unwrap();
         assert_eq!(session.status, AgentStatus::Interrupted);
         assert_eq!(session.descriptor.session_id, session_id);
-        assert!(matches!(
-            session.stored_runtime,
-            Some(ChildSnapshot::Codex(_))
-        ));
+        // The conversation stays in its journal record until the child runs.
+        assert!(session.stored_runtime.is_none() && session.journaled_runtime);
         assert!(session.evicted && session.harness.is_none());
         drop(state);
         assert_eq!(
             restored.pending_resume.lock().unwrap().get("root"),
             Some(&vec![id])
         );
+        // Until its resume is delivered, the child is about to run, not resting.
+        let listed = restored.directory("root", false, false).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, AgentStatus::Interrupted);
+        assert!(listed[0].resuming && listed[0].can_message);
     }
 
     #[tokio::test]

@@ -1,0 +1,1122 @@
+//! The Nanocodex CLI (`nanocodex`, [`cli_main`]): the managed and local command
+//! trees and the terminal UI. The Hand executable is the separate
+//! nanocodex-hand-daemon package; this crate never depends on it.
+#![recursion_limit = "256"]
+
+mod auth;
+mod benchmark;
+mod browser;
+#[cfg_attr(not(feature = "browser"), path = "browser_cookie_sync_disabled.rs")]
+mod browser_cookie_sync;
+mod clipboard;
+mod config;
+#[cfg(feature = "tempo")]
+mod credits;
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+mod eval;
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
+#[path = "eval_unsupported.rs"]
+mod eval;
+mod hand_login;
+mod hand_menu_bar;
+mod hand_menu_status;
+mod hand_registry;
+mod hand_service;
+mod hand_setup;
+mod install;
+#[cfg(target_os = "linux")]
+mod linux_hand_service;
+mod login;
+mod managed_memory;
+mod managed_server;
+mod mcp;
+#[cfg_attr(not(feature = "tempo"), path = "mpp_disabled.rs")]
+mod mpp;
+mod nanocodex2;
+/// Criterion groups over the shared TUI renderer, for `benches/nanocodex2_tui.rs`.
+#[cfg(feature = "tui-bench")]
+#[doc(hidden)]
+pub use nanocodex2::tui::bench::tui_benches;
+mod native_sessions;
+mod observability;
+mod rewind;
+mod rollout_fork;
+mod run;
+mod setup;
+mod subagents;
+mod tool_calls;
+mod update;
+pub(crate) use nanocodex_bin_shared::version;
+pub use nanocodex_bin_shared::version::BuildInfo;
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+mod vm;
+#[cfg(not(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
+#[path = "vm_unsupported.rs"]
+mod vm;
+mod windows_hand;
+
+// Shared with the Hand executable (nanocodex-hand-daemon); keep their
+// historical module paths in this crate.
+#[cfg(target_os = "macos")]
+pub(crate) use nanocodex_bin_shared::hand_keep_awake;
+pub(crate) use nanocodex_bin_shared::{computer, hand_executable, launcher, startup_timing};
+
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
+
+use clap::{Args, CommandFactory, Parser, Subcommand, builder::NonEmptyStringValueParser};
+use eyre::{Result, WrapErr, eyre};
+use nanocodex::agent::rollout::RolloutConfig;
+
+use config::AgentArgs;
+use observability::ObservabilityArgs;
+
+const RETRYABLE_EXIT_CODE: u8 = 75;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct RetryableProcessExit {
+    message: String,
+}
+
+impl RetryableProcessExit {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Parser)]
+#[command(
+    name = "ncl",
+    version = version::short(),
+    long_version = version::long(),
+    about = "An interactive coding agent and headless JSONL runner",
+    subcommand_negates_reqs = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    agent: AgentArgs,
+
+    #[command(flatten)]
+    observability: ObservabilityArgs,
+
+    #[command(flatten)]
+    vm: vm::VmArgs,
+
+    /// Submit an initial prompt immediately after the TUI opens.
+    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    prompt: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Install the verified release bundle and start guided setup.
+    Install(install::Install),
+    /// Sign in and set up Computer Use, Hand, and the browser bridge.
+    Setup(setup::Setup),
+    /// Discover and control a running interactive terminal.
+    Tui(nanocodex_tui_control::Cli),
+    /// Install or refresh the upstream computer-use runtime.
+    Computer(computer::Computer),
+    /// Manage this computer’s Hand service or add a Linux Hand over SSH.
+    Hand(hand_setup::Hand),
+    /// Sign in to the managed Nanocodex account (same as `nanocodex login`).
+    Account(nanocodex_cli_auth::Account),
+    /// Manage subscription login for the selected harness.
+    Auth(auth::Auth),
+    /// Sign in to Nanocodex Connect and authorize this installation.
+    Login(login::Login),
+    /// Connect one or more hosted services to this Nanocodex installation.
+    Connect(login::Connect),
+    /// Show the current Nanocodex Connect login without displaying secrets.
+    Status(login::Status),
+    /// Revoke and remove this installation's Nanocodex Connect login.
+    Logout(login::Logout),
+    /// Inspect or synchronize local browser cookies and the encrypted account Vault.
+    #[cfg_attr(
+        not(feature = "browser"),
+        command(about = "Unavailable in this build: requires the optional `browser` feature.")
+    )]
+    Cookies(browser_cookie_sync::Cookies),
+    /// Inspect or purchase Nanocodex NANOUSD credits.
+    #[cfg(feature = "tempo")]
+    Credits(credits::Credits),
+    /// Run and inspect durable VM-backed agent evaluations.
+    Eval(eval::Eval),
+    /// Internal entrypoint for one dedicated libkrun VMM process.
+    #[command(hide = true)]
+    VmRunConfig(vm::VmRunConfig),
+    /// Run one prompt and stream JSONL events to stdout.
+    Run(Box<RunCommand>),
+    /// Run a loopback-only managed-agent durability test server.
+    ManagedServer(managed_server::ManagedServer),
+    /// Resume a saved session in the selected harness in the interactive TUI.
+    Resume(Box<ResumeCommand>),
+    /// Preview or restore native Claude file checkpoints.
+    Rewind(RewindCommand),
+    /// Install, cache, or switch CLI builds.
+    Update(update::Update),
+}
+
+#[derive(Args)]
+struct RunCommand {
+    #[command(flatten)]
+    run: run::Run,
+
+    #[command(flatten)]
+    agent: AgentArgs,
+
+    #[command(flatten)]
+    observability: ObservabilityArgs,
+
+    #[command(flatten)]
+    vm: vm::VmArgs,
+}
+
+#[derive(Args)]
+struct RewindCommand {
+    #[arg(value_parser = NonEmptyStringValueParser::new())]
+    session: String,
+    /// Turn ID from the checkpoint preview.
+    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    checkpoint: Option<String>,
+    /// Restore the selected checkpoint and later native file edits.
+    #[arg(long)]
+    restore: bool,
+    /// Restore files, branch the conversation, or do both.
+    #[arg(long, default_value = "files", value_parser = ["files", "conversation", "files-and-conversation"])]
+    mode: String,
+}
+
+#[derive(Args)]
+struct ResumeCommand {
+    /// Session ID to resume. Omit it to select from the selected harness’s sessions.
+    #[arg(value_parser = NonEmptyStringValueParser::new())]
+    thread_id: Option<String>,
+
+    /// Start a new Codex thread from this rollout file instead of a saved thread.
+    ///
+    /// The file is copied, never changed. The new thread's workspace is
+    /// `--cwd`, or the current directory, so rollouts recorded elsewhere work.
+    #[arg(long, value_name = "ROLLOUT", conflicts_with = "thread_id")]
+    from: Option<PathBuf>,
+
+    /// Start from this point: a turn ID, or a completed-turn number from 1.
+    ///
+    /// Forks the thread or `--from` rollout as a new Codex thread whose history
+    /// ends after that turn. The original thread and file are not changed.
+    #[arg(long, value_name = "TURN", value_parser = NonEmptyStringValueParser::new())]
+    at: Option<String>,
+
+    #[command(flatten)]
+    agent: AgentArgs,
+
+    #[command(flatten)]
+    observability: ObservabilityArgs,
+
+    #[command(flatten)]
+    vm: vm::VmArgs,
+
+    /// Submit an initial follow-on prompt immediately after the TUI opens.
+    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    prompt: Option<String>,
+}
+
+/// The command tree a process runs.
+///
+/// One executable serves every installed name. `nanocodex`, `nc`, and
+/// `nanocodex2` select the managed tree; `ncl`, or a leading `--local`,
+/// selects the local agent tree. Commands that only one tree defines, including
+/// every hidden service entrypoint, run under every name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Tree {
+    Managed,
+    Local,
+}
+
+/// Entry point of the `nanocodex` CLI. Hand serving and daemon-side
+/// entrypoints are forwarded to the installed Hand executable; the CLI never
+/// runs them in-process.
+pub fn cli_main(build: BuildInfo) -> ExitCode {
+    version::init(build);
+    hand_executable::take_forwarded();
+    let mut arguments: Vec<OsString> = std::env::args_os().collect();
+    let tree = select_tree(&mut arguments);
+    if is_daemon_command(&arguments) {
+        if hand_executable::forwarded() {
+            // The Hand forwarded this here, so it does not serve it either;
+            // never bounce it back.
+            eprintln!(
+                "Error: this command is served by the Nanocodex Hand executable, which did not accept it"
+            );
+            return ExitCode::FAILURE;
+        }
+        return match hand_executable::hand_binary() {
+            // Keep the invoked name so help and errors read as this command.
+            Ok(hand) => {
+                hand_executable::forward(&hand, arguments.first().cloned(), &arguments[1..])
+            }
+            Err(error) => {
+                eprintln!("Error: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    update::repair_legacy_activation();
+    match tree {
+        Tree::Managed => nanocodex2::main(arguments),
+        Tree::Local => local_main(arguments),
+    }
+}
+
+/// Commands that serve a Hand or are internal entrypoints of the Hand daemon
+/// (service protocol, screen/input publishers, VMM children, root helpers).
+fn is_daemon_command(arguments: &[OsString]) -> bool {
+    if nanocodex2::is_helper_process() {
+        return true;
+    }
+    let argument = |index: usize| arguments.get(index).and_then(|argument| argument.to_str());
+    match argument(1) {
+        Some(
+            "__device-hand" | "__hand-screen" | "__hand-desktop" | "__install-hand"
+            | "__update-hand" | "wayland-host" | "desktop-host" | "server-host" | "__vm-run-config"
+            | "vm-run-config" | "__vm-clone-image" | "host" | "hand-recording",
+        ) => true,
+        // `hand` alone (or with backend flags) serves; management subcommands
+        // and help stay in the CLI.
+        Some("hand") => {
+            !argument(2).is_some_and(|name| name == "help" || is_hand_management_command(name))
+                && !arguments[2..]
+                    .iter()
+                    .any(|argument| argument == "-h" || argument == "--help")
+        }
+        _ => false,
+    }
+}
+
+fn is_hand_management_command(name: &str) -> bool {
+    Cli::command()
+        .find_subcommand("hand")
+        .is_some_and(|hand| hand.find_subcommand(name).is_some())
+}
+
+/// Mode selected by the invoked name. Use argv[0], not `current_exe`, which
+/// resolves the installed alias symlinks to one file.
+fn invoked_tree(argv0: &OsStr) -> Tree {
+    let name = Path::new(argv0)
+        .file_name()
+        .map(OsStr::to_string_lossy)
+        .unwrap_or_default();
+    let stem = name
+        .len()
+        .checked_sub(4)
+        .filter(|split| {
+            name.is_char_boundary(*split) && name[*split..].eq_ignore_ascii_case(".exe")
+        })
+        .map_or(&*name, |split| &name[..split]);
+    if stem.eq_ignore_ascii_case("ncl") {
+        Tree::Local
+    } else {
+        Tree::Managed
+    }
+}
+
+/// Choose the tree before clap parses, stripping a leading `--local`.
+fn select_tree(arguments: &mut Vec<OsString>) -> Tree {
+    if nanocodex2::is_helper_process() {
+        return Tree::Managed;
+    }
+    let mut tree = arguments
+        .first()
+        .map_or(Tree::Managed, |argv0| invoked_tree(argv0));
+    if arguments
+        .get(1)
+        .is_some_and(|argument| argument == "--local")
+    {
+        arguments.remove(1);
+        tree = Tree::Local;
+    }
+    let Some(first) = arguments.get(1).and_then(|argument| argument.to_str()) else {
+        return tree;
+    };
+    let local = Cli::command();
+    if first == "hand" {
+        // `hand` alone serves this computer (managed flags); its management
+        // subcommands keep the local service and update implementation.
+        let management = arguments
+            .get(2)
+            .and_then(|argument| argument.to_str())
+            .is_some_and(|name| {
+                local
+                    .find_subcommand("hand")
+                    .is_some_and(|hand| hand.find_subcommand(name).is_some())
+            });
+        return if management {
+            Tree::Local
+        } else {
+            Tree::Managed
+        };
+    }
+    let managed = nanocodex2::command();
+    match (
+        tree,
+        managed.find_subcommand(first).is_some(),
+        local.find_subcommand(first).is_some(),
+    ) {
+        (Tree::Managed, false, true) => Tree::Local,
+        (Tree::Local, true, false) => Tree::Managed,
+        (tree, _, _) => tree,
+    }
+}
+
+/// Add the other tree's visible, unambiguous commands to this tree's help so
+/// every command reachable under this name is listed. Dispatch is by
+/// [`select_tree`]; these copies only document it.
+fn with_foreign_commands(mut command: clap::Command, foreign: &clap::Command) -> clap::Command {
+    let additions: Vec<clap::Command> = foreign
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .filter(|subcommand| {
+            std::iter::once(subcommand.get_name())
+                .chain(subcommand.get_all_aliases())
+                .all(|name| command.find_subcommand(name).is_none())
+        })
+        .cloned()
+        .collect();
+    for subcommand in additions {
+        command = command.subcommand(subcommand);
+    }
+    command
+}
+
+fn local_main(arguments: Vec<OsString>) -> ExitCode {
+    let _startup = startup_timing::Stage::new("process");
+    match try_main(arguments) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            ExitCode::from(process_exit_code(&error))
+        }
+    }
+}
+
+fn try_main(arguments: Vec<OsString>) -> Result<()> {
+    launcher::initialize_install_root();
+    launcher::dispatch_update(&arguments)?;
+    nanocodex::oai::transport::install_default_rustls_crypto_provider();
+    // A menu observation must not select credentials from whichever project
+    // directory happened to launch it. Other CLI commands retain their normal
+    // development dotenv behavior.
+    let hand_observation = arguments.get(1).is_some_and(|argument| argument == "hand")
+        && matches!(
+            arguments.get(2).and_then(|argument| argument.to_str()),
+            Some("menu-status" | "status")
+        );
+    if !hand_observation {
+        let _ = dotenvy::dotenv();
+    }
+
+    let cli = parse_cli(arguments);
+    if let Some(Command::VmRunConfig(command)) = &cli.command {
+        return command.run();
+    }
+    run_with_runtime(run(cli))
+}
+
+fn parse_cli(arguments: Vec<OsString>) -> Cli {
+    use clap::{FromArgMatches, error::ErrorKind, parser::ValueSource};
+
+    let mut command = with_foreign_commands(Cli::command(), &nanocodex2::command());
+    let matches = command
+        .try_get_matches_from_mut(arguments)
+        .unwrap_or_else(|error| error.exit());
+    // Global harness/auth flags apply on either side of a subcommand. Local
+    // interactive flags must not be silently ignored by a subcommand's config.
+    let misplaced = matches.subcommand_name().and_then(|_| {
+        command
+            .get_arguments()
+            .find(|argument| {
+                !argument.is_global_set()
+                    && matches.value_source(argument.get_id().as_str())
+                        == Some(ValueSource::CommandLine)
+            })
+            .map(|argument| {
+                argument
+                    .get_long()
+                    .map_or_else(|| argument.get_id().to_string(), |long| format!("--{long}"))
+            })
+    });
+    if let Some(name) = misplaced {
+        command
+            .error(
+                ErrorKind::ArgumentConflict,
+                format!("{name} must follow a subcommand that supports it, or be used in interactive mode"),
+            )
+            .exit();
+    }
+    Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+}
+
+fn run_with_runtime(future: impl std::future::Future<Output = Result<()>>) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(future);
+    // Application cleanup has completed. Optional MCP discovery can still own a
+    // blocking DNS lookup, which Tokio cannot cancel. Foreground work and its
+    // owned cleanup were awaited above; give no extra exit grace period to
+    // these disposable background tasks.
+    runtime.shutdown_background();
+    result
+}
+
+fn process_exit_code(error: &eyre::Report) -> u8 {
+    if error.downcast_ref::<RetryableProcessExit>().is_some() {
+        RETRYABLE_EXIT_CODE
+    } else {
+        1
+    }
+}
+
+async fn run(cli: Cli) -> Result<()> {
+    // Interactive startup owns maintenance after its first editable frame.
+    let observation = matches!(&cli.command, Some(Command::Hand(hand)) if hand.is_observation());
+    if !observation && !matches!(&cli.command, None | Some(Command::Resume(_))) {
+        if let Err(error) = update::prepare_legacy_nightly_bootstrap() {
+            eprintln!("warning: failed to prepare the Nanocodex updater bootstrap: {error:#}");
+        }
+        if !matches!(&cli.command, Some(Command::Update(_)))
+            && let Err(error) = update::ensure_default_automatic_updates()
+        {
+            eprintln!("Could not configure automatic updates: {error:#}");
+        }
+    }
+    match cli.command {
+        Some(Command::Install(command)) => command.run().await,
+        Some(Command::Setup(command)) => command.run().await,
+        Some(Command::Tui(command)) => command.run().await.map_err(Into::into),
+        Some(Command::Computer(command)) => command.run().await.map_err(|error| eyre!(error)),
+        Some(Command::Hand(command)) => command.run().await,
+        Some(Command::Account(command)) => {
+            if let Some(receipt) = command.run_with_receipt().await? {
+                hand_login::connect_after_login(&receipt).await;
+            }
+            Ok(())
+        }
+        Some(Command::Auth(command)) => {
+            // Credential commands act on an explicitly chosen family; the
+            // credential-dependent session default must not redirect them.
+            let family = if cli.agent.has_explicit_harness() {
+                cli.agent.selected_harness()?
+            } else {
+                nanocodex::HarnessFamily::Codex
+            };
+            command.run(family, cli.agent.claude_auth).await
+        }
+        Some(Command::Login(command)) => command.run().await,
+        Some(Command::Connect(command)) => command.run().await,
+        Some(Command::Status(command)) => command.run().await,
+        Some(Command::Logout(command)) => command.run().await,
+        Some(Command::Cookies(command)) => command.run().await,
+        #[cfg(feature = "tempo")]
+        Some(Command::Credits(command)) => command.run().await,
+        Some(Command::Eval(command)) => command.run().await,
+        Some(Command::VmRunConfig(_)) => unreachable!("VMM commands run before Tokio starts"),
+        Some(Command::Run(command)) => {
+            let _observability = command.observability.install(false)?;
+            command.run.run(command.agent, command.vm).await
+        }
+        Some(Command::ManagedServer(command)) => command.run().await,
+        Some(Command::Rewind(command)) => {
+            rewind::run(
+                &command.session,
+                command.checkpoint.as_deref(),
+                command.restore,
+                &command.mode,
+            )
+            .await
+        }
+        Some(Command::Resume(mut command)) => {
+            let _observability = command.observability.install(true)?;
+            use nanocodex::HarnessFamily;
+            use nanocodex2::tui::local::{agent::LocalLaunch, sessions};
+            let codex_home = config::default_codex_home()?;
+            let forking = command.from.is_some() || command.at.is_some();
+            if forking {
+                // Rollout files and turn points belong to Codex threads.
+                command.agent.resume_with_harness(HarnessFamily::Codex);
+            }
+            let explicit = command.agent.has_explicit_harness();
+            let mut thread_id = command.thread_id.take();
+            if thread_id.is_none() && !forking {
+                // One picker over Codex threads and Claude sessions, newest first;
+                // an explicit harness narrows it to that store.
+                let family = if explicit {
+                    Some(command.agent.selected_harness()?)
+                } else {
+                    None
+                };
+                let candidates = sessions::discover(&codex_home)?
+                    .into_iter()
+                    .filter(|session| {
+                        family.is_none_or(|family| {
+                            (family == HarnessFamily::Claude)
+                                == (session.harness == sessions::Harness::Claude)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if candidates.is_empty() {
+                    return Err(sessions::none_found(&codex_home));
+                }
+                let Some(selected) = sessions::select(&candidates).await? else {
+                    return Ok(());
+                };
+                if !explicit {
+                    command.agent.resume_with_harness(match selected.harness {
+                        sessions::Harness::Claude => HarnessFamily::Claude,
+                        sessions::Harness::Codex => HarnessFamily::Codex,
+                    });
+                }
+                thread_id = Some(selected.id);
+            } else if !explicit {
+                // A defaulted resume opens the store that owns the requested thread.
+                let claude = thread_id
+                    .as_deref()
+                    .is_some_and(|id| native_sessions::load(&codex_home, id).is_ok());
+                command.agent.resume_with_harness(if claude {
+                    HarnessFamily::Claude
+                } else {
+                    HarnessFamily::Codex
+                });
+            }
+            let mut launch = if command.agent.selected_harness()? == HarnessFamily::Claude {
+                if forking {
+                    return Err(eyre!(
+                        "--from and --at start Codex threads; use `nanocodex rewind` for Claude"
+                    ));
+                }
+                let id = thread_id.ok_or_else(|| eyre!("a Claude session ID is required"))?;
+                let session = native_sessions::load(&codex_home, &id)?;
+                LocalLaunch {
+                    args: command.agent.resume_claude(session)?,
+                    vm: command.vm,
+                    replaceable: false,
+                    initial_prompt: command.prompt,
+                    initial_instruction: None,
+                    resume: None,
+                }
+            } else {
+                let rollouts = RolloutConfig::new(&codex_home);
+                let source = match (command.from, &thread_id) {
+                    (Some(path), _) => Some(path),
+                    (None, Some(thread_id)) if command.at.is_some() => Some(
+                        rollouts
+                            .load_session(thread_id)
+                            .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?
+                            .rollout_path()
+                            .to_path_buf(),
+                    ),
+                    (None, None) if command.at.is_some() => {
+                        return Err(eyre!("--at needs a thread ID or --from"));
+                    }
+                    _ => None,
+                };
+                let thread_id = match (source, thread_id) {
+                    (Some(source), _) => {
+                        let workspace = match command.agent.requested_workspace() {
+                            Some(path) => path.to_path_buf(),
+                            None => std::env::current_dir()?,
+                        }
+                        .canonicalize()
+                        .wrap_err("failed to resolve the new thread's workspace")?;
+                        let point = rollout_fork::Point::parse(command.at.as_deref())?;
+                        let thread_id =
+                            rollout_fork::fork(&source, &point, &codex_home, &workspace)?;
+                        eprintln!(
+                            "Started Codex thread {thread_id} from {}.",
+                            source.display()
+                        );
+                        thread_id
+                    }
+                    (None, Some(thread_id)) => thread_id,
+                    (None, None) => return Err(eyre!("--at needs a thread ID or --from")),
+                };
+                // Fail before entering the terminal when the thread cannot load.
+                rollouts
+                    .load_session(&thread_id)
+                    .wrap_err_with(|| format!("failed to load Codex thread {thread_id}"))?;
+                LocalLaunch {
+                    args: command.agent,
+                    vm: command.vm,
+                    replaceable: false,
+                    initial_prompt: command.prompt,
+                    initial_instruction: None,
+                    resume: Some(sessions::Resume::Codex(thread_id)),
+                }
+            };
+            launch.args.prefer_codex_for_vm(&launch.vm);
+            nanocodex2::tui::run_local(launch)
+                .await
+                .map_err(|error| eyre!("{error}"))
+        }
+        Some(Command::Update(command)) => command.run().await,
+        None => {
+            let _observability = cli.observability.install(true)?;
+            let mut agent = cli.agent;
+            agent.prefer_codex_for_vm(&cli.vm);
+            let replaceable = agent.claude_resume.is_none();
+            nanocodex2::tui::run_local(nanocodex2::tui::local::agent::LocalLaunch {
+                args: agent,
+                vm: cli.vm,
+                replaceable,
+                initial_prompt: cli.prompt,
+                initial_instruction: None,
+                resume: None,
+            })
+            .await
+            .map_err(|error| eyre!("{error}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The Hand executable, which has no CLI command trees, implies `hand` for
+    // exactly these words when invoked as nanocodex-hand or nc-hand.
+    #[test]
+    fn hand_command_aliases_know_every_hand_subcommand() {
+        let mut names = std::collections::BTreeSet::new();
+        for tree in [Cli::command(), nanocodex2::command()] {
+            let mut tree = tree;
+            tree.build();
+            let hand = tree.find_subcommand("hand").expect("hand command");
+            names.extend(
+                hand.get_subcommands()
+                    .map(|command| command.get_name().to_owned()),
+            );
+        }
+        names.insert("help".to_owned());
+        let shared = nanocodex_bin_shared::hand_executable::HAND_SUBCOMMANDS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(shared, names);
+    }
+
+    #[test]
+    fn runtime_waits_for_foreground_cleanup_before_success_or_error() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        for fails in [false, true] {
+            let cleaned = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&cleaned);
+            let result = run_with_runtime(async move {
+                // The application future owns and awaits this cleanup, even on
+                // its error path. Runtime background shutdown must follow it.
+                let cleanup = tokio::spawn(async move {
+                    tokio::task::yield_now().await;
+                    observed.store(true, Ordering::SeqCst);
+                });
+                cleanup.await.unwrap();
+                if fails {
+                    Err(eyre!("synthetic runtime failure"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(cleaned.load(Ordering::SeqCst));
+            assert_eq!(result.is_err(), fails);
+        }
+    }
+
+    #[test]
+    fn runtime_shutdown_does_not_wait_for_background_blocking_work() {
+        use std::{
+            sync::mpsc,
+            time::{Duration, Instant},
+        };
+
+        for fails in [false, true] {
+            let (release, blocked) = mpsc::channel();
+            let (finished, completion) = mpsc::channel();
+            let started = Instant::now();
+            let result = run_with_runtime(async move {
+                let (ready, received) = tokio::sync::oneshot::channel();
+                drop(tokio::task::spawn_blocking(move || {
+                    let _ = ready.send(());
+                    let _ = blocked.recv_timeout(Duration::from_secs(5));
+                    let _ = finished.send(());
+                }));
+                received.await.unwrap();
+                if fails {
+                    Err(eyre!("synthetic runtime failure"))
+                } else {
+                    Ok(())
+                }
+            });
+            let elapsed = started.elapsed();
+            // Release our synthetic blocking task even if the timing assertion fails.
+            let _ = release.send(());
+            completion.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "shutdown took {elapsed:?}"
+            );
+            assert_eq!(result.is_err(), fails);
+        }
+    }
+
+    #[cfg(feature = "browser")]
+    #[test]
+    fn cookie_commands_auto_detect_supported_browsers_for_an_exact_origin() {
+        let cli = Cli::try_parse_from([
+            "nanocodex",
+            "cookies",
+            "sync",
+            "https://console.twilio.com",
+            "--cookie-auth",
+            "interactive",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::Cookies(_))));
+        for source in ["local", "vault", "both"] {
+            let cli = Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "list",
+                "https://console.twilio.com",
+                "--from",
+                source,
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Some(Command::Cookies(_))));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "sync",
+                "https://console.twilio.com/path",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "sync",
+                "https://console.twilio.com",
+                "--cookies",
+                "brave",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "list",
+                "https://console.twilio.com/path",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "list",
+                "https://console.twilio.com",
+                "--from",
+                "somewhere",
+            ])
+            .is_err()
+        );
+    }
+
+    #[cfg(feature = "tempo")]
+    #[test]
+    fn tempo_flag_selects_the_tui_transport() {
+        let cli = Cli::try_parse_from([
+            "nanocodex",
+            "--provider.tempo",
+            "--provider.tempo.wallet-store",
+            "/tmp/tempo-wallet.json",
+        ])
+        .unwrap();
+
+        assert!(cli.command.is_none());
+        assert!(cli.agent.uses_tempo());
+        assert_eq!(
+            cli.agent.responses_transport(),
+            nanocodex::oai::transport::ResponsesTransport::Https
+        );
+    }
+
+    #[cfg(feature = "tempo")]
+    #[test]
+    fn tempo_flag_selects_the_one_shot_transport() {
+        let cli = Cli::try_parse_from([
+            "nanocodex",
+            "run",
+            "reply with ok",
+            "--provider.tempo",
+            "--provider.tempo.wallet-store",
+            "/tmp/tempo-wallet.json",
+        ])
+        .unwrap();
+
+        let Some(Command::Run(command)) = cli.command else {
+            unreachable!();
+        };
+        assert!(command.agent.uses_tempo());
+        assert_eq!(
+            command.agent.responses_transport(),
+            nanocodex::oai::transport::ResponsesTransport::Https
+        );
+    }
+
+    #[test]
+    fn openai_provider_is_explicitly_selectable() {
+        let cli = Cli::try_parse_from(["nanocodex", "--provider.openai", "--api-key", "test-key"])
+            .unwrap();
+
+        assert!(!cli.agent.uses_tempo());
+        assert_eq!(
+            cli.agent.responses_transport(),
+            nanocodex::oai::transport::ResponsesTransport::WebSocket
+        );
+    }
+
+    #[test]
+    fn local_durability_testing_has_explicit_identity_and_store() {
+        let cli = Cli::try_parse_from([
+            "nanocodex",
+            "run",
+            "durable turn",
+            "--local-durability",
+            "/tmp/nanocodex-durability.sqlite",
+            "--local-durability-state-id",
+            "hammer-root",
+            "--request-id",
+            "turn-1",
+            "--rollouts",
+            "false",
+        ])
+        .unwrap();
+
+        let Some(Command::Run(command)) = cli.command else {
+            panic!("run command was not parsed");
+        };
+        assert!(command.run.uses_local_durability());
+
+        let error = Cli::try_parse_from([
+            "nanocodex",
+            "run",
+            "durable turn",
+            "--local-durability-state-id",
+            "orphaned-state",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn hosted_connectors_have_a_focused_top_level_command() {
+        let cli = Cli::try_parse_from(["nanocodex", "connect", "github"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Connect(_))));
+
+        let login = Cli::try_parse_from(["nanocodex", "login", "--no-open"]).unwrap();
+        assert!(matches!(login.command, Some(Command::Login(_))));
+
+        let connect = Cli::try_parse_from(["nanocodex", "connect", "github", "--no-open"]).unwrap();
+        assert!(matches!(connect.command, Some(Command::Connect(_))));
+
+        let multiple = Cli::try_parse_from([
+            "nanocodex",
+            "connect",
+            "gmail",
+            "gdrive",
+            "github",
+            "--no-open",
+        ])
+        .unwrap();
+        assert!(matches!(multiple.command, Some(Command::Connect(_))));
+        assert!(Cli::try_parse_from(["nanocodex", "connect"]).is_err());
+
+        let chatgpt = Cli::try_parse_from(["nanocodex", "auth", "login", "--no-open"]).unwrap();
+        assert!(matches!(chatgpt.command, Some(Command::Auth(_))));
+
+        assert!(Cli::try_parse_from(["nanocodex", "login", "--github"]).is_err());
+    }
+
+    #[test]
+    fn vm_tools_are_opt_in_for_tui_and_one_shot_runs() {
+        let tui = Cli::try_parse_from(["nanocodex"]).unwrap();
+        assert!(!tui.vm.is_enabled());
+
+        let tui = Cli::try_parse_from([
+            "nanocodex",
+            "--vm",
+            "/tmp/rootfs",
+            "--vm-workspace",
+            "/workspace",
+        ])
+        .unwrap();
+        assert!(tui.vm.is_enabled());
+
+        let run = Cli::try_parse_from(["nanocodex", "run", "reply with ok", "--vm", "/tmp/rootfs"])
+            .unwrap();
+        let Some(Command::Run(run)) = run.command else {
+            panic!("run command was not parsed");
+        };
+        assert!(run.vm.is_enabled());
+    }
+
+    #[test]
+    fn browser_and_cookie_selection_follow_platform_defaults() {
+        let tui = Cli::try_parse_from(["nanocodex"]).unwrap();
+        assert!(tui.agent.browser_enabled());
+        assert!(tui.agent.uses_persistent_browser_profile());
+        assert!(!tui.agent.copies_all_browser_cookies());
+        #[cfg(target_os = "macos")]
+        assert!(!tui.agent.uses_brave_browser());
+        #[cfg(target_os = "macos")]
+        assert!(tui.agent.uses_interactive_browser_cookie_authorization());
+
+        let tui = Cli::try_parse_from(["nanocodex", "--browser"]).unwrap();
+        assert!(tui.agent.browser_enabled());
+        assert!(!tui.agent.uses_brave_browser());
+
+        let brave = Cli::try_parse_from(["nanocodex", "--browser=brave"]).unwrap();
+        assert!(brave.agent.browser_enabled());
+        assert!(brave.agent.uses_brave_browser());
+
+        let chromium = Cli::try_parse_from(["nanocodex", "--browser=chromium"]).unwrap();
+        assert!(chromium.agent.browser_enabled());
+        assert!(!chromium.agent.uses_brave_browser());
+
+        let interactive = Cli::try_parse_from(["nanocodex", "--cookie-auth=interactive"]).unwrap();
+        assert!(
+            interactive
+                .agent
+                .uses_interactive_browser_cookie_authorization()
+        );
+
+        let host_passkeys = Cli::try_parse_from(["nanocodex", "--passkeys=host"]).unwrap();
+        assert!(host_passkeys.agent.uses_host_browser_passkeys());
+
+        let temporary = Cli::try_parse_from(["nanocodex", "--browser-profile=temporary"]).unwrap();
+        assert!(!temporary.agent.uses_persistent_browser_profile());
+        assert!(temporary.agent.copies_all_browser_cookies());
+
+        assert!(Cli::try_parse_from(["nanocodex", "--cookies=none"]).is_err());
+        assert!(Cli::try_parse_from(["nanocodex", "--cookies=brave"]).is_err());
+
+        let run = Cli::try_parse_from(["nanocodex", "run", "inspect example.com"]).unwrap();
+        let Some(Command::Run(run)) = run.command else {
+            panic!("run command was not parsed");
+        };
+        assert!(run.agent.browser_enabled());
+
+        let disabled = Cli::try_parse_from(["nanocodex", "--browser=none"]).unwrap();
+        assert!(!disabled.agent.browser_enabled());
+        assert!(!disabled.agent.copies_all_browser_cookies());
+    }
+
+    #[test]
+    fn vm_tuning_requires_an_opted_in_rootfs() {
+        let error = Cli::try_parse_from(["nanocodex", "--vm-cpus", "4"])
+            .err()
+            .unwrap();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[cfg(feature = "tempo")]
+    #[test]
+    fn provider_selection_is_exclusive() {
+        let error = Cli::try_parse_from(["nanocodex", "--provider.openai", "--provider.tempo"])
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[cfg(not(feature = "tempo"))]
+    #[test]
+    fn tempo_provider_is_absent_from_direct_agent_builds() {
+        let error = Cli::try_parse_from(["nanocodex", "--provider.tempo"])
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn resume_accepts_a_thread_id_and_agent_configuration() {
+        let cli = Cli::try_parse_from([
+            "nanocodex",
+            "resume",
+            "019c0d31-c308-7d91-bff4-5dca82d15ac6",
+            "--provider.openai",
+            "--api-key",
+            "test-key",
+            "--prompt",
+            "continue",
+        ])
+        .unwrap();
+
+        let Some(Command::Resume(command)) = cli.command else {
+            panic!("resume command was not parsed");
+        };
+        assert_eq!(
+            command.thread_id.as_deref(),
+            Some("019c0d31-c308-7d91-bff4-5dca82d15ac6")
+        );
+        assert_eq!(command.prompt.as_deref(), Some("continue"));
+        assert!(!command.agent.uses_tempo());
+    }
+
+    #[test]
+    fn resume_without_a_thread_id_opens_discovery_path() {
+        let cli = Cli::try_parse_from(["nanocodex", "resume", "--provider.openai"])
+            .expect("resume should accept an omitted thread UUID");
+
+        let Some(Command::Resume(command)) = cli.command else {
+            panic!("resume command was not parsed");
+        };
+        assert!(command.thread_id.is_none());
+    }
+}

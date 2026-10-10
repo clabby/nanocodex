@@ -9,7 +9,7 @@ use nanocodex_claude::{
         Admission as ClaudeAdmission, ClaudeExecutionPolicy, ClaudeSteer, PolicyFuture, Step,
     },
 };
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 
 use crate::{
     Admission, BeginStep, DurableAgentExt, DurableSession, EncodedPayload, agent::agent_error,
@@ -142,6 +142,33 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
         })
     }
 
+    fn advance_encoded(&self, id: String, state: Box<RawValue>) -> PolicyFuture<'_, ()> {
+        Box::pin(async move {
+            let state = EncodedPayload::encode(&*state).map_err(agent_error)?;
+            self.owner.advance(id, state).await.map_err(agent_error)
+        })
+    }
+
+    fn begin_step_encoded(
+        &self,
+        id: String,
+        step_id: String,
+        kind: String,
+        input: Box<RawValue>,
+    ) -> PolicyFuture<'_, Step> {
+        Box::pin(async move {
+            match self
+                .owner
+                .begin_step(id, step_id, kind, &*input)
+                .await
+                .map_err(agent_error)?
+            {
+                BeginStep::Execute => Ok(Step::Execute),
+                BeginStep::Replay(value) => Ok(Step::Replay(value.decode().map_err(agent_error)?)),
+            }
+        })
+    }
+
     fn advance(&self, id: String, state: Value) -> PolicyFuture<'_, ()> {
         Box::pin(async move {
             self.owner
@@ -204,6 +231,18 @@ impl ClaudeExecutionPolicy for ClaudeExecution {
                 .cancel(id, Some(payload(&checkpoint)?))
                 .await
                 .map_err(agent_error)
+        })
+    }
+
+    fn cancel_unstarted(&self, id: String) -> PolicyFuture<'_, bool> {
+        Box::pin(async move {
+            // The state machine refuses a checkpoint-free cancellation once an
+            // attempt is running or recorded steps, continuation or steering.
+            match self.owner.cancel(id, None).await {
+                Ok(()) => Ok(true),
+                Err(crate::Error::CancellationCheckpointRequired { .. }) => Ok(false),
+                Err(error) => Err(agent_error(error)),
+            }
         })
     }
 

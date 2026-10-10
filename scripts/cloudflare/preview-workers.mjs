@@ -36,22 +36,50 @@ export function selectComponents(component, backend = 'production') {
   return [component];
 }
 
-export function providerClient({ account, token, request = globalThis.fetch }) {
+// Reads are idempotent: a timeout, network error, 429 or 5xx is retried
+// (3 attempts). Mutations are sent exactly once. A provider Retry-After
+// (seconds or HTTP date) replaces the 1s/2s backoff, bounded to 20s.
+const transientStatus = status => status === 429 || status >= 500;
+const maxRetryAfterMs = 20_000;
+export function retryAfterMs(value, now = Date.now()) {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const text = value.trim();
+  const ms = /^\d+$/.test(text) ? Number(text) * 1_000 : Date.parse(text) - now;
+  return Number.isFinite(ms) ? Math.min(Math.max(ms, 0), maxRetryAfterMs) : undefined;
+}
+const backoff = (attempt, providerDelayMs) => new Promise(done => setTimeout(done, providerDelayMs ?? 1_000 * 2 ** attempt));
+
+export function providerClient({ account, token, request = globalThis.fetch, retryDelay = backoff }) {
   if (!/^[a-f0-9]{32}$/.test(account ?? '') || !token) fail('Cloudflare account ID and API token are required');
   return async (path, { optional = false, method = 'GET', body: payload } = {}) => {
-    let status;
-    try {
-      const response = await request(`https://api.cloudflare.com/client/v4/accounts/${account}/${path}`, {
-        method, ...(payload ? { body: JSON.stringify(payload) } : {}), redirect: 'error', signal: AbortSignal.timeout(30_000),
-        headers: { Authorization: `Bearer ${token}`, 'Cache-Control': 'no-cache', ...(payload ? { 'Content-Type': 'application/merge-patch+json' } : {}) },
-      });
-      status = response.status;
-      if (optional && status === 404) return null;
-      if (!response.ok) throw new Error();
-      const body = await response.json();
-      if (body.success !== true || (body.result === undefined && method !== 'DELETE')) throw new Error();
-      return body.result;
-    } catch { fail(`Cloudflare preview metadata lookup failed (HTTP ${Number.isInteger(status) ? status : 'unavailable'}); no response body logged`); }
+    const attempts = method === 'GET' ? 3 : 1;
+    for (let attempt = 0; ; attempt += 1) {
+      let status;
+      let transient = false;
+      let providerDelayMs;
+      try {
+        const response = await request(`https://api.cloudflare.com/client/v4/accounts/${account}/${path}`, {
+          method, ...(payload ? { body: JSON.stringify(payload) } : {}), redirect: 'error', signal: AbortSignal.timeout(30_000),
+          headers: { Authorization: `Bearer ${token}`, 'Cache-Control': 'no-cache', ...(payload ? { 'Content-Type': 'application/merge-patch+json' } : {}) },
+        });
+        status = response.status;
+        if (optional && status === 404) return null;
+        if (!response.ok) {
+          transient = transientStatus(status);
+          providerDelayMs = retryAfterMs(response.headers?.get?.('retry-after') ?? undefined);
+          throw new Error();
+        }
+        const body = await response.json();
+        if (body.success !== true || (body.result === undefined && method !== 'DELETE')) throw new Error();
+        return body.result;
+      } catch {
+        if (status === undefined) transient = true;
+        if (!transient || attempt + 1 >= attempts) {
+          fail(`Cloudflare preview metadata lookup failed (HTTP ${Number.isInteger(status) ? status : 'unavailable'}); no response body logged`);
+        }
+      }
+      await retryDelay(attempt, providerDelayMs);
+    }
   };
 }
 
@@ -125,6 +153,13 @@ export function previewConfig(source, { revision, images = [], bridge, backend =
     // All stateful requests use the existing authenticated production API.
     // Only the branch's app rendering and assets run in this Preview.
     if (config.assets) config.assets.run_worker_first = true;
+    // The Preview owns no Durable Object namespaces: no migrations, owned DO bindings or containers.
+    // Wrangler uploads migrations from the top level even though Preview bindings come only from previews.
+    if (config.exports && Object.keys(config.exports).length) fail('Production-backed account Preview cannot declare Worker exports');
+    delete config.exports;
+    delete config.migrations;
+    delete config.containers;
+    delete config.durable_objects;
     config.previews = { vars: { ENVIRONMENT: 'production', NANOCODEX_PREVIEW_REVISION: revision },
       services: [{ binding: 'NANOCODEX_PREVIEW_PRODUCTION', service: components.account.worker }] };
     return config;
@@ -163,14 +198,45 @@ function boundaries(config) {
       .map(({ name, class_name, script_name }) => ({ binding: name, class: class_name, worker: script_name, target: 'production' })),
   };
 }
-function runWrangler(args, { cwd, env, secrets }) {
+// Fixed failure labels only. Raw Wrangler lines can contain binding values, so they are never emitted.
+const failureCategories = [
+  ['cloudflare-api-request', /A request to the Cloudflare API/i], ['authentication', /authenticate|authentication|authenticating|unauthori[sz]ed|forbidden/i],
+  ['migrations', /migration/i], ['durable-objects', /durable object/i], ['containers', /container/i], ['docker', /docker/i],
+  ['exports', /export/i], ['bindings', /binding/i], ['bundling', /build failed|could not resolve|esbuild/i],
+  ['configuration', /configuration|unexpected field|is not a valid/i], ['size-limit', /too large|exceeds|size limit/i],
+  ['network', /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed/i], ['node-version', /requires at least Node/i],
+];
+const ansi = new RegExp(String.raw`\u001b\[[0-9;]*[A-Za-z]`, 'g');
+// Streams stderr through a bounded window; memory stays constant regardless of output size.
+export function failureClassifier({ window = 512, maxCodes = 16 } = {}) {
+  let carry = '';
+  const codes = new Set(); const categories = new Set();
+  return {
+    push(chunk) {
+      const text = (carry + String(chunk)).replace(ansi, '');
+      for (const match of text.matchAll(/\[code: ([0-9]{1,9})\]/g)) if (codes.size < maxCodes) codes.add(Number(match[1]));
+      for (const [label, pattern] of failureCategories) if (pattern.test(text)) categories.add(label);
+      carry = text.slice(-window);
+    },
+    summary() {
+      return { codes: [...codes].sort((a, b) => a - b), categories: failureCategories.map(([label]) => label).filter(label => categories.has(label)) };
+    },
+  };
+}
+export function failureMessage(code, { codes, categories }) {
+  return `Wrangler Preview failed (exit ${code}); Cloudflare API codes: ${codes.length ? codes.join(', ') : 'none'}; categories: ${categories.length ? categories.join(', ') : 'unclassified'}; raw output withheld to protect binding values`;
+}
+export function runWrangler(args, { cwd, env, secrets, bin = resolve(dirname(require.resolve('wrangler/package.json')), 'bin/wrangler.js') }) {
   return new Promise((accept, reject) => {
-    const child = spawn(process.execPath, [resolve(dirname(require.resolve('wrangler/package.json')), 'bin/wrangler.js'), ...args], {
-      cwd, env, stdio: [secrets ? 'pipe' : 'ignore', 'ignore', 'ignore'],
+    const child = spawn(process.execPath, [bin, ...args], {
+      cwd, env, stdio: [secrets ? 'pipe' : 'ignore', 'ignore', 'pipe'],
     });
+    const classifier = failureClassifier();
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', chunk => classifier.push(chunk));
     if (secrets) { child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify(secrets)); }
     child.once('error', () => reject(new Error('Wrangler Preview process could not start')));
-    child.once('close', code => code === 0 ? accept() : reject(new Error(`Wrangler Preview failed (exit ${code}); inspect provider observability; raw output withheld to protect binding values`)));
+    child.once('close', code => code === 0 ? accept() : reject(new Error(failureMessage(code, classifier.summary()))));
   });
 }
 function checkedUrls(urls) {

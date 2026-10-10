@@ -68,16 +68,51 @@ jobs:
       - name: Install macOS init linker
         if: runner.os == 'macOS' && matrix.component == 'cli'
         run: brew install lld
+      # Only the CLI builds are on the release critical path. Cold voice builds
+      # (418s Linux, 256s macOS) still finish well before a warm CLI (~540s),
+      # so their ~1GB target archives only added churn to the repository's
+      # 10GB Actions cache. This trims ~2GB per run; it does not by itself keep
+      # daily nightly caches warm.
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        if: matrix.component == 'cli'
         with:
           key: nightly-${{ matrix.component }}-${{ matrix.target }}
-          # Voice helpers have their own Cargo target directories.
           workspaces: ${{ matrix.workspaces }}
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          # sccache still keeps progress from a failed run: it uploads each
+          # compiled object under its own content key as soon as it is built.
+          cache-on-failure: false
+      # rust-cache restores third-party dependencies but always rebuilds
+      # workspace crates. sccache reuses unchanged workspace libraries across
+      # runs; binaries and changed crates still compile from source.
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        if: matrix.component == 'cli'
+        with:
+          version: v0.16.0
+      - name: Reuse unchanged workspace crates
+        if: matrix.component == 'cli'
+        shell: bash
+        env:
+          # PR-artifact builds of a pull-request head dispatched from master
+          # only read master's cache; scheduled nightlies (and branch dispatches,
+          # whose cache scope is private to that branch) write.
+          CACHE_MODE: ${{ (inputs.pr == '' || github.ref != 'refs/heads/master') && 'READ_WRITE' || 'READ_ONLY' }}
+        run: |
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "SCCACHE_GHA_RW_MODE=$CACHE_MODE"
+            # A cache-service outage falls back to compiling locally.
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          } >> "$GITHUB_ENV"
       - name: Enforce ring-only Rustls provider
         if: matrix.component == 'cli'
         shell: bash
         run: ./scripts/check-rustls-provider.sh
+      - uses: ./.github/actions/docker-hub-mirror
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
       - name: Prepare embedded Linux Wayland helpers
         if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
         shell: bash
@@ -93,33 +128,53 @@ jobs:
           # libkrun's build script does not track installed Rust targets. Drop
           # cached init blobs that may have used its dynamic-link fallback.
           cargo clean --package krun-init-blob --profile nightly --target ${{ matrix.target }}
+          # Release-stage Hand identity: computed from the Hand package closure
+          # before compiling, verified against the Hand's Cargo dep-info after.
+          features=nanocodex-bin/tempo
+          payload=()
+          if [[ -n "${NANOCODEX_LINUX_SCREEN_BUNDLE:-}" ]]; then
+            # Distributable Linux Hands embed the helper payload named above.
+            features+=",nanocodex-hand-daemon/embedded-screen-helpers"
+            payload=(--payload "linux-screen-helpers=$NANOCODEX_LINUX_SCREEN_BUNDLE")
+          fi
+          NANOCODEX_HAND_IDENTITY="$(scripts/release/hand-source-identity.py compute \
+            --target ${{ matrix.target }} --profile nightly --features "$features" \
+            ${payload[@]+"${payload[@]}"} --report "$RUNNER_TEMP/hand-identity-inputs.json")"
+          export NANOCODEX_HAND_IDENTITY
+          echo "Hand source identity: $NANOCODEX_HAND_IDENTITY" >> "$GITHUB_STEP_SUMMARY"
           VERGEN_GIT_SHA="$BUILD_SHA" \
             cargo build --locked --profile nightly --timings \
-              --package nanocodex-bin --bin nanocodex --features tempo \
+              --package nanocodex-bin --package nanocodex-hand-daemon --features "$features" \
               --target ${{ matrix.target }}
-          VERGEN_GIT_SHA="$BUILD_SHA" \
-            cargo build --locked --profile nightly --timings \
-              --package nanocodex2-bin --bin nanocodex2 \
-              --target ${{ matrix.target }}
+          scripts/release/hand-source-identity.py verify \
+            --report "$RUNNER_TEMP/hand-identity-inputs.json" \
+            --dep-info "target/${{ matrix.target }}/nightly/nanocodex-hand.d"
       - name: Verify shipped Linux Hand screen payload
         if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.component == 'cli'
         shell: bash
         run: |
           python3 scripts/tests/linux-screen-helpers-bundle.py \
-            --binary "target/${{ matrix.target }}/nightly/nanocodex2" \
+            --binary "target/${{ matrix.target }}/nightly/nanocodex-hand" \
             "$NANOCODEX_LINUX_SCREEN_BUNDLE"
       - name: Verify embedded VM init
         if: matrix.component == 'cli'
         shell: bash
         run: python3 scripts/check-vm-init.py "target/${{ matrix.target }}/nightly/build"
-      - name: Sign macOS VM hand host
+      - name: Sign the macOS Hand and Nanocodex.app
         if: runner.os == 'macOS' && matrix.component == 'cli'
         shell: bash
+        env:
+          MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_DEVELOPER_ID_TEAM_ID: ${{ secrets.MACOS_DEVELOPER_ID_TEAM_ID }}
         run: |
-          codesign --force --sign - \
-            --entitlements nanocodex-vm.entitlements \
-            "target/${{ matrix.target }}/nightly/nanocodex2"
-          codesign --verify --strict "target/${{ matrix.target }}/nightly/nanocodex2"
+          # Only the Hand starts libkrun VMM children and holds macOS privacy
+          # grants; the CLI keeps the default linker signature.
+          version=$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -er '.packages[] | select(.name == "nanocodex-bin") | .version')
+          scripts/release/macos-sign-hand.sh \
+            "target/${{ matrix.target }}/nightly/nanocodex-hand" "$version" signed-hand
+          echo "macOS Hand signature: $(cat signed-hand/SIGNING)" >> "$GITHUB_STEP_SUMMARY"
       - uses: ./.github/actions/voice-release
         if: matrix.component == 'voice'
         with:
@@ -134,10 +189,19 @@ jobs:
           mkdir -p dist
           case "$COMPONENT" in
             cli)
-              for binary in nanocodex nanocodex2; do
-                "target/$TARGET/nightly/$binary" --help >/dev/null
-                cp "target/$TARGET/nightly/$binary" "dist/$binary-$TARGET"
-              done
+              # nanocodex-* is the CLI; nanocodex2-* keeps the companion name for the Hand.
+              "target/$TARGET/nightly/nanocodex" --help >/dev/null
+              "target/$TARGET/nightly/nanocodex-hand" __device-hand --service-protocol >/dev/null
+              cp "target/$TARGET/nightly/nanocodex" "dist/nanocodex-$TARGET"
+              if [[ -d signed-hand ]]; then
+                cp signed-hand/nanocodex2 "dist/nanocodex2-$TARGET"
+                cp signed-hand/nanocodex-app-aarch64-apple-darwin.tar.gz dist/
+              else
+                cp "target/$TARGET/nightly/nanocodex-hand" "dist/nanocodex2-$TARGET"
+              fi
+              signing=unsigned
+              if [[ -f signed-hand/SIGNING ]]; then signing="$(cat signed-hand/SIGNING)"; fi
+              scripts/release/hand-identity.sh "target/$TARGET/nightly/nanocodex" "$TARGET" "$signing" dist
               ;;
             voice)
               # The composite action verifies initialization and relocation.
@@ -151,6 +215,24 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
+      # The shipped updater installs this exact pair (and, from minimal real
+      # source checkouts, rebuilt pairs) under an isolated synthetic account.
+      - name: Exercise the public macOS updater journeys with the built pair
+        if: runner.os == 'macOS' && matrix.component == 'cli'
+        shell: bash
+        run: |
+          node bin/nanocodex/tests/update_local_e2e.mjs \
+            "target/${{ matrix.target }}/nightly/nanocodex" \
+            "target/${{ matrix.target }}/nightly/nanocodex-hand" \
+            "${{ runner.temp }}/update-local-e2e" --source
+      - name: Retain updater journey evidence
+        if: always() && runner.os == 'macOS' && matrix.component == 'cli'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-update-journeys-${{ matrix.target }}
+          path: ${{ runner.temp }}/update-local-e2e
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Retain Cargo build timings
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -160,6 +242,12 @@ jobs:
             target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report compiler cache reuse
+        if: always() && matrix.component == 'cli' && env.RUSTC_WRAPPER == 'sccache'
+        shell: bash
+        run: |
+          sccache --show-stats | tee sccache-stats.txt
+          { echo '### sccache (${{ matrix.target }})'; grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable)' sccache-stats.txt | grep -v ' by ' | sed 's/^/    /'; } >> "$GITHUB_STEP_SUMMARY"
 
   bundle:
     name: bundle ${{ matrix.target }}
@@ -203,9 +291,14 @@ jobs:
             fi
           done
           test -s "nanocodex-voice-$TARGET.tar.gz"
+          app=()
+          if [[ "$TARGET" == aarch64-apple-darwin ]]; then
+            test -s nanocodex-app-aarch64-apple-darwin.tar.gz
+            app=(nanocodex-app-aarch64-apple-darwin.tar.gz)
+          fi
           if [[ -n "$PR_NUMBER" ]]; then
             sha256sum "nanocodex-$TARGET" "nanocodex2-$TARGET" \
-              "nanocodex-voice-$TARGET.tar.gz" \
+              "nanocodex-voice-$TARGET.tar.gz" "${app[@]}" \
               > "nanocodex-$TARGET.sha256"
             printf '{"repository":"%s","pr":%s,"sha":"%s","artifact":"%s","run_id":%s}\n' \
               "$GITHUB_REPOSITORY" "$PR_NUMBER" "$BUILD_SHA" "nanocodex-$TARGET" \
@@ -228,6 +321,11 @@ jobs:
     env:
       WINDOWS_SIGNING_CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
       WINDOWS_SIGNING_CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+      # MSVC stamps the link time into every PE image. The workspace proc-macro
+      # DLL is rebuilt each run, so its bytes, and therefore the sccache key of
+      # every crate using it (nanocodex-oai-tools: 66-289s), changed on every
+      # run. /Brepro makes linked images reproducible.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -Clink-arg=/Brepro
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -246,22 +344,44 @@ jobs:
           key: nightly-windows-hand
           workspaces: |
             . -> target
-          cache-on-failure: true
+          # A failed job (e.g. before compiling) must not store a near-empty target
+          # under the exact key: rust-cache then restores it as "full match" and
+          # skips saving ("Cache up-to-date"), keeping that key cold indefinitely.
+          # sccache still keeps progress from a failed run: it uploads each
+          # compiled object under its own content key as soon as it is built.
+          cache-on-failure: false
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba
+        with:
+          version: v0.16.0
+      - name: Reuse unchanged workspace crates
+        shell: pwsh
+        env:
+          # Same write policy as the Linux and macOS CLI builds.
+          CACHE_MODE: ${{ (inputs.pr == '' || github.ref != 'refs/heads/master') && 'READ_WRITE' || 'READ_ONLY' }}
+        run: |
+          @(
+            "RUSTC_WRAPPER=sccache",
+            "SCCACHE_GHA_ENABLED=true",
+            "SCCACHE_GHA_RW_MODE=$env:CACHE_MODE",
+            "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build Windows Hand payload
         shell: pwsh
         env:
           TAG_NAME: ${{ inputs.pr && format('pr-{0}', inputs.pr) || 'nightly' }}
+          # Both executables report the exact commit they were built from.
+          VERGEN_GIT_SHA: ${{ env.BUILD_SHA }}
         run: |
-          cargo build --locked --profile nightly --timings --package nanocodex-bin --bin nanocodex --features tempo
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked --profile nightly --timings --package nanocodex2-bin --bin nanocodex2
+          # Target rustflags (/Brepro) are silently ignored when either is set.
+          if ($env:RUSTFLAGS -or $env:CARGO_ENCODED_RUSTFLAGS) { throw "RUSTFLAGS would drop /Brepro" }
+          cargo build --locked --profile nightly --timings --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign payload when Authenticode is configured
         shell: pwsh
         run: >-
           ./windows/hand/sign.ps1 -Path @(
             "./target/nightly/nanocodex.exe",
-            "./target/nightly/nanocodex2.exe"
+            "./target/nightly/nanocodex-hand.exe"
           )
       - name: Build and sign one-click installer
         shell: pwsh
@@ -269,7 +389,7 @@ jobs:
           $displayVersion = "nightly-$($env:BUILD_SHA.Substring(0, 10))"
           ./windows/hand/build.ps1 `
             -Nanocodex ./target/nightly/nanocodex.exe `
-            -Nanocodex2 ./target/nightly/nanocodex2.exe `
+            -Nanocodex2 ./target/nightly/nanocodex-hand.exe `
             -Version $displayVersion `
             -NumericVersion 0.0.0.0
           ./windows/hand/sign.ps1 -Path ./dist/windows-hand/nanocodex-hand-setup-x86_64.exe
@@ -279,7 +399,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr }}
         run: |
           Copy-Item target/nightly/nanocodex.exe dist/windows-hand/nanocodex-x86_64-pc-windows-msvc.exe
-          Copy-Item target/nightly/nanocodex2.exe dist/windows-hand/nanocodex2-x86_64-pc-windows-msvc.exe
+          Copy-Item target/nightly/nanocodex-hand.exe dist/windows-hand/nanocodex2-x86_64-pc-windows-msvc.exe
           if (-not [string]::IsNullOrWhiteSpace($env:PR_NUMBER)) {
             [pscustomobject]@{
               repository = $env:GITHUB_REPOSITORY
@@ -304,6 +424,14 @@ jobs:
             target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+      - name: Report compiler cache reuse
+        if: always() && env.RUSTC_WRAPPER == 'sccache'
+        shell: bash
+        run: |
+          sccache --show-stats | tee sccache-stats.txt
+          { echo '### sccache (x86_64-pc-windows-msvc)'; grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable)' sccache-stats.txt | grep -v ' by ' | sed 's/^/    /'; } >> "$GITHUB_STEP_SUMMARY"
+          # /Brepro check: identical sources must link an identical proc-macro DLL.
+          { echo '### Workspace proc-macro DLLs'; sha256sum target/nightly/deps/nanocodex_oai_tools_macros-*.dll | sed 's/^/    /'; } >> "$GITHUB_STEP_SUMMARY" || true
 
   build-vm-guest:
     if: >-
@@ -323,9 +451,8 @@ jobs:
         with:
           toolchain: stable
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
-        with:
-          cache-on-failure: true
+      # No target cache: the cold guest build takes ~100s, far off the
+      # critical path, while its 849MB archive evicted critical-path caches.
       - run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - name: Build nightly VM guest
         shell: bash
@@ -368,32 +495,86 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
 
-  publish:
-    if: >-
-      github.repository == 'gakonst/nanocodex' &&
-      (github.event_name != 'workflow_dispatch' || inputs.pr == '')
-    name: publish immutable and rolling nightlies
-    needs: [bundle, build-windows-hand, build-vm-guest]
+  hand-reuse-check:
+    if: github.repository == 'gakonst/nanocodex'
+    name: check Hand reuse (read-only)
+    needs: [bundle, build-windows-hand]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Test Hand reuse against a fake release store
+        shell: bash
+        run: scripts/release/test-reuse-unchanged-hand.sh
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: nanocodex-*
           path: dist
           merge-multiple: true
+      - name: Compare this build's Hand with the published nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Read-only: reports what publish would reuse, uploads nothing.
+          shopt -s nullglob
+          cat dist/nanocodex2-*.identity
+          previous=""
+          if pointer=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" --jq .object.sha 2>/dev/null); then
+            previous="nightly-$pointer"
+          fi
+          scripts/release/reuse-unchanged-hand.sh dist "$previous"
+
+  publish:
+    if: >-
+      github.repository == 'gakonst/nanocodex' &&
+      (github.event_name != 'workflow_dispatch' || inputs.pr == '')
+    name: publish immutable and rolling nightlies
+    # Publication waits for the read-only Hand reuse test and comparison, so a
+    # broken reuse path fails before any release is created or modified.
+    needs: [bundle, build-windows-hand, build-vm-guest, hand-reuse-check]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: nanocodex-*
+          path: dist
+          merge-multiple: true
+      - name: Republish an unchanged Hand
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Compare with the nightly the rolling pointer currently names.
+          previous=""
+          if pointer=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" --jq .object.sha 2>/dev/null) \
+            && [[ "$pointer" != "$GITHUB_SHA" ]]; then
+            previous="nightly-$pointer"
+          fi
+          scripts/release/reuse-unchanged-hand.sh dist "$previous"
       - name: Generate checksums
         shell: bash
         run: |
           cd dist
-          sha256sum nanocodex-*.gz nanocodex2-*.gz nanocodex-*.exe nanocodex2-*.exe > SHA256SUMS
+          # Hand reuse keys exist only for CLIs that report a Hand Identity.
+          shopt -s nullglob
+          sha256sum nanocodex-*.gz nanocodex2-*.gz nanocodex-*.exe nanocodex2-*.exe nanocodex2-*.identity > SHA256SUMS
       - name: Publish immutable and rolling releases
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          shopt -s nullglob
           immutable_tag="nightly-${GITHUB_SHA}"
           short_sha="${GITHUB_SHA:0:10}"
           release_name="Nanocodex Nightly ($(date -u +%Y-%m-%d), ${short_sha})"
@@ -403,16 +584,38 @@ jobs:
             printf "Install it with \`nanocodex update --nightly\`.\n"
           } > "$notes_file"
 
-          if gh release view "$immutable_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
-              --title "$release_name" --notes-file "$notes_file" --prerelease
+          # Assemble the immutable release as a draft and publish it only once
+          # every asset is attached. A published nightly is never modified: a
+          # rerun of the same commit reuses its exact assets for the rolling
+          # pointer instead of replacing them with a different build.
+          immutable_draft=
+          if immutable_draft=$(gh release view "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft 2>/dev/null) && [[ "$immutable_draft" != true ]]; then
+            echo "::notice::$immutable_tag is already published; reusing its assets"
+            rm -rf dist
+            mkdir dist
+            gh release download "$immutable_tag" --repo "$GITHUB_REPOSITORY" --dir dist
+            (cd dist && sha256sum --check --strict SHA256SUMS)
+            for compressed in dist/nanocodex-*.gz dist/nanocodex2-*.gz; do
+              case "$compressed" in
+                *.tar.gz) ;;
+                *) gzip -dc "$compressed" > "${compressed%.gz}" ;;
+              esac
+            done
           else
-            gh release create "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --title "$release_name" \
-              --notes-file "$notes_file" --prerelease
+            if [[ -z "$immutable_draft" ]]; then
+              gh release create "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
+                --draft --target "$GITHUB_SHA" --title "$release_name" \
+                --notes-file "$notes_file" --prerelease
+            else
+              gh release edit "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
+                --title "$release_name" --notes-file "$notes_file" --prerelease
+            fi
+            gh release upload "$immutable_tag" dist/*.gz dist/*.exe dist/*.identity dist/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$immutable_tag" --repo "$GITHUB_REPOSITORY" \
+              --draft=false --prerelease
           fi
-          gh release upload "$immutable_tag" dist/*.gz dist/*.exe dist/SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --clobber
 
           # Rolling releases retain raw binaries for updaters shipped before
           # gzip support. Their checksum manifest covers both representations.
@@ -439,6 +642,8 @@ jobs:
                 nanocodex2-x86_64-unknown-linux-gnu|nanocodex2-x86_64-unknown-linux-gnu.gz|\
                 nanocodex-x86_64-pc-windows-msvc.exe|nanocodex2-x86_64-pc-windows-msvc.exe|nanocodex-hand-setup-x86_64.exe|\
                 nanocodex-voice-aarch64-apple-darwin.tar.gz|nanocodex-voice-x86_64-unknown-linux-gnu.tar.gz|\
+                nanocodex-app-aarch64-apple-darwin.tar.gz|\
+                nanocodex2-aarch64-apple-darwin.identity|nanocodex2-x86_64-unknown-linux-gnu.identity|\
                 nanocodex-vm-guest-x86_64-unknown-linux-musl|nanocodex-vm-guest-x86_64-unknown-linux-musl.gz)
                   ;;
                 *)

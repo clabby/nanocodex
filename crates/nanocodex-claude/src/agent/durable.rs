@@ -42,7 +42,10 @@ impl Snapshot {
 #[serde(deny_unknown_fields)]
 pub(super) struct Cursor {
     // Process-local Code Mode admissions cannot survive a recovered boundary.
-    // Settled receipts still replay; unreceipted calls at this index fail closed.
+    // Settled receipts still replay; an unreceipted exec from a replayed
+    // response at this index fails closed because its guest source may already
+    // have dispatched effects. wait never evaluates source or admits effects:
+    // it observes a live cell or reconciles durable observation evidence.
     #[serde(skip)]
     pub(super) recovered_code_index: Option<u32>,
     #[serde(default)]
@@ -117,6 +120,25 @@ impl Effect<'_> {
     pub(super) async fn begin(&self, kind: &str, input: Value) -> Result<Step> {
         self.policy
             .begin_step(
+                self.operation.to_owned(),
+                self.step.clone(),
+                if kind == "model" && self.model_call {
+                    "model_call"
+                } else {
+                    kind
+                }
+                .to_owned(),
+                input,
+            )
+            .await
+    }
+    pub(super) async fn begin_encoded(
+        &self,
+        kind: &str,
+        input: Box<serde_json::value::RawValue>,
+    ) -> Result<Step> {
+        self.policy
+            .begin_step_encoded(
                 self.operation.to_owned(),
                 self.step.clone(),
                 if kind == "model" && self.model_call {
@@ -258,7 +280,9 @@ impl State {
             {
                 return Err(recovery_error("invalid Claude execution continuation"));
             }
-            self.restore_snapshot(conversation, cursor.snapshot.clone())
+            // The live conversation now owns the restored boundary; the cursor
+            // copy is only rebuilt while it is being persisted.
+            self.restore_snapshot(conversation, std::mem::take(&mut cursor.snapshot))
                 .await
                 .map_err(recovery_error)?;
             return Ok(cursor);
@@ -351,16 +375,13 @@ impl State {
         }
         // Only a durable operation persists or replays its cursor. Without one,
         // another full conversation copy per round would only consume memory.
-        if self.persists(cursor) {
-            cursor.snapshot = self.snapshot(conversation).await?;
-        }
         if let (Some(policy), Some(operation)) = (&self.policy, &cursor.operation) {
-            policy
-                .advance(
-                    operation.clone(),
-                    serde_json::to_value(&*cursor).map_err(provider_error)?,
-                )
-                .await?;
+            // Encode straight to JSON text, then release the snapshot copy: the
+            // live conversation is authoritative between persisted boundaries.
+            cursor.snapshot = self.snapshot(conversation).await?;
+            let encoded = serde_json::value::to_raw_value(&*cursor).map_err(provider_error);
+            cursor.snapshot = Snapshot::default();
+            policy.advance_encoded(operation.clone(), encoded?).await?;
         }
         Ok(())
     }
@@ -448,10 +469,7 @@ impl State {
         };
         let result = if cancel.flag.load(Ordering::SeqCst) {
             unknown()
-        } else if self.code_only
-            && cursor.recovered_code_index == Some(index)
-            && matches!(name, "exec" | "wait")
-        {
+        } else if self.code_only && cursor.recovered_code_index == Some(index) && name == "exec" {
             ContentBlock::tool_result_content(id, ToolResultContent::Text(
                 "Code Mode admission was lost during recovery; prior effects may have outcome unknown. No code was executed in this attempt. Reconcile those effects before using a fresh cell from a new model request.".into()
             ), true)
