@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 mod durable;
 mod images;
+mod shared;
 use crate::execution::{Admission, ClaudeExecutionPolicy, Step};
 pub use durable::rewind_checkpoint;
 use durable::{Cursor, Effect, Snapshot};
@@ -235,6 +236,25 @@ impl ClaudeTools {
             Arc::new(move |input, context| Box::pin(function(input, context))),
         ));
         self
+    }
+    /// Registers a tool written against the shared nanocodex [`Tool`] contract,
+    /// the same implementation a Responses agent installs in its `Tools`
+    /// registry.
+    ///
+    /// The tool receives this call's session, turn, call and host-context
+    /// identities, but no Responses history. Its output schema is appended to
+    /// the description because Claude definitions have no field for it, and
+    /// multimodal output reaches Claude as serialized JSON text.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for freeform, namespace and other non-function tools,
+    /// which Claude cannot call.
+    ///
+    /// [`Tool`]: nanocodex_oai_tools::Tool
+    pub fn shared_tool<T: nanocodex_oai_tools::Tool>(mut self, tool: T) -> Result<Self> {
+        self.tools.push(shared::bridge(tool)?);
+        Ok(self)
     }
 }
 type DynamicToolsFactory = Arc<dyn Fn() -> ClaudeTools + Send + Sync>;

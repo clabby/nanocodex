@@ -146,6 +146,12 @@ bridge to those authorized lifecycle capabilities. Mixed-family children start
 clean conversations. `fork` remains native to the owning backend and does not
 translate history into another family.
 
+One implementation of the shared nanocodex `Tool` contract serves both
+families: install it in Codex's `Tools` and pass the same value to
+`ClaudeTools::shared_tool`. Claude receives a function definition with the
+tool's output schema appended to its description, and the tool receives the
+invocation's identities and host context but no Responses history.
+
 The registry can unload idle children at its residency limit. Rehydration sends
 the family's in-memory `ChildSnapshot` to the current construction recipe;
 the recipe reattaches authentication, host context and freshly authorized tools,
