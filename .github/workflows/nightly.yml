@@ -365,9 +365,6 @@ jobs:
             "SCCACHE_GHA_RW_MODE=$env:CACHE_MODE",
             "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
           ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Prefer the restored crate registry
-        shell: bash
-        run: bash scripts/release/cargo-offline-probe.sh x86_64-pc-windows-msvc
       - name: Build Windows Hand payload
         shell: pwsh
         env:
@@ -377,8 +374,7 @@ jobs:
         run: |
           # Target rustflags (/Brepro) are silently ignored when either is set.
           if ($env:RUSTFLAGS -or $env:CARGO_ENCODED_RUSTFLAGS) { throw "RUSTFLAGS would drop /Brepro" }
-          $offline = @(if ($env:NANOCODEX_CARGO_OFFLINE -eq 'true') { '--offline' })
-          cargo build --locked @offline --profile nightly --timings --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
+          cargo build --locked --profile nightly --timings --package nanocodex-bin --package nanocodex-hand-daemon --features nanocodex-bin/tempo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Sign payload when Authenticode is configured
         shell: pwsh
