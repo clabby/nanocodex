@@ -133,7 +133,8 @@ jobs:
         if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
         with:
           node-version: 24
-          cache: pnpm
+      - uses: ./.github/actions/js-dependency-cache
+        if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
       - run: pnpm install --frozen-lockfile
         if: needs.changes.outputs.tests == 'true' || runner.os == 'Linux'
       - name: Check CUA bridge and native host lifecycle
@@ -298,7 +299,8 @@ jobs:
         if: needs.changes.outputs.tests == 'true'
         with:
           node-version: 24
-          cache: pnpm
+      - uses: ./.github/actions/js-dependency-cache
+        if: needs.changes.outputs.tests == 'true'
       - run: pnpm install --frozen-lockfile
         # Re-enable dependency setup together with the lifecycle tests.
         if: needs.changes.outputs.tests == 'true'
@@ -598,9 +600,9 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          # Reused WASM outputs skip install, so no pnpm store exists to save.
-          cache: ${{ steps.wasm.outputs.hit != 'true' && 'pnpm' || '' }}
-          cache-dependency-path: pnpm-lock.yaml
+      # Reused WASM outputs skip install, so they need no pnpm store.
+      - uses: ./.github/actions/js-dependency-cache
+        if: steps.wasm.outputs.hit != 'true'
       - name: Check CI orchestration and timing reports
         # Temporarily disabled: CI tests are paused.
         if: needs.changes.outputs.tests == 'true'
@@ -686,17 +688,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+      - uses: ./.github/actions/js-dependency-cache
+        with:
+          npm-examples: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nanocodex-wasm
           path: js/nanocodex
       - uses: ./.github/actions/turbo-cache
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ~/.npm
-          key: npm-examples-${{ runner.os }}-${{ hashFiles('examples/privy/package-lock.json', 'examples/better-auth/package-lock.json') }}
       - name: Install JS consumer dependencies
         run: |
           pnpm install --frozen-lockfile
@@ -948,8 +947,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+      - uses: ./.github/actions/js-dependency-cache
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nanocodex-wasm
