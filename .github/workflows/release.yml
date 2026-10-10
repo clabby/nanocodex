@@ -381,7 +381,6 @@ jobs:
           pnpm --filter nanocodex pack --pack-destination "$PWD/dist/npm"
           pnpm --filter nanocodex-vite pack --pack-destination "$PWD/dist/npm"
       - name: Test publishable packages
-        if: ${{ false }}
         run: |
           pnpm --filter nanocodex-tools test
           pnpm --filter nanocodex test
