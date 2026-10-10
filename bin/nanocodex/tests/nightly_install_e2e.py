@@ -201,13 +201,13 @@ def wait_for_api_quota(minimum=6, limit_s=3900):
             return
         if core["remaining"] >= minimum or time.time() > deadline:
             return
-        pause = max(5, min(core["reset"] - time.time() + 5, deadline - time.time()))
+        pause = max(5, min(60, core["reset"] - time.time() + 5, deadline - time.time()))
         log(f"  GitHub API quota {core['remaining']}/{core['limit']}; waiting {pause:.0f}s for reset {core['reset']}")
         time.sleep(pause)
 
 
 def run(name, argv, env, cwd=None, timeout=900, input=None):
-    if "update" in argv or any(str(a).endswith("public-install.sh") for a in argv):
+    if ("update" in argv and "--nightly" in argv) or any(str(a).endswith("public-install.sh") for a in argv):
         wait_for_api_quota()
     counter[0] += 1
     stem = ART / "cmd" / f"{counter[0]:03d}-{cur_step[0]}-{name}"
@@ -432,7 +432,7 @@ def verify_installed(p, snap, sha, label):
     return key
 
 
-def check_entrypoints(p, probes, sha, label, unified_expected=True):
+def check_entrypoints(p, probes, sha, label, unified_expected=True, allow_hand_revision=False):
     for name in CLI_ALIASES:
         pr = probes.get(name, {})
         check(f"{label}: bin/{name} prints exactly one Commit SHA {sha[:12]}", pr.get("present") and pr.get("exit") == 0 and pr.get("commit") == [sha],
@@ -447,9 +447,12 @@ def check_entrypoints(p, probes, sha, label, unified_expected=True):
         pr = probes.get(name, {})
         # The nightly Hand records no commit (its identity is the reuse key), so the
         # alias must run the Hand and report the active version's Hand Identity.
-        check(f"{label}: bin/{name} links the selected Hand, runs nanocodex-hand and reports its Hand Identity",
+        provenance = bool(ident) and pr.get("identity") == [ident]
+        if allow_hand_revision and not ident:
+            provenance = pr.get("commit") == [sha] and not pr.get("identity")
+        check(f"{label}: bin/{name} links the selected Hand and reports the expected identity or candidate revision",
               pr.get("present") and pr.get("exit") == 0 and pr.get("link") == "../current/nanocodex2"
-              and (pr.get("first_line") or [""])[0].startswith("nanocodex-hand Version:") and ident and pr.get("identity") == [ident],
+              and (pr.get("first_line") or [""])[0].startswith("nanocodex-hand Version:") and provenance,
               observed=pr, active_identity=ident)
 
 
@@ -869,7 +872,7 @@ def modes(p, label, sha):
           backend=(reg or {}).get("backend"), session=(reg or {}).get("active_session_id"), transcript=tui_t.name, exit=code)
     # Managed TUI with an empty HOME: either a managed session or an honest login boundary.
     man_t = ART / f"{label.replace(' ', '-')}-managed-tui.txt"
-    boundary = re.compile(r"(log ?in|sign ?in|not (signed|logged) in|authenticat)", re.I)
+    boundary = re.compile(r"(log ?in|sign ?in|not (signed|logged) in|authentication|authenticate|authenticating)", re.I)
     first = {}
 
     def managed_until(text, child, write):
@@ -1046,6 +1049,7 @@ def step_p1():
           file_sha(vdir / "nanocodex") == file_sha(CAND[0]) and file_sha((vdir / "nanocodex2").resolve()) == file_sha(CAND[1]))
     links = {n: os.readlink(p["store"] / "bin" / n) if (p["store"] / "bin" / n).is_symlink() else None for n in CLI_ALIASES + HAND_ALIASES}
     state.setdefault("candidate", {})["links_after_old_activation"] = links; save()
+    require("candidate starts behind the legacy Hand link", links.get("nanocodex2") == "../current/nanocodex2", links=links)
     log(f"  links after OLD-updater activation, before any candidate run: {json.dumps(links)}")
     import fcntl as _fcntl
 
@@ -1066,14 +1070,14 @@ def step_p1():
     before_foreign = sorted(str(x.relative_to(foreign)) for x in foreign.rglob("*"))
     managed_status(stale, dict(base_env(p), NANOCODEX_DIR=str(foreign)), "candidate stale bin/nanocodex2 with a foreign NANOCODEX_DIR")
     after_foreign = sorted(str(x.relative_to(foreign)) for x in foreign.rglob("*"))
-    check("foreign NANOCODEX_DIR: no entrypoint written there", not [x for x in after_foreign if x.startswith("bin")] ,
+    check("foreign NANOCODEX_DIR: no entrypoint written there", not [x for x in after_foreign if x.startswith("bin")],
           before=before_foreign, after=after_foreign)
     state["candidate"]["links_after_foreign"] = current_links(); save()
     # 3. The ordinary next run through the stale link repairs every alias.
     managed_status(stale, base_env(p), "candidate stale bin/nanocodex2 after the lock is released")
     state["candidate"]["links_after_repair"] = current_links(); save()
     probes = probe_versions(p, base_env(p))
-    check_entrypoints(p, probes, sha, "candidate after OLD-updater activation and its first run")
+    check_entrypoints(p, probes, sha, "candidate after OLD-updater activation and its first run", allow_hand_revision=True)
     state["steps"]["p1"] = {"snapshot": snapshot(p), "key": key, "sha": sha, "probes": probes}; save()
 
 
@@ -1090,7 +1094,7 @@ def step_p2():
     check("repeat --path keeps the same key", active_key(after) == active_key(before), current=after["current"])
     unchanged_files(before, after, versions_of(before), "candidate repeat --path")
     unchanged_files(before, after, [], "candidate repeat --path: manager copies (versions/nightly, updater/)", ("versions/nightly/", "updater/"))
-    check_entrypoints(p, probe_versions(p, base_env(p)), state["steps"]["p1"]["sha"], "candidate after repeat --path")
+    check_entrypoints(p, probe_versions(p, base_env(p)), state["steps"]["p1"]["sha"], "candidate after repeat --path", allow_hand_revision=True)
 
 
 def step_c1():

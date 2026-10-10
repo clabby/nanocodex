@@ -155,8 +155,12 @@ in `summary.json`. After a legacy updater activates a unified version, `bin/nano
 the CLI and every NEW alias must exist (managed commands through the old link must
 keep forwarding); a no-op update must not rewrite the manager copies.
 
-With `--candidate CLI HAND VOICE_ARCHIVE` (an unpublished pair built with
-`VERGEN_GIT_SHA` and `NANOCODEX_HAND_IDENTITY`), step `p1` installs the published OLD
+With `--candidate CLI HAND VOICE_ARCHIVE`, build both candidate binaries with
+`VERGEN_GIT_SHA` set to their actual source commit and leave
+`NANOCODEX_HAND_IDENTITY` unset. The historical updater requires the Hand's exact
+Commit SHA; it predates identity-only Hand versions. Only candidate checks accept
+this revision fallback; every published nightly must report its Hand Identity.
+Step `p1` installs the published OLD
 nightly in prefix P, lets OLD's own `update --path ... --hand-binary ... --voice-archive`
 activate the candidate (the legacy activation that leaves `bin/nanocodex2` on the Hand),
 runs `nanocodex2 status` through the stale link (it must forward to the CLI): first
